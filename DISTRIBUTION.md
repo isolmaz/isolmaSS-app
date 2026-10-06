@@ -43,6 +43,6 @@ Local Worker tests, Rust tests and a signed package are **not** proof that Cloud
 powershell -ExecutionPolicy Bypass -File scripts\check.ps1
 ```
 
-The script runs `cargo fmt --check`, Clippy with `-D warnings`, the tests and `node --check cloudflare/worker.mjs`. There is no hosted CI: GitHub Actions is disabled for the source repository and every release is verified on the publisher's machine.
+The script runs `cargo fmt --check`, Clippy with `-D warnings`, the tests and `node --check cloudflare/worker.mjs`. GitHub Actions runs the same checks on pushes and pull requests, but it does not build, sign or publish anything: every release is built and verified on the publisher's machine.
 
 The full interactive `--smoke-test` requires a disposable desktop because it captures the active screen and replaces the clipboard; it compiles a temporary installer and removes it afterward. `--verify-update PATH` is safe for a local installer and matching `.exe.sig` sidecar: it checks file version and the pinned signature without executing the installer. Test updater rollback with an isolated Windows profile or VM rather than overwriting a currently running user installation. The release and its source tag share one version in this repository; the release notes record the artifact hashes.

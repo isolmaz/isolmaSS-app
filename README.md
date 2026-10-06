@@ -1,5 +1,7 @@
 # isolmaSS
 
+[![CI](https://github.com/isolmaz/isolmaSS-app/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/isolmaz/isolmaSS-app/actions/workflows/ci.yml)
+
 **Screenshot, mark up, share a link — from your own Cloudflare account.**
 
 A small, free Windows screenshot editor. Press PrintScreen, draw on the capture, press Ctrl+U, and about a second later a share link is on your clipboard. The image goes only to a private Worker in **your** Cloudflare account, never to someone else's server.
@@ -81,7 +83,7 @@ powershell -ExecutionPolicy Bypass -File scripts\check.ps1   # fmt, clippy, test
 cmd /c package.bat
 ```
 
-All checks run locally; the repository has no hosted CI.
+GitHub Actions (`.github/workflows/ci.yml`) runs the same fmt, Clippy, test and Worker syntax checks on every push to `main` and every pull request. Packaging, signing and releases stay local.
 
 ```text
 src/          Rust app: capture, overlay editor, toolbar, annotations, settings, tray, updater, upload

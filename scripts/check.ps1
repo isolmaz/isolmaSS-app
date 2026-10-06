@@ -1,4 +1,4 @@
-# Local checks for every change. The project has no hosted CI; run this before each commit.
+# Local checks for every change; run this before each commit. .github/workflows/ci.yml runs the same commands.
 # usage: powershell -ExecutionPolicy Bypass -File scripts\check.ps1
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path -Parent $PSScriptRoot)
