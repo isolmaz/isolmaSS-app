@@ -376,7 +376,7 @@ impl CaptureBuffer {
         if width <= 0 || height <= 0 {
             return Err(Error::new(
                 windows::core::HRESULT::from_win32(87),
-                "The virtual screen has no capturable area.",
+                crate::i18n::t("The virtual screen has no capturable area."),
             ));
         }
 
@@ -386,7 +386,7 @@ impl CaptureBuffer {
             .ok_or_else(|| {
                 Error::new(
                     windows::core::HRESULT::from_win32(534),
-                    "The virtual screen exceeds the supported pixel-buffer size.",
+                    crate::i18n::t("The virtual screen exceeds the supported pixel-buffer size."),
                 )
             })?;
 
@@ -432,7 +432,7 @@ impl CaptureBuffer {
         if hbitmap.is_invalid() || bits_ptr.is_null() {
             return Err(Error::new(
                 windows::core::HRESULT::from_win32(31),
-                "Windows did not allocate a usable screenshot bitmap.",
+                crate::i18n::t("Windows did not allocate a usable screenshot bitmap."),
             ));
         }
 
@@ -441,7 +441,7 @@ impl CaptureBuffer {
         if old_obj.is_invalid() {
             return Err(Error::new(
                 windows::core::HRESULT::from_win32(31),
-                "Windows could not select the screenshot bitmap.",
+                crate::i18n::t("Windows could not select the screenshot bitmap."),
             ));
         }
 
@@ -475,7 +475,7 @@ impl CaptureBuffer {
             }
             return Err(Error::new(
                 windows::core::HRESULT::from_win32(31),
-                "Windows could not finish drawing the captured screen.",
+                crate::i18n::t("Windows could not finish drawing the captured screen."),
             ));
         }
         let bit_blt = bit_blt_start.elapsed();

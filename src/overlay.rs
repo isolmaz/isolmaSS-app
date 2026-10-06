@@ -943,10 +943,13 @@ impl OverlayState {
         let len = (width as usize) * (height as usize) * 4;
         let buffer = unsafe { std::slice::from_raw_parts(self.bits_ptr, len) };
         let result = flatten_selection_to_dib(buffer, width, height, &sel)
-            .map_err(|error| format!("Could not prepare the clipboard image: {error}"))
+            .map_err(|error| {
+                crate::i18n::tf("Could not prepare the clipboard image: {}", &[&error])
+            })
             .and_then(|dib| {
-                copy_dib_to_clipboard(Some(hwnd), &dib)
-                    .map_err(|error| format!("Windows rejected the clipboard image: {error}"))
+                copy_dib_to_clipboard(Some(hwnd), &dib).map_err(|error| {
+                    crate::i18n::tf("Windows rejected the clipboard image: {}", &[&error])
+                })
             });
 
         if result.is_err() || !self.settings.close_after_action {

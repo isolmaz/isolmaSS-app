@@ -40,7 +40,9 @@ pub fn acquire_or_notify() -> windows::core::Result<InstanceState> {
             if std::time::Instant::now() >= deadline {
                 return Err(windows::core::Error::new(
                     windows::core::HRESULT::from_win32(1460),
-                    "The running isolmaSS instance is still starting or is unresponsive. Try opening settings again.",
+                    crate::i18n::t(
+                        "The running isolmaSS instance is still starting or is unresponsive. Try opening settings again.",
+                    ),
                 ));
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -77,7 +79,7 @@ impl SettingsLock {
         }
         Err(std::io::Error::new(
             std::io::ErrorKind::TimedOut,
-            "Another process is updating isolmaSS settings; retry saving.",
+            crate::i18n::t("Another process is updating isolmaSS settings; retry saving."),
         ))
     }
 }

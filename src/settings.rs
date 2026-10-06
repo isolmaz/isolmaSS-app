@@ -126,7 +126,12 @@ impl Settings {
         let Some(path) = Self::config_path() else {
             return Ok((
                 Self::default(),
-                Some("Settings could not be loaded because %APPDATA% is unavailable.".to_string()),
+                Some(
+                    crate::i18n::t(
+                        "Settings could not be loaded because %APPDATA% is unavailable.",
+                    )
+                    .to_string(),
+                ),
             ));
         };
 
@@ -160,9 +165,9 @@ impl Settings {
                 })?;
                 Ok((
                     defaults,
-                    Some(format!(
+                    Some(crate::i18n::tf(
                         "Settings were invalid and have been reset. The original was preserved at {}.",
-                        backup.display()
+                        &[&backup.display()],
                     )),
                 ))
             }

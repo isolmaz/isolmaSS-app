@@ -204,7 +204,7 @@ fn run_session(
     if !unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd).as_bool() } {
         return Err(windows::core::Error::new(
             windows::core::HRESULT::from_win32(1400),
-            "The capture overlay could not be made visible.",
+            crate::i18n::t("The capture overlay could not be made visible."),
         ));
     }
     let overlay_time = overlay_start.elapsed();

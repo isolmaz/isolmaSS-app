@@ -25,7 +25,7 @@ pub fn read_text(owner: HWND) -> Result<String> {
     if full_size == 0 {
         return Err(Error::new(
             windows::core::HRESULT::from_win32(windows::Win32::Foundation::ERROR_INVALID_HANDLE.0),
-            "Clipboard text memory is unavailable.",
+            crate::i18n::t("Clipboard text memory is unavailable."),
         ));
     }
     let size = full_size.min(32_768);
@@ -48,7 +48,7 @@ pub fn read_text(owner: HWND) -> Result<String> {
     if truncated {
         crate::diagnostics::record(
             "clipboard",
-            "Clipboard text exceeded 32768 bytes and was truncated.",
+            crate::i18n::t("Clipboard text exceeded 32768 bytes and was truncated."),
         );
     }
     Ok(text.replace(['\r', '\n'], " ").replace('\t', "    "))
@@ -227,7 +227,7 @@ pub fn copy_text_to_clipboard(hwnd: Option<HWND>, text: &str) -> Result<()> {
     if text.is_empty() || text.contains('\0') {
         return Err(Error::new(
             windows::core::HRESULT::from_win32(windows::Win32::Foundation::ERROR_INVALID_DATA.0),
-            "Clipboard text is empty or contains NUL.",
+            crate::i18n::t("Clipboard text is empty or contains NUL."),
         ));
     }
     let encoded: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();

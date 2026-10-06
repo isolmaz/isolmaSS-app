@@ -223,7 +223,7 @@ fn run_health_check() -> Result<(), Box<dyn std::error::Error>> {
     let instance = match instance::acquire_or_notify()? {
         InstanceState::Primary(instance) => instance,
         InstanceState::ExistingNotified => {
-            return Err("Another isolmaSS instance is still running.".into());
+            return Err(crate::i18n::t("Another isolmaSS instance is still running.").into());
         }
     };
     let (settings, warning) = Settings::load_with_warning()?;

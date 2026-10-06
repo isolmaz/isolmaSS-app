@@ -101,10 +101,12 @@ fn percent_decode(text: &str) -> Result<String, String> {
     while index < bytes.len() {
         if bytes[index] == b'%' {
             if index + 2 >= bytes.len() {
-                return Err("Malformed Cloudflare callback.".into());
+                return Err(crate::i18n::t("Malformed Cloudflare callback.").into());
             }
-            let high = hex(bytes[index + 1]).ok_or("Malformed Cloudflare callback.")?;
-            let low = hex(bytes[index + 2]).ok_or("Malformed Cloudflare callback.")?;
+            let high =
+                hex(bytes[index + 1]).ok_or(crate::i18n::t("Malformed Cloudflare callback."))?;
+            let low =
+                hex(bytes[index + 2]).ok_or(crate::i18n::t("Malformed Cloudflare callback."))?;
             out.push(high << 4 | low);
             index += 3;
         } else {
@@ -116,32 +118,41 @@ fn percent_decode(text: &str) -> Result<String, String> {
             index += 1;
         }
     }
-    String::from_utf8(out).map_err(|_| "Malformed Cloudflare callback.".into())
+    String::from_utf8(out).map_err(|_| crate::i18n::t("Malformed Cloudflare callback.").into())
+}
+
+/// Also used to tell a refusal apart from other callback errors, so compare it whole.
+fn consent_denied_message() -> String {
+    crate::i18n::t("Cloudflare permission was not granted; nothing was connected.").into()
 }
 
 fn parse_callback(request: &str, expected_state: &str) -> Result<Option<String>, String> {
     let mut lines = request.split("\r\n");
-    let first = lines.next().ok_or("Missing Cloudflare callback.")?;
+    let first = lines
+        .next()
+        .ok_or(crate::i18n::t("Missing Cloudflare callback."))?;
     let mut parts = first.split_whitespace();
     if parts.next() != Some("GET") {
-        return Err("Invalid Cloudflare callback method.".into());
+        return Err(crate::i18n::t("Invalid Cloudflare callback method.").into());
     }
-    let target = parts.next().ok_or("Invalid Cloudflare callback path.")?;
+    let target = parts
+        .next()
+        .ok_or(crate::i18n::t("Invalid Cloudflare callback path."))?;
     if parts.next() != Some("HTTP/1.1") || parts.next().is_some() {
-        return Err("Invalid Cloudflare callback request.".into());
+        return Err(crate::i18n::t("Invalid Cloudflare callback request.").into());
     }
     let host = lines.find_map(|line| {
         let (name, value) = line.split_once(':')?;
         name.eq_ignore_ascii_case("Host").then(|| value.trim())
     });
     if host != Some("127.0.0.1:38481") {
-        return Err("Cloudflare callback host does not match.".into());
+        return Err(crate::i18n::t("Cloudflare callback host does not match.").into());
     }
     let (path, query) = target
         .split_once('?')
-        .ok_or("Cloudflare did not return a response.")?;
+        .ok_or(crate::i18n::t("Cloudflare did not return a response."))?;
     if path != "/oauth/callback" {
-        return Err("Unrecognized Cloudflare callback path.".into());
+        return Err(crate::i18n::t("Unrecognized Cloudflare callback path.").into());
     }
     let mut state = None;
     let mut code = None;
@@ -149,32 +160,35 @@ fn parse_callback(request: &str, expected_state: &str) -> Result<Option<String>,
     for pair in query.split('&') {
         let (key, value) = pair
             .split_once('=')
-            .ok_or("Malformed Cloudflare callback.")?;
+            .ok_or(crate::i18n::t("Malformed Cloudflare callback."))?;
         match key {
             "state" if state.is_none() => state = Some(percent_decode(value)?),
             "code" if code.is_none() => code = Some(percent_decode(value)?),
             "error" if !denied => denied = true,
-            "state" | "code" | "error" => return Err("Duplicate OAuth parameter.".into()),
+            "state" | "code" | "error" => {
+                return Err(crate::i18n::t("Duplicate OAuth parameter.").into());
+            }
             _ => {}
         }
     }
-    let state = state.ok_or("Cloudflare did not return a request identifier.")?;
+    let state = state.ok_or(crate::i18n::t(
+        "Cloudflare did not return a request identifier.",
+    ))?;
     if !constant_equal(state.as_bytes(), expected_state.as_bytes()) {
-        return Err("Cloudflare callback did not match this request.".into());
+        return Err(crate::i18n::t("Cloudflare callback did not match this request.").into());
     }
     if denied {
-        return Err(crate::i18n::t(
-            "Cloudflare permission was not granted; nothing was connected.",
-        )
-        .into());
+        return Err(consent_denied_message());
     }
-    let code = code.ok_or("Cloudflare did not return an authorization code.")?;
+    let code = code.ok_or(crate::i18n::t(
+        "Cloudflare did not return an authorization code.",
+    ))?;
     if code.is_empty()
         || code.len() > 4096
         || !code.is_ascii()
         || code.chars().any(char::is_control)
     {
-        return Err("Cloudflare returned an invalid authorization code.".into());
+        return Err(crate::i18n::t("Cloudflare returned an invalid authorization code.").into());
     }
     Ok(Some(code))
 }
@@ -288,12 +302,12 @@ fn callback(listener: &TcpListener, state: &str, cancel: &AtomicBool) -> Result<
                     continue;
                 };
                 let parsed = std::str::from_utf8(&request)
-                    .map_err(|_| "Malformed Cloudflare callback.".to_string())
+                    .map_err(|_| crate::i18n::t("Malformed Cloudflare callback.").to_string())
                     .and_then(|text| parse_callback(text, state));
                 callback_reply(&mut socket, parsed.as_ref().is_ok_and(Option::is_some));
                 match parsed {
                     Ok(Some(code)) => return Ok(code),
-                    Err(error) if error.contains("izni verilmedi") => return Err(error),
+                    Err(error) if error == consent_denied_message() => return Err(error),
                     _ => continue, // Noise from another local process cannot cancel a valid login.
                 }
             }
@@ -888,8 +902,10 @@ fn api_error(status: u32, bytes: &[u8]) -> String {
                 .collect()
         });
     match (code, message) {
-        (Some(code), Some(message)) => format!("HTTP {status}, kod {code}: {message}"),
-        (Some(code), None) => format!("HTTP {status}, kod {code}"),
+        (Some(code), Some(message)) => {
+            crate::i18n::tf("HTTP {}, code {}: {}", &[&status, &code, &message])
+        }
+        (Some(code), None) => crate::i18n::tf("HTTP {}, code {}", &[&status, &code]),
         (None, Some(message)) => format!("HTTP {status}: {message}"),
         (None, None) => format!("HTTP {status}"),
     }
@@ -1001,5 +1017,20 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn denied_consent_is_recognized_in_every_language() {
+        let _lock = crate::i18n::TEST_LANGUAGE_LOCK.lock().unwrap();
+        let line = "GET /oauth/callback?state=correct&error=access_denied HTTP/1.1\r\nHost: 127.0.0.1:38481\r\n\r\n";
+        for language in [
+            crate::i18n::LanguagePreference::English,
+            crate::i18n::LanguagePreference::Turkish,
+        ] {
+            crate::i18n::set_preference(language);
+            let error = parse_callback(line, "correct").unwrap_err();
+            assert_eq!(error, consent_denied_message());
+        }
+        crate::i18n::set_preference(crate::i18n::LanguagePreference::System);
     }
 }

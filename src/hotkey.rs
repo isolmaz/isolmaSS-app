@@ -540,10 +540,10 @@ pub fn start_hotkey_listener(
             let mut guard = match HOOK_STATE.lock() {
                 Ok(guard) => guard,
                 Err(_) => {
-                    let _ = ready_tx.send(Err(
-                        "Keyboard hook state could not be initialized: state lock poisoned."
-                            .to_string(),
-                    ));
+                    let _ = ready_tx.send(Err(crate::i18n::t(
+                        "Keyboard hook state could not be initialized: state lock poisoned.",
+                    )
+                    .to_string()));
                     return;
                 }
             };
@@ -577,8 +577,9 @@ pub fn start_hotkey_listener(
                 *HOOK_STATE
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner()) = None;
-                let _ = ready_tx.send(Err(format!(
-                    "Keyboard hook could not be installed: {error}"
+                let _ = ready_tx.send(Err(crate::i18n::tf(
+                    "Keyboard hook could not be installed: {}",
+                    &[&error],
                 )));
                 return;
             }
@@ -624,9 +625,9 @@ pub fn start_hotkey_listener(
             if primary_ok {
                 requested_config.description.clone()
             } else {
-                let _ = ready_tx.send(Err(format!(
+                let _ = ready_tx.send(Err(crate::i18n::tf(
                     "The shortcut '{}' is already registered by Windows or another application.",
-                    requested_config.description
+                    &[&requested_config.description],
                 )));
                 return;
             }
@@ -690,7 +691,7 @@ pub fn start_hotkey_listener(
             let _ = join_handle.join();
             return Err(windows::core::Error::new(
                 windows::core::HRESULT(-1),
-                "Hotkey thread exited unexpectedly",
+                crate::i18n::t("Hotkey thread exited unexpectedly"),
             ));
         }
     };

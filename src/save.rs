@@ -195,7 +195,7 @@ fn extract_selection(
 ) -> Result<(Vec<u8>, i32, i32), String> {
     let clamped = selection.clamp(full_width, full_height);
     if clamped.is_empty() || full_width <= 0 || full_height <= 0 {
-        return Err("The screenshot selection is empty or invalid.".to_string());
+        return Err(crate::i18n::t("The screenshot selection is empty or invalid.").to_string());
     }
 
     let width = clamped.width();
@@ -205,9 +205,11 @@ fn extract_selection(
     let required = (full_width as usize)
         .checked_mul(full_height as usize)
         .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or_else(|| "The screenshot dimensions are too large.".to_string())?;
+        .ok_or_else(|| crate::i18n::t("The screenshot dimensions are too large.").to_string())?;
     if buffer.len() < required {
-        return Err("The screenshot buffer is smaller than its dimensions.".to_string());
+        return Err(
+            crate::i18n::t("The screenshot buffer is smaller than its dimensions.").to_string(),
+        );
     }
 
     let mut pixels = vec![0u8; destination_stride * height as usize];
@@ -411,15 +413,15 @@ pub fn save_screenshot(
         .map(Path::to_path_buf)
         .unwrap_or_else(default_save_directory);
     std::fs::create_dir_all(&directory).map_err(|error| {
-        format!(
-            "Could not create the screenshot folder '{}': {error}",
-            directory.display()
+        crate::i18n::tf(
+            "Could not create the screenshot folder '{}': {}",
+            &[&directory.display(), &error],
         )
     })?;
     if !directory.is_dir() {
-        return Err(format!(
+        return Err(crate::i18n::tf(
             "The screenshot destination '{}' is not a directory.",
-            directory.display()
+            &[&directory.display()],
         ));
     }
 
@@ -478,10 +480,15 @@ pub fn save_screenshot(
                 Err(error) if matches!(error.code().0 as u32, 0x80070050 | 0x800700b7) => {
                     destination = unique_output_path(&directory, format)
                 }
-                Err(error) => return Err(format!("Could not finalize the screenshot: {error}")),
+                Err(error) => {
+                    return Err(crate::i18n::tf(
+                        "Could not finalize the screenshot: {}",
+                        &[&error],
+                    ));
+                }
             }
         }
-        Err("Could not reserve a unique screenshot filename.".to_string())
+        Err(crate::i18n::t("Could not reserve a unique screenshot filename.").to_string())
     })();
 
     if result.is_err() {

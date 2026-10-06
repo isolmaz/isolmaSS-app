@@ -224,26 +224,58 @@ pub fn window_loop(hwnd: HWND, kind: WindowKind) -> Result<()> {
     Ok(())
 }
 
+/// A task dialog whose buttons follow the interface language; the common OK/Yes/No
+/// buttons of `TaskDialog` would follow the Windows display language instead.
+fn task_dialog(
+    owner: HWND,
+    title: &[u16],
+    message: &[u16],
+    icon: PCWSTR,
+    buttons: &[(i32, &str)],
+    default: i32,
+) -> Result<i32> {
+    use windows::Win32::UI::Controls::{
+        TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TASKDIALOGCONFIG_0, TDF_ALLOW_DIALOG_CANCELLATION,
+        TaskDialogIndirect,
+    };
+    let labels: Vec<Vec<u16>> = buttons
+        .iter()
+        .map(|(_, label)| label.encode_utf16().chain(Some(0)).collect())
+        .collect();
+    let specs: Vec<TASKDIALOG_BUTTON> = buttons
+        .iter()
+        .zip(&labels)
+        .map(|((id, _), label)| TASKDIALOG_BUTTON {
+            nButtonID: *id,
+            pszButtonText: PCWSTR(label.as_ptr()),
+        })
+        .collect();
+    let config = TASKDIALOGCONFIG {
+        cbSize: std::mem::size_of::<TASKDIALOGCONFIG>() as u32,
+        hwndParent: owner,
+        dwFlags: TDF_ALLOW_DIALOG_CANCELLATION,
+        pszWindowTitle: w!("isolmaSS"),
+        Anonymous1: TASKDIALOGCONFIG_0 { pszMainIcon: icon },
+        pszMainInstruction: PCWSTR(title.as_ptr()),
+        pszContent: PCWSTR(message.as_ptr()),
+        cButtons: specs.len() as u32,
+        pButtons: specs.as_ptr(),
+        nDefaultButton: default,
+        ..Default::default()
+    };
+    let mut selected = 0;
+    unsafe { TaskDialogIndirect(&config, Some(&mut selected), None, None)? };
+    Ok(selected)
+}
+
 pub fn error(owner: HWND, title: &str, message: &str) {
     crate::diagnostics::record(title, message);
     let _suspend = crate::hotkey::OverlayInputSuspension::new();
     let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
     let message: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
-    use windows::Win32::UI::Controls::{TD_ERROR_ICON, TDCBF_OK_BUTTON, TaskDialog};
-    if unsafe {
-        TaskDialog(
-            owner,
-            None,
-            windows::core::w!("isolmaSS"),
-            PCWSTR(title.as_ptr()),
-            PCWSTR(message.as_ptr()),
-            TDCBF_OK_BUTTON,
-            TD_ERROR_ICON,
-            None,
-        )
-    }
-    .is_err()
-    {
+    use windows::Win32::UI::Controls::TD_ERROR_ICON;
+    let ok = [(IDOK.0, crate::i18n::t("OK"))];
+    if task_dialog(owner, &title, &message, TD_ERROR_ICON, &ok, IDOK.0).is_err() {
         unsafe {
             let _ = MessageBoxW(
                 owner,
@@ -256,24 +288,12 @@ pub fn error(owner: HWND, title: &str, message: &str) {
 }
 
 pub fn info(owner: HWND, title: &str, message: &str) {
-    use windows::Win32::UI::Controls::{TD_INFORMATION_ICON, TDCBF_OK_BUTTON, TaskDialog};
+    use windows::Win32::UI::Controls::TD_INFORMATION_ICON;
     let _suspend = crate::hotkey::OverlayInputSuspension::new();
     let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
     let message: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
-    if unsafe {
-        TaskDialog(
-            owner,
-            None,
-            w!("isolmaSS"),
-            PCWSTR(title.as_ptr()),
-            PCWSTR(message.as_ptr()),
-            TDCBF_OK_BUTTON,
-            TD_INFORMATION_ICON,
-            None,
-        )
-    }
-    .is_err()
-    {
+    let ok = [(IDOK.0, crate::i18n::t("OK"))];
+    if task_dialog(owner, &title, &message, TD_INFORMATION_ICON, &ok, IDOK.0).is_err() {
         unsafe {
             let _ = MessageBoxW(
                 owner,
@@ -286,26 +306,24 @@ pub fn info(owner: HWND, title: &str, message: &str) {
 }
 
 pub fn confirm(owner: HWND, title: &str, message: &str) -> bool {
-    use windows::Win32::UI::Controls::{
-        TD_INFORMATION_ICON, TDCBF_NO_BUTTON, TDCBF_YES_BUTTON, TaskDialog,
-    };
+    use windows::Win32::UI::Controls::TD_INFORMATION_ICON;
     let _suspend = crate::hotkey::OverlayInputSuspension::new();
     let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
     let message: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
-    let mut selected = 0;
-    match unsafe {
-        TaskDialog(
-            owner,
-            None,
-            windows::core::w!("isolmaSS"),
-            PCWSTR(title.as_ptr()),
-            PCWSTR(message.as_ptr()),
-            TDCBF_YES_BUTTON | TDCBF_NO_BUTTON,
-            TD_INFORMATION_ICON,
-            Some(&mut selected),
-        )
-    } {
-        Ok(()) => selected == IDYES.0,
+    // No is the default, as in the message-box fallback below.
+    let buttons = [
+        (IDYES.0, crate::i18n::t("Yes")),
+        (IDNO.0, crate::i18n::t("No")),
+    ];
+    match task_dialog(
+        owner,
+        &title,
+        &message,
+        TD_INFORMATION_ICON,
+        &buttons,
+        IDNO.0,
+    ) {
+        Ok(selected) => selected == IDYES.0,
         Err(error) => {
             crate::diagnostics::record("confirmation dialog", &error.to_string());
             let selected = unsafe {

@@ -32,7 +32,9 @@ impl StartupRegistration {
             return Ok(Self(None));
         }
         if status.is_err() || size > 65_536 {
-            return Err("Could not read the existing startup registration.".to_string());
+            return Err(
+                crate::i18n::t("Could not read the existing startup registration.").to_string(),
+            );
         }
         let mut data = vec![0u8; size as usize];
         let status = unsafe {
@@ -47,7 +49,10 @@ impl StartupRegistration {
             )
         };
         if status.is_err() {
-            return Err("The startup registration changed while it was being read.".to_string());
+            return Err(crate::i18n::t(
+                "The startup registration changed while it was being read.",
+            )
+            .to_string());
         }
         data.truncate(size as usize);
         Ok(Self(Some((kind, data))))
@@ -75,9 +80,9 @@ impl StartupRegistration {
         if status.is_ok() || status == ERROR_FILE_NOT_FOUND {
             Ok(())
         } else {
-            Err(format!(
+            Err(crate::i18n::tf(
                 "Could not restore startup registration (error {}).",
-                status.0
+                &[&status.0],
             ))
         }
     }
@@ -109,9 +114,9 @@ fn open_run_key() -> Result<RegistryKey, String> {
         )
     };
     if status.is_err() {
-        Err(format!(
+        Err(crate::i18n::tf(
             "Could not open the Windows startup registry key (error {}).",
-            status.0
+            &[&status.0],
         ))
     } else {
         Ok(RegistryKey(key))
@@ -126,7 +131,7 @@ fn startup_value(
         return Ok(None);
     }
     let executable = std::env::current_exe()
-        .map_err(|error| format!("Could not locate isolmaSS.exe: {error}"))?;
+        .map_err(|error| crate::i18n::tf("Could not locate isolmaSS.exe: {}", &[&error]))?;
     let command = format!("\"{}\"", executable.display());
     let wide: Vec<u16> = command.encode_utf16().chain(Some(0)).collect();
     let bytes =
@@ -141,18 +146,18 @@ pub fn set_start_with_windows(enabled: bool) -> Result<(), String> {
         Some((kind, bytes)) => {
             let status = unsafe { RegSetValueExW(key.0, VALUE_NAME, 0, kind, Some(&bytes)) };
             if status.is_err() {
-                return Err(format!(
+                return Err(crate::i18n::tf(
                     "Could not enable startup (registry error {}).",
-                    status.0
+                    &[&status.0],
                 ));
             }
         }
         None => {
             let status = unsafe { RegDeleteValueW(key.0, VALUE_NAME) };
             if status.is_err() && status != ERROR_FILE_NOT_FOUND {
-                return Err(format!(
+                return Err(crate::i18n::tf(
                     "Could not disable startup (registry error {}).",
-                    status.0
+                    &[&status.0],
                 ));
             }
         }

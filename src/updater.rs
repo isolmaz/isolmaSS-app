@@ -69,7 +69,7 @@ fn wide(value: &str) -> Vec<u16> {
 fn parse_https_url(url: &str) -> Result<(&str, String), String> {
     let remainder = url
         .strip_prefix("https://")
-        .ok_or_else(|| "Update downloads must use HTTPS.".to_string())?;
+        .ok_or_else(|| crate::i18n::t("Update downloads must use HTTPS.").to_string())?;
     let (host, path) = remainder
         .split_once('/')
         .map(|(host, path)| (host, format!("/{path}")))
@@ -83,7 +83,7 @@ fn parse_https_url(url: &str) -> Result<(&str, String), String> {
     ) || url.chars().any(|ch| ch.is_control() || ch == '\\')
         || url.contains('#')
     {
-        return Err("The update URL contains an unsupported host.".to_string());
+        return Err(crate::i18n::t("The update URL contains an unsupported host.").to_string());
     }
     Ok((host, path))
 }
@@ -100,9 +100,9 @@ fn http_get(host: &str, path: &str, maximum_size: usize) -> Result<Vec<u8>, Stri
 
 fn check_cancelled(deadline: Instant) -> Result<(), String> {
     if CANCELLED.load(Ordering::Acquire) {
-        Err("Update operation cancelled.".to_string())
+        Err(crate::i18n::t("Update operation cancelled.").to_string())
     } else if Instant::now() >= deadline {
-        Err("The update request exceeded its time limit.".to_string())
+        Err(crate::i18n::t("The update request exceeded its time limit.").to_string())
     } else {
         Ok(())
     }
@@ -118,7 +118,7 @@ fn http_get_inner(
     use windows::Win32::Networking::WinHttp::*;
     check_cancelled(deadline)?;
     if redirects > 5 {
-        return Err("Too many update redirects.".to_string());
+        return Err(crate::i18n::t("Too many update redirects.").to_string());
     }
     parse_https_url(&format!("https://{host}{path}"))?;
     let agent = wide(&format!("isolmaSS/{}", env!("CARGO_PKG_VERSION")));
@@ -132,14 +132,14 @@ fn http_get_inner(
         )
     });
     if session.0.is_null() {
-        return Err(format!(
+        return Err(crate::i18n::tf(
             "WinHTTP could not start: {}",
-            windows::core::Error::from_win32()
+            &[&windows::core::Error::from_win32()],
         ));
     }
 
     unsafe { WinHttpSetTimeouts(session.0, 5_000, 5_000, 5_000, 5_000) }
-        .map_err(|error| format!("Could not set update timeouts: {error}"))?;
+        .map_err(|error| crate::i18n::tf("Could not set update timeouts: {}", &[&error]))?;
     let host_wide = wide(host);
     let connection = InternetHandle(unsafe {
         WinHttpConnect(
@@ -150,9 +150,9 @@ fn http_get_inner(
         )
     });
     if connection.0.is_null() {
-        return Err(format!(
-            "Could not connect to {host}: {}",
-            windows::core::Error::from_win32()
+        return Err(crate::i18n::tf(
+            "Could not connect to {}: {}",
+            &[&host, &windows::core::Error::from_win32()],
         ));
     }
 
@@ -169,9 +169,9 @@ fn http_get_inner(
         )
     });
     if request.0.is_null() {
-        return Err(format!(
+        return Err(crate::i18n::tf(
             "Could not create the HTTPS request: {}",
-            windows::core::Error::from_win32()
+            &[&windows::core::Error::from_win32()],
         ));
     }
 
@@ -182,7 +182,9 @@ fn http_get_inner(
             Some(&WINHTTP_OPTION_REDIRECT_POLICY_NEVER.to_ne_bytes()),
         )
     }
-    .map_err(|error| format!("Could not enforce the HTTPS redirect policy: {error}"))?;
+    .map_err(|error| {
+        crate::i18n::tf("Could not enforce the HTTPS redirect policy: {}", &[&error])
+    })?;
     let headers: Vec<u16> = concat!(
         "Accept: application/vnd.github+json\r\n",
         "User-Agent: isolmaSS\r\n",
@@ -194,7 +196,7 @@ fn http_get_inner(
         WinHttpSendRequest(request.0, Some(&headers), None, 0, 0, 0)
             .and_then(|_| WinHttpReceiveResponse(request.0, std::ptr::null_mut()))
     }
-    .map_err(|error| format!("The update request failed: {error}"))?;
+    .map_err(|error| crate::i18n::tf("The update request failed: {}", &[&error]))?;
 
     let mut status = 0u32;
     let mut status_size = std::mem::size_of::<u32>() as u32;
@@ -209,7 +211,7 @@ fn http_get_inner(
             &mut index,
         )
     }
-    .map_err(|error| format!("Could not read the update response status: {error}"))?;
+    .map_err(|error| crate::i18n::tf("Could not read the update response status: {}", &[&error]))?;
     check_cancelled(deadline)?;
     if matches!(status, 301 | 302 | 303 | 307 | 308) {
         let mut location = [0u16; 4096];
@@ -224,18 +226,21 @@ fn http_get_inner(
                 std::ptr::null_mut(),
             )
         }
-        .map_err(|error| format!("The update redirect is invalid: {error}"))?;
+        .map_err(|error| crate::i18n::tf("The update redirect is invalid: {}", &[&error]))?;
         let length = location
             .iter()
             .position(|unit| *unit == 0)
             .unwrap_or(location.len());
-        let location =
-            String::from_utf16(&location[..length]).map_err(|_| "Invalid redirect encoding")?;
+        let location = String::from_utf16(&location[..length])
+            .map_err(|_| crate::i18n::t("Invalid redirect encoding"))?;
         let (host, path) = parse_https_url(&location)?;
         return http_get_inner(host, &path, maximum_size, deadline, redirects + 1);
     }
     if !(200..300).contains(&status) {
-        return Err(format!("The update server returned HTTP {status}."));
+        return Err(crate::i18n::tf(
+            "The update server returned HTTP {}.",
+            &[&status],
+        ));
     }
 
     let mut response = Vec::new();
@@ -243,17 +248,18 @@ fn http_get_inner(
         check_cancelled(deadline)?;
         let mut available = 0u32;
         unsafe { WinHttpQueryDataAvailable(request.0, &mut available) }
-            .map_err(|error| format!("Could not read update data: {error}"))?;
+            .map_err(|error| crate::i18n::tf("Could not read update data: {}", &[&error]))?;
         if available == 0 {
             break;
         }
         let new_length = response
             .len()
             .checked_add(available as usize)
-            .ok_or_else(|| "The update response is too large.".to_string())?;
+            .ok_or_else(|| crate::i18n::t("The update response is too large.").to_string())?;
         if new_length > maximum_size {
-            return Err(format!(
-                "The update response exceeded {maximum_size} bytes."
+            return Err(crate::i18n::tf(
+                "The update response exceeded {} bytes.",
+                &[&maximum_size],
             ));
         }
         let offset = response.len();
@@ -267,7 +273,7 @@ fn http_get_inner(
                 &mut read,
             )
         }
-        .map_err(|error| format!("Could not receive update data: {error}"))?;
+        .map_err(|error| crate::i18n::tf("Could not receive update data: {}", &[&error]))?;
         response.truncate(offset + read as usize);
         if read == 0 {
             break;
@@ -303,15 +309,16 @@ fn parse_version(value: &str) -> Option<[u64; 3]> {
 pub fn check_for_update() -> Result<Option<UpdateInfo>, String> {
     let bytes = http_get(RELEASE_API_HOST, RELEASE_API_PATH, MAX_METADATA_BYTES)?;
     let release: GithubRelease = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("The update metadata is invalid: {error}"))?;
+        .map_err(|error| crate::i18n::tf("The update metadata is invalid: {}", &[&error]))?;
     if release.draft || release.prerelease {
         return Ok(None);
     }
 
-    let current = parse_version(env!("CARGO_PKG_VERSION"))
-        .ok_or_else(|| "The installed application version is invalid.".to_string())?;
+    let current = parse_version(env!("CARGO_PKG_VERSION")).ok_or_else(|| {
+        crate::i18n::t("The installed application version is invalid.").to_string()
+    })?;
     let available = parse_version(&release.tag_name)
-        .ok_or_else(|| "The release tag is not a semantic version.".to_string())?;
+        .ok_or_else(|| crate::i18n::t("The release tag is not a semantic version.").to_string())?;
     if available <= current {
         return Ok(None);
     }
@@ -321,29 +328,33 @@ pub fn check_for_update() -> Result<Option<UpdateInfo>, String> {
     for asset in release.assets {
         if asset.name == INSTALLER_ASSET_NAME {
             if installer.replace(asset).is_some() {
-                return Err("The release contains duplicate installers.".to_string());
+                return Err(
+                    crate::i18n::t("The release contains duplicate installers.").to_string()
+                );
             }
         } else if asset.name == SIGNATURE_ASSET_NAME && signature.replace(asset).is_some() {
-            return Err("The release contains duplicate signatures.".to_string());
+            return Err(crate::i18n::t("The release contains duplicate signatures.").to_string());
         }
     }
     let asset = installer.ok_or_else(|| {
-        format!(
-            "Release {} has no {INSTALLER_ASSET_NAME} asset.",
-            release.tag_name
+        crate::i18n::tf(
+            "Release {} has no {} asset.",
+            &[&release.tag_name, &INSTALLER_ASSET_NAME],
         )
     })?;
     let signature = signature.ok_or_else(|| {
-        format!(
-            "Release {} has no {SIGNATURE_ASSET_NAME} asset.",
-            release.tag_name
+        crate::i18n::tf(
+            "Release {} has no {} asset.",
+            &[&release.tag_name, &SIGNATURE_ASSET_NAME],
         )
     })?;
     let digest = asset
         .digest
         .and_then(|digest| digest.strip_prefix("sha256:").map(str::to_owned))
         .filter(|digest| digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .ok_or_else(|| "The release installer has no valid SHA-256 digest.".to_string())?
+        .ok_or_else(|| {
+            crate::i18n::t("The release installer has no valid SHA-256 digest.").to_string()
+        })?
         .to_ascii_lowercase();
     parse_https_url(&asset.browser_download_url)?;
     parse_https_url(&signature.browser_download_url)?;
@@ -351,7 +362,7 @@ pub fn check_for_update() -> Result<Option<UpdateInfo>, String> {
         .html_url
         .starts_with("https://github.com/isolmaz/isolmaSS-app/releases/tag/")
     {
-        return Err("Unexpected release information URL.".to_string());
+        return Err(crate::i18n::t("Unexpected release information URL.").to_string());
     }
     Ok(Some(UpdateInfo {
         version: release.tag_name.trim_start_matches('v').to_string(),
@@ -367,7 +378,7 @@ pub fn download_update(update: &UpdateInfo) -> Result<PathBuf, String> {
         || update.sha256.len() != 64
         || !update.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
-        return Err("Invalid signed update metadata.".to_string());
+        return Err(crate::i18n::t("Invalid signed update metadata.").to_string());
     }
     let (signature_host, signature_path) = parse_https_url(&update.signature_url)?;
     let signature = http_get(signature_host, &signature_path, 512)?;
@@ -375,13 +386,14 @@ pub fn download_update(update: &UpdateInfo) -> Result<PathBuf, String> {
     let (host, path) = parse_https_url(&update.download_url)?;
     let bytes = http_get(host, &path, MAX_INSTALLER_BYTES)?;
     if sha256_hex(&bytes)? != update.sha256 {
-        return Err(
-            "The downloaded installer does not match its signed SHA-256 digest.".to_string(),
-        );
+        return Err(crate::i18n::t(
+            "The downloaded installer does not match its signed SHA-256 digest.",
+        )
+        .to_string());
     }
     let root = update_directory()?;
     std::fs::create_dir_all(&root)
-        .map_err(|error| format!("Could not create the update folder: {error}"))?;
+        .map_err(|error| crate::i18n::tf("Could not create the update folder: {}", &[&error]))?;
     let destination = root.join(format!("isolmass-setup-{}.exe", update.version));
     let signature_destination = destination.with_extension("exe.sig");
     let temporary = root.join(format!(
@@ -398,9 +410,10 @@ pub fn download_update(update: &UpdateInfo) -> Result<PathBuf, String> {
         write_staged_file(&temporary, &bytes)?;
         check_cancelled(Instant::now() + Duration::from_secs(1))?;
         if file_version(&temporary)? != update.version {
-            return Err(
-                "The installer file version does not match the signed release.".to_string(),
-            );
+            return Err(crate::i18n::t(
+                "The installer file version does not match the signed release.",
+            )
+            .to_string());
         }
         write_staged_file(&signature_temporary, &signature)?;
         replace_staged_file(&temporary, &destination)?;
@@ -426,10 +439,10 @@ fn write_staged_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .write(true)
         .create_new(true)
         .open(path)
-        .map_err(|error| format!("Could not stage the update: {error}"))?;
+        .map_err(|error| crate::i18n::tf("Could not stage the update: {}", &[&error]))?;
     file.write_all(bytes)
         .and_then(|_| file.sync_all())
-        .map_err(|error| format!("Could not write the staged update: {error}"))
+        .map_err(|error| crate::i18n::tf("Could not write the staged update: {}", &[&error]))
 }
 
 fn replace_staged_file(source: &Path, target: &Path) -> Result<(), String> {
@@ -443,7 +456,7 @@ fn replace_staged_file(source: &Path, target: &Path) -> Result<(), String> {
             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
         )
     }
-    .map_err(|error| format!("Could not finalize the staged update: {error}"))
+    .map_err(|error| crate::i18n::tf("Could not finalize the staged update: {}", &[&error]))
 }
 
 /// Signature covers both the exact semantic version and the downloaded executable's digest.
@@ -458,7 +471,7 @@ fn verify_release_signature(version: &str, digest: &str, signature: &[u8]) -> Re
         || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
         || signature.len() != 384
     {
-        return Err("Invalid update signature metadata.".to_string());
+        return Err(crate::i18n::t("Invalid update signature metadata.").to_string());
     }
     let message = format!(
         "isolmaSS-update-v1\n{version}\n{}\n",
@@ -477,7 +490,7 @@ fn verify_release_signature(version: &str, digest: &str, signature: &[u8]) -> Re
         )
     }
     .ok()
-    .map_err(|error| format!("Could not load the pinned update key: {error}"))?;
+    .map_err(|error| crate::i18n::tf("Could not load the pinned update key: {}", &[&error]))?;
     let padding = BCRYPT_PKCS1_PADDING_INFO {
         pszAlgId: BCRYPT_SHA256_ALGORITHM,
     };
@@ -494,7 +507,9 @@ fn verify_release_signature(version: &str, digest: &str, signature: &[u8]) -> Re
     unsafe {
         let _ = BCryptDestroyKey(key);
     }
-    result.map_err(|_| "The update signature does not match the pinned publisher key.".to_string())
+    result.map_err(|_| {
+        crate::i18n::t("The update signature does not match the pinned publisher key.").to_string()
+    })
 }
 /// Read the version embedded in an executable, independent of its filename or timestamp.
 pub fn file_version(path: &Path) -> Result<String, String> {
@@ -505,7 +520,7 @@ pub fn file_version(path: &Path) -> Result<String, String> {
     let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     let size = unsafe { GetFileVersionInfoSizeW(PCWSTR(path.as_ptr()), None) };
     if size == 0 || size > 1024 * 1024 {
-        return Err("The executable has no valid version resource.".to_string());
+        return Err(crate::i18n::t("The executable has no valid version resource.").to_string());
     }
     // u32 alignment is sufficient for VS_FIXEDFILEINFO and the Win32 version block.
     let mut data = vec![0u32; (size as usize).div_ceil(4)];
@@ -524,11 +539,11 @@ pub fn file_version(path: &Path) -> Result<String, String> {
     } || pointer.is_null()
         || length < std::mem::size_of::<VS_FIXEDFILEINFO>() as u32
     {
-        return Err("The executable has an invalid version resource.".to_string());
+        return Err(crate::i18n::t("The executable has an invalid version resource.").to_string());
     }
     let version = unsafe { std::ptr::read_unaligned(pointer.cast::<VS_FIXEDFILEINFO>()) };
     if version.dwSignature != 0xfeef04bd {
-        return Err("The executable version signature is invalid.".to_string());
+        return Err(crate::i18n::t("The executable version signature is invalid.").to_string());
     }
     Ok(format!(
         "{}.{}.{}",
@@ -540,11 +555,14 @@ pub fn file_version(path: &Path) -> Result<String, String> {
 
 fn verify_staged_installer(path: &Path) -> Result<(), String> {
     let root = std::fs::canonicalize(update_directory()?)
-        .map_err(|error| format!("Could not find the update folder: {error}"))?;
+        .map_err(|error| crate::i18n::tf("Could not find the update folder: {}", &[&error]))?;
     let canonical = std::fs::canonicalize(path)
-        .map_err(|error| format!("Could not find the staged installer: {error}"))?;
+        .map_err(|error| crate::i18n::tf("Could not find the staged installer: {}", &[&error]))?;
     if canonical.parent() != Some(root.as_path()) {
-        return Err("The installer is not in the trusted update staging folder.".to_string());
+        return Err(
+            crate::i18n::t("The installer is not in the trusted update staging folder.")
+                .to_string(),
+        );
     }
     let version = path
         .file_name()
@@ -552,10 +570,13 @@ fn verify_staged_installer(path: &Path) -> Result<(), String> {
         .and_then(|name| name.strip_prefix("isolmass-setup-"))
         .and_then(|name| name.strip_suffix(".exe"))
         .filter(|version| parse_version(version).is_some())
-        .ok_or_else(|| "Unexpected staged installer filename.".to_string())?;
+        .ok_or_else(|| crate::i18n::t("Unexpected staged installer filename.").to_string())?;
     let verified_version = verify_update_artifact(path)?;
     if verified_version != version {
-        return Err("The staged installer version differs from its signed release.".to_string());
+        return Err(crate::i18n::t(
+            "The staged installer version differs from its signed release.",
+        )
+        .to_string());
     }
     Ok(())
 }
@@ -564,12 +585,13 @@ fn verify_staged_installer(path: &Path) -> Result<(), String> {
 pub fn verify_update_artifact(path: &Path) -> Result<String, String> {
     let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
     if metadata.len() > MAX_INSTALLER_BYTES as u64 {
-        return Err("The staged installer exceeds the allowed size.".to_string());
+        return Err(crate::i18n::t("The staged installer exceeds the allowed size.").to_string());
     }
     let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
     let digest = sha256_hex(&bytes)?;
-    let signature = std::fs::read(path.with_extension("exe.sig"))
-        .map_err(|error| format!("The staged update signature is unavailable: {error}"))?;
+    let signature = std::fs::read(path.with_extension("exe.sig")).map_err(|error| {
+        crate::i18n::tf("The staged update signature is unavailable: {}", &[&error])
+    })?;
     let version = file_version(path)?;
     verify_release_signature(&version, &digest, &signature)?;
     Ok(version)
@@ -596,9 +618,9 @@ pub fn launch_installer(path: &Path) -> Result<(), String> {
         )
     };
     if result.0 as isize <= 32 {
-        Err(format!(
+        Err(crate::i18n::tf(
             "Windows could not launch the installer (code {}).",
-            result.0 as isize
+            &[&(result.0 as isize)],
         ))
     } else {
         Ok(())
@@ -620,7 +642,7 @@ fn sha256_digest(input: &[u8]) -> Result<[u8; 32], String> {
     let mut digest = [0u8; 32];
     unsafe { BCryptHash(BCRYPT_SHA256_ALG_HANDLE, None, input, &mut digest) }
         .ok()
-        .map_err(|error| format!("Windows SHA-256 failed: {error}"))?;
+        .map_err(|error| crate::i18n::tf("Windows SHA-256 failed: {}", &[&error]))?;
     Ok(digest)
 }
 

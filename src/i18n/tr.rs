@@ -38,6 +38,14 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "An update is already in progress…",
         "Güncelleme işlemi zaten sürüyor…",
     ),
+    (
+        "Another isolmaSS instance is still running.",
+        "Başka bir isolmaSS örneği hâlâ çalışıyor.",
+    ),
+    (
+        "Another process is updating isolmaSS settings; retry saving.",
+        "Başka bir işlem isolmaSS ayarlarını güncelliyor; yeniden kaydetmeyi deneyin.",
+    ),
     ("Arrow", "Ok"),
     ("At the limit", "Sınırda"),
     ("Black", "Siyah"),
@@ -97,6 +105,18 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Choose what happens at the limit.",
         "Sınırda davranışı seçin.",
     ),
+    (
+        "Clipboard text exceeded 32768 bytes and was truncated.",
+        "Pano metni 32768 baytı aştı ve kısaltıldı.",
+    ),
+    (
+        "Clipboard text is empty or contains NUL.",
+        "Pano metni boş ya da NUL karakteri içeriyor.",
+    ),
+    (
+        "Clipboard text memory is unavailable.",
+        "Pano metni için bellek ayrılamadı.",
+    ),
     ("Close", "Kapat"),
     ("Close after an action", "İşlemden sonra kapat"),
     (
@@ -105,12 +125,32 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     ("Cloudflare account", "Cloudflare hesabı"),
     (
+        "Cloudflare callback did not match this request.",
+        "Cloudflare geri dönüşü bu istekle eşleşmiyor.",
+    ),
+    (
+        "Cloudflare callback host does not match.",
+        "Cloudflare geri dönüş adresi eşleşmiyor.",
+    ),
+    (
         "Cloudflare could not provide a free workers.dev subdomain; try again.",
         "Cloudflare boşta bir workers.dev alt alan adı veremedi; tekrar deneyin.",
     ),
     (
         "Cloudflare did not respond: {}",
         "Cloudflare yanıt vermedi: {}",
+    ),
+    (
+        "Cloudflare did not return a request identifier.",
+        "Cloudflare istek kimliği döndürmedi.",
+    ),
+    (
+        "Cloudflare did not return a response.",
+        "Cloudflare yanıt döndürmedi.",
+    ),
+    (
+        "Cloudflare did not return an authorization code.",
+        "Cloudflare yetkilendirme kodu döndürmedi.",
     ),
     (
         "Cloudflare field is too long.",
@@ -148,6 +188,10 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     (
         "Cloudflare returned an invalid access token.",
         "Cloudflare geçersiz erişim anahtarı verdi.",
+    ),
+    (
+        "Cloudflare returned an invalid authorization code.",
+        "Cloudflare geçersiz bir yetkilendirme kodu döndürdü.",
     ),
     (
         "Cloudflare returned an invalid upload response.",
@@ -221,12 +265,28 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     ("Could not connect", "Bağlantı kurulamadı"),
     (
+        "Could not connect to {}: {}",
+        "{} adresine bağlanılamadı: {}",
+    ),
+    (
         "Could not create the Cloudflare request: {}",
         "Cloudflare isteği oluşturulamadı: {}",
     ),
     (
+        "Could not create the HTTPS request: {}",
+        "HTTPS isteği oluşturulamadı: {}",
+    ),
+    (
         "Could not create the key folder: {}",
         "Anahtar klasörü oluşturulamadı: {}",
+    ),
+    (
+        "Could not create the screenshot folder '{}': {}",
+        "'{}' ekran görüntüsü klasörü oluşturulamadı: {}",
+    ),
+    (
+        "Could not create the update folder: {}",
+        "Güncelleme klasörü oluşturulamadı: {}",
     ),
     (
         "Could not delete the credentials",
@@ -244,8 +304,44 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Could not disable Cloudflare redirects: {}",
         "Cloudflare yönlendirmeleri kapatılamadı: {}",
     ),
+    (
+        "Could not disable startup (registry error {}).",
+        "Windows ile başlatma kapatılamadı (kayıt defteri hatası {}).",
+    ),
     ("Could not download the update", "Güncelleme indirilemedi"),
+    (
+        "Could not enable startup (registry error {}).",
+        "Windows ile başlatma açılamadı (kayıt defteri hatası {}).",
+    ),
+    (
+        "Could not enforce the HTTPS redirect policy: {}",
+        "HTTPS yönlendirme kuralı uygulanamadı: {}",
+    ),
+    (
+        "Could not finalize the screenshot: {}",
+        "Ekran görüntüsü tamamlanamadı: {}",
+    ),
+    (
+        "Could not finalize the staged update: {}",
+        "Hazırlanan güncelleme tamamlanamadı: {}",
+    ),
+    (
+        "Could not find the staged installer: {}",
+        "Hazırlanan kurulum dosyası bulunamadı: {}",
+    ),
+    (
+        "Could not find the update folder: {}",
+        "Güncelleme klasörü bulunamadı: {}",
+    ),
     ("Could not install the update", "Güncelleme kurulamadı"),
+    (
+        "Could not load the pinned update key: {}",
+        "Sabitlenmiş güncelleme anahtarı yüklenemedi: {}",
+    ),
+    (
+        "Could not locate isolmaSS.exe: {}",
+        "isolmaSS.exe bulunamadı: {}",
+    ),
     (
         "Could not open Cloudflare setup",
         "Cloudflare kurulumu açılamadı",
@@ -263,6 +359,10 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Could not open the Cloudflare sign-in page in the browser.",
         "Cloudflare oturum sayfası tarayıcıda açılamadı.",
     ),
+    (
+        "Could not open the Windows startup registry key (error {}).",
+        "Windows başlangıç kayıt defteri anahtarı açılamadı (hata {}).",
+    ),
     ("Could not open the color picker", "Renk seçici açılamadı"),
     ("Could not open the folder", "Klasör açılamadı"),
     ("Could not open the link", "Bağlantı açılamadı"),
@@ -279,6 +379,10 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     (
         "Could not open the update window",
         "Güncelleme penceresi açılamadı",
+    ),
+    (
+        "Could not prepare the clipboard image: {}",
+        "Pano görüntüsü hazırlanamadı: {}",
     ),
     (
         "Could not prepare the protected keys: {}",
@@ -313,6 +417,10 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Cloudflare alt alanı okunamadı.",
     ),
     (
+        "Could not read the existing startup registration.",
+        "Mevcut başlangıç kaydı okunamadı.",
+    ),
+    (
         "Could not read the screenshot file: {}",
         "Ekran görüntüsü dosyası okunamadı: {}",
     ),
@@ -321,10 +429,30 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Ekran görüntüsü boyutu okunamadı: {}",
     ),
     (
+        "Could not read the update response status: {}",
+        "Güncelleme yanıtının durumu okunamadı: {}",
+    ),
+    (
+        "Could not read update data: {}",
+        "Güncelleme verisi okunamadı: {}",
+    ),
+    (
         "Could not receive the Cloudflare sign-in: {}",
         "Cloudflare girişi alınamadı: {}",
     ),
+    (
+        "Could not receive update data: {}",
+        "Güncelleme verisi alınamadı: {}",
+    ),
     ("Could not reload settings", "Ayarlar yenilenemedi"),
+    (
+        "Could not reserve a unique screenshot filename.",
+        "Benzersiz bir ekran görüntüsü dosya adı ayrılamadı.",
+    ),
+    (
+        "Could not restore startup registration (error {}).",
+        "Başlangıç kaydı geri yüklenemedi (hata {}).",
+    ),
     ("Could not restore the shortcut", "Kısayol geri yüklenemedi"),
     ("Could not save preferences", "Tercihler kaydedilemedi"),
     ("Could not save settings", "Ayarlar kaydedilemedi"),
@@ -349,7 +477,15 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Could not set Cloudflare request timeouts: {}",
         "Cloudflare istek süreleri ayarlanamadı: {}",
     ),
+    (
+        "Could not set update timeouts: {}",
+        "Güncelleme zaman aşımları ayarlanamadı: {}",
+    ),
     ("Could not skip this version", "Bu sürüm atlanamadı"),
+    (
+        "Could not stage the update: {}",
+        "Güncelleme hazırlanamadı: {}",
+    ),
     ("Could not start WinHTTP: {}", "WinHTTP başlatılamadı: {}"),
     (
         "Could not start the Cloudflare OAuth session (HTTP {}).",
@@ -373,6 +509,10 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Could not update the Worker; see the message for details.",
         "Worker güncellenemedi; ayrıntı uyarıda.",
     ),
+    (
+        "Could not write the staged update: {}",
+        "Hazırlanan güncelleme yazılamadı: {}",
+    ),
     ("Custom…", "Özel…"),
     ("Daily uploads", "Günlük yükleme"),
     ("Dark", "Koyu"),
@@ -388,6 +528,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Kurulum dosyası indiriliyor ve doğrulanıyor…",
     ),
     ("Downloading update", "Güncelleme indiriliyor"),
+    ("Duplicate OAuth parameter.", "Yinelenen OAuth parametresi."),
     ("Editor", "Düzenleyici"),
     (
         "Enter a positive whole number in every field.",
@@ -411,9 +552,15 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("General", "Genel"),
     ("Green", "Yeşil"),
     ("Grey", "Gri"),
+    ("HTTP {}, code {}", "HTTP {}, kod {}"),
+    ("HTTP {}, code {}: {}", "HTTP {}, kod {}: {}"),
     ("Hide more tools", "Diğer araçları gizle"),
     ("Highlighter", "Vurgulayıcı"),
     ("History", "Geçmiş"),
+    (
+        "Hotkey thread exited unexpectedly",
+        "Kısayol iş parçacığı beklenmedik şekilde sonlandı",
+    ),
     ("Image deleted.", "Resim silindi."),
     ("Image password", "Resim şifresi"),
     (
@@ -442,11 +589,43 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Invalid Cloudflare account ID.",
         "Geçersiz Cloudflare hesap kimliği.",
     ),
+    (
+        "Invalid Cloudflare callback method.",
+        "Cloudflare geri dönüş yöntemi geçersiz.",
+    ),
+    (
+        "Invalid Cloudflare callback path.",
+        "Cloudflare geri dönüş yolu geçersiz.",
+    ),
+    (
+        "Invalid Cloudflare callback request.",
+        "Cloudflare geri dönüş isteği geçersiz.",
+    ),
     ("Invalid image password.", "Geçersiz resim şifresi."),
     ("Invalid limit", "Geçersiz sınır"),
     ("Invalid line width", "Geçersiz çizgi kalınlığı"),
     ("Invalid link.", "Geçersiz bağlantı."),
+    (
+        "Invalid redirect encoding",
+        "Yönlendirme kodlaması geçersiz",
+    ),
+    (
+        "Invalid signed update metadata.",
+        "İmzalı güncelleme bilgileri geçersiz.",
+    ),
+    (
+        "Invalid update signature metadata.",
+        "Güncelleme imzası bilgileri geçersiz.",
+    ),
     ("JPEG quality", "JPEG kalitesi"),
+    (
+        "Keyboard hook could not be installed: {}",
+        "Klavye kancası kurulamadı: {}",
+    ),
+    (
+        "Keyboard hook state could not be initialized: state lock poisoned.",
+        "Klavye kancası başlatılamadı: durum kilidi bozuldu.",
+    ),
     ("Language", "Dil"),
     ("Later", "Daha sonra"),
     ("Latest images kept", "Saklanan son resim"),
@@ -478,8 +657,17 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Looking for the latest signed release. You can keep using isolmaSS.",
         "En yeni imzalı sürüm aranıyor. isolmaSS'yi kullanmaya devam edebilirsiniz.",
     ),
+    (
+        "Malformed Cloudflare callback.",
+        "Cloudflare geri dönüşü bozuk.",
+    ),
     ("Manage connection…", "Bağlantıyı yönet…"),
+    (
+        "Missing Cloudflare callback.",
+        "Cloudflare geri dönüşü eksik.",
+    ),
     ("More tools", "Diğer araçlar"),
+    ("No", "Hayır"),
     (
         "No Cloudflare account can be used with this permission.",
         "Cloudflare'da bu izinle kullanılabilen bir hesap bulunamadı.",
@@ -507,6 +695,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Notify after saving", "Kaydedince bildir"),
     ("Numbered step", "Numaralı adım"),
     ("Numbered steps", "Numaralandır"),
+    ("OK", "Tamam"),
     ("Off", "Kapalı"),
     ("Olive", "Zeytin"),
     ("On", "Açık"),
@@ -540,6 +729,10 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Redact (opaque)", "Karart (opak)"),
     ("Redo", "Yinele"),
     ("Refresh", "Yenile"),
+    (
+        "Release {} has no {} asset.",
+        "{} sürümünde {} dosyası yok.",
+    ),
     ("Retention (days)", "Saklama (gün)"),
     ("Save", "Kaydet"),
     ("Save failed", "Kaydetme başarısız"),
@@ -569,7 +762,15 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Cloudflare hesabınızdaki Worker'a gönderiliyor",
     ),
     ("Settings", "Ayarlar"),
+    (
+        "Settings could not be loaded because %APPDATA% is unavailable.",
+        "%APPDATA% kullanılamadığı için ayarlar yüklenemedi.",
+    ),
     ("Settings recovered", "Ayarlar kurtarıldı"),
+    (
+        "Settings were invalid and have been reset. The original was preserved at {}.",
+        "Ayarlar geçersizdi ve sıfırlandı. Özgün dosya {} konumunda saklandı.",
+    ),
     (
         "Setup did not finish. Choose Continue with Cloudflare again.",
         "Kurulum tamamlanamadı. Yeniden Cloudflare ile devam edin.",
@@ -669,12 +870,48 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     ("The Worker was updated.", "Worker güncellendi."),
     (
+        "The capture overlay could not be made visible.",
+        "Yakalama katmanı görünür hâle getirilemedi.",
+    ),
+    (
         "The consent page opens in the browser. After granting permission, come back to this window; setup finishes here.",
         "İzin sayfası tarayıcıda açılır. İzin verdikten sonra bu pencereye dönün; kurulum burada tamamlanır.",
     ),
     (
         "The current settings are kept. {}",
         "Geçerli ayarlar korunuyor. {}",
+    ),
+    (
+        "The downloaded installer does not match its signed SHA-256 digest.",
+        "İndirilen kurulum dosyası imzalı SHA-256 özetiyle eşleşmiyor.",
+    ),
+    (
+        "The executable has an invalid version resource.",
+        "Program dosyasının sürüm bilgisi geçersiz.",
+    ),
+    (
+        "The executable has no valid version resource.",
+        "Program dosyasında geçerli bir sürüm bilgisi yok.",
+    ),
+    (
+        "The executable version signature is invalid.",
+        "Program dosyasının sürüm imzası geçersiz.",
+    ),
+    (
+        "The installed application version is invalid.",
+        "Kurulu uygulamanın sürümü geçersiz.",
+    ),
+    (
+        "The installer file version does not match the signed release.",
+        "Kurulum dosyasının sürümü imzalı sürümle eşleşmiyor.",
+    ),
+    (
+        "The installer is not in the trusted update staging folder.",
+        "Kurulum dosyası güvenilir güncelleme klasöründe değil.",
+    ),
+    (
+        "The isolmaSS tray icon could not be restored after Explorer restarted.",
+        "Gezgin yeniden başladıktan sonra isolmaSS bildirim alanı simgesi geri yüklenemedi.",
     ),
     (
         "The key file has no folder.",
@@ -713,20 +950,120 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Korumalı anahtar dosyası bozuk.",
     ),
     (
+        "The release contains duplicate installers.",
+        "Sürümde birden fazla kurulum dosyası var.",
+    ),
+    (
+        "The release contains duplicate signatures.",
+        "Sürümde birden fazla imza var.",
+    ),
+    (
+        "The release installer has no valid SHA-256 digest.",
+        "Sürümdeki kurulum dosyasının geçerli bir SHA-256 özeti yok.",
+    ),
+    (
+        "The release tag is not a semantic version.",
+        "Sürüm etiketi geçerli bir sürüm numarası değil.",
+    ),
+    (
         "The required permissions were not granted on the Cloudflare consent screen ({}). Connect again and approve all permissions.",
         "Cloudflare izin ekranında gerekli izinler verilmedi ({}). Yeniden bağlanıp tüm izinleri onaylayın.",
+    ),
+    (
+        "The running isolmaSS instance is still starting or is unresponsive. Try opening settings again.",
+        "Çalışan isolmaSS örneği hâlâ açılıyor ya da yanıt vermiyor. Ayarları yeniden açmayı deneyin.",
+    ),
+    (
+        "The screenshot buffer is smaller than its dimensions.",
+        "Ekran görüntüsü arabelleği boyutlarından küçük.",
+    ),
+    (
+        "The screenshot destination '{}' is not a directory.",
+        "'{}' ekran görüntüsü hedefi bir klasör değil.",
+    ),
+    (
+        "The screenshot dimensions are too large.",
+        "Ekran görüntüsü boyutları çok büyük.",
     ),
     (
         "The screenshot or setup request exceeds the allowed size.",
         "Ekran görüntüsü veya kurulum isteği izin verilen boyutu aşıyor.",
     ),
     (
+        "The screenshot selection is empty or invalid.",
+        "Ekran görüntüsü seçimi boş veya geçersiz.",
+    ),
+    (
+        "The shortcut '{}' is already registered by Windows or another application.",
+        "'{}' kısayolu Windows veya başka bir uygulama tarafından zaten kullanılıyor.",
+    ),
+    (
         "The signed installer is ready. Save or close Settings; isolmaSS will install and reopen.",
         "İmzalı kurulum dosyası hazır. Ayarları kaydedin veya kapatın; isolmaSS kurulup yeniden açılacak.",
     ),
     (
+        "The staged installer exceeds the allowed size.",
+        "Hazırlanan kurulum dosyası izin verilen boyutu aşıyor.",
+    ),
+    (
+        "The staged installer version differs from its signed release.",
+        "Hazırlanan kurulum dosyasının sürümü imzalı sürümden farklı.",
+    ),
+    (
+        "The staged update signature is unavailable: {}",
+        "Hazırlanan güncellemenin imzası kullanılamıyor: {}",
+    ),
+    (
+        "The startup registration changed while it was being read.",
+        "Başlangıç kaydı okunurken değişti.",
+    ),
+    (
+        "The update URL contains an unsupported host.",
+        "Güncelleme adresi desteklenmeyen bir sunucu içeriyor.",
+    ),
+    (
+        "The update metadata is invalid: {}",
+        "Güncelleme bilgileri geçersiz: {}",
+    ),
+    (
+        "The update redirect is invalid: {}",
+        "Güncelleme yönlendirmesi geçersiz: {}",
+    ),
+    (
+        "The update request exceeded its time limit.",
+        "Güncelleme isteği süre sınırını aştı.",
+    ),
+    (
+        "The update request failed: {}",
+        "Güncelleme isteği başarısız oldu: {}",
+    ),
+    (
+        "The update response exceeded {} bytes.",
+        "Güncelleme yanıtı {} baytı aştı.",
+    ),
+    (
+        "The update response is too large.",
+        "Güncelleme yanıtı çok büyük.",
+    ),
+    (
+        "The update server returned HTTP {}.",
+        "Güncelleme sunucusu HTTP {} döndürdü.",
+    ),
+    (
+        "The update signature does not match the pinned publisher key.",
+        "Güncelleme imzası sabitlenmiş yayıncı anahtarıyla eşleşmiyor.",
+    ),
+    (
         "The upload failed (HTTP {}).",
         "Yükleme başarısız oldu (HTTP {}).",
+    ),
+    (
+        "The virtual screen exceeds the supported pixel-buffer size.",
+        "Sanal ekran desteklenen piksel arabelleği boyutunu aşıyor.",
+    ),
+    (
+        "The virtual screen has no capturable area.",
+        "Sanal ekranda yakalanabilir alan yok.",
     ),
     (
         "The window cannot close until the Cloudflare operation ends; wait a few seconds.",
@@ -746,17 +1083,42 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Today: uploads {} · views {}\r\nThis month: uploads {} · views {}\r\nActive images: {} · {} MB\r\nWatch your Cloudflare account's overall usage in its dashboard.",
         "Bugün: {} yükleme · {} görüntülenme\r\nBu ay: {} yükleme · {} görüntülenme\r\nAktif resim: {} · {} MB\r\nCloudflare hesabınızın genel kullanımını kendi panelinizden izleyin.",
     ),
+    (
+        "Too many update redirects.",
+        "Çok fazla güncelleme yönlendirmesi.",
+    ),
     ("Tools", "Araçlar"),
     ("Total storage (MB)", "Toplam alan (MB)"),
+    ("Tray icon", "Tepsi simgesi"),
     ("Try again", "Tekrar dene"),
     ("Undo", "Geri al"),
+    (
+        "Unexpected release information URL.",
+        "Sürüm bilgisi adresi beklenmedik.",
+    ),
+    (
+        "Unexpected staged installer filename.",
+        "Hazırlanan kurulum dosyasının adı beklenmedik.",
+    ),
+    (
+        "Unrecognized Cloudflare callback path.",
+        "Cloudflare geri dönüş yolu tanınmıyor.",
+    ),
     (
         "Unsupported Cloudflare content type.",
         "Desteklenmeyen Cloudflare içerik türü.",
     ),
     ("Update Worker", "Worker'ı güncelle"),
     ("Update check failed", "Güncelleme denetlenemedi"),
+    (
+        "Update downloads must use HTTPS.",
+        "Güncelleme indirmeleri HTTPS kullanmalı.",
+    ),
     ("Update in progress", "Güncelleme sürüyor"),
+    (
+        "Update operation cancelled.",
+        "Güncelleme işlemi iptal edildi.",
+    ),
     ("Update ready", "Güncelleme hazır"),
     ("Updates", "Güncelleme"),
     (
@@ -794,9 +1156,18 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Warn only", "Yalnızca uyar"),
     ("Warn/stop at (%)", "Uyarı/durma (%)"),
     ("White", "Beyaz"),
+    ("WinHTTP could not start: {}", "WinHTTP başlatılamadı: {}"),
+    (
+        "Windows SHA-256 failed: {}",
+        "Windows SHA-256 hesaplaması başarısız oldu: {}",
+    ),
     (
         "Windows could not create the PKCE digest: {}",
         "Windows PKCE özeti oluşturulamadı: {}",
+    ),
+    (
+        "Windows could not finish drawing the captured screen.",
+        "Windows yakalanan ekranı çizmeyi bitiremedi.",
     ),
     (
         "Windows could not generate a secure key: {}",
@@ -807,12 +1178,28 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Windows geçerli bir Cloudflare kaynak adı üretemedi; tekrar deneyin.",
     ),
     (
+        "Windows could not launch the installer (code {}).",
+        "Windows kurulum dosyasını başlatamadı (kod {}).",
+    ),
+    (
         "Windows could not open '{}'.",
         "Windows '{}' dosyasını açamadı.",
     ),
     (
         "Windows could not protect the Cloudflare keys: {}",
         "Windows Cloudflare anahtarlarını koruyamadı: {}",
+    ),
+    (
+        "Windows could not select the screenshot bitmap.",
+        "Windows ekran görüntüsü bit eşlemini seçemedi.",
+    ),
+    (
+        "Windows did not allocate a usable screenshot bitmap.",
+        "Windows kullanılabilir bir ekran görüntüsü bit eşlemi ayıramadı.",
+    ),
+    (
+        "Windows rejected the clipboard image: {}",
+        "Windows pano görüntüsünü reddetti: {}",
     ),
     (
         "Windows returned an invalid protected key.",
@@ -828,6 +1215,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Worker {} oluşturuldu fakat workers.dev etkinleştirilemedi: {}",
     ),
     ("Yellow", "Sarı"),
+    ("Yes", "Evet"),
     (
         "Your screenshots are uploaded only to the Worker in your own Cloudflare account. Nothing is sent until you connect.",
         "Ekran görüntüleriniz yalnızca kendi Cloudflare hesabınızdaki Worker'a yüklenir. Bağlanana kadar hiçbir görüntü gönderilmez.",
@@ -883,7 +1271,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "{} is used by Windows or another app. The previous shortcut was kept; choose another key combination.",
         "{} Windows veya başka bir uygulama tarafından kullanılıyor. Eski kısayol korundu; başka bir tuş birleşimi seçin.",
     ),
-    ("{} · {} KB · {} view{}", "{} · {} KB · {} görüntülenme{}"),
     ("{} · {} KB · {} views{}", "{} · {} KB · {} görüntülenme{}"),
+    ("{} · {} KB · {} view{}", "{} · {} KB · {} görüntülenme{}"),
     ("{}%", "%{}"),
 ];

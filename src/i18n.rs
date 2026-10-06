@@ -93,6 +93,10 @@ pub fn tf(template: &'static str, args: &[&dyn std::fmt::Display]) -> String {
     out
 }
 
+/// Held by tests that change the language, since tests run in parallel.
+#[cfg(test)]
+pub static TEST_LANGUAGE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,6 +184,7 @@ mod tests {
 
     #[test]
     fn placeholders_fill_in_order() {
+        let _lock = TEST_LANGUAGE_LOCK.lock().unwrap();
         set_preference(LanguagePreference::English);
         assert_eq!(tf("{} of {}", &[&1, &"two"]), "1 of two");
         set_preference(LanguagePreference::System);

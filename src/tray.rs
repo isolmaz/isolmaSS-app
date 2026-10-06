@@ -229,14 +229,13 @@ unsafe extern "system" fn tray_wnd_proc(
 ) -> LRESULT {
     if msg == TASKBAR_CREATED.load(Ordering::SeqCst) && msg != 0 {
         if add_tray_icon(hwnd).is_err() {
-            let _ = unsafe {
-                MessageBoxW(
-                    hwnd,
-                    w!("The isolmaSS tray icon could not be restored after Explorer restarted."),
-                    w!("isolmaSS tray error"),
-                    MB_OK | MB_ICONERROR,
-                )
-            };
+            crate::ui::error(
+                hwnd,
+                crate::i18n::t("Tray icon"),
+                crate::i18n::t(
+                    "The isolmaSS tray icon could not be restored after Explorer restarted.",
+                ),
+            );
         }
         return LRESULT(0);
     }
