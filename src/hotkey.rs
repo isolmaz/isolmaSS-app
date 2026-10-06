@@ -339,7 +339,7 @@ pub unsafe fn process_keyboard_hook(
     let is_up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
 
     // -------------------------------------------------------------------------
-    // Overlay Active Routing (Slice C1)
+    // Overlay Active Routing
     // -------------------------------------------------------------------------
     if is_overlay_active() && !overlay_input_suspended() {
         let raw_hwnd = OVERLAY_HWND.load(Ordering::SeqCst);

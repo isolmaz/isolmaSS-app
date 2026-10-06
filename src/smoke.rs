@@ -40,13 +40,13 @@ fn verify_pe_subsystem_windows_gui(
 
 pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     println!("============================================================");
-    println!(" isolmaSS Smoke Test — Full MVP Phase A & B Verification");
+    println!(" isolmaSS smoke test");
     println!("============================================================");
 
     // ------------------------------------------------------------
-    // Slice A1: Global Hotkey, Registry Suppression & WH_KEYBOARD_LL Hook
+    // Global Hotkey, Registry Suppression & WH_KEYBOARD_LL Hook
     // ------------------------------------------------------------
-    println!("\n[Slice A1] Testing Global Hotkey Configuration & Registration...");
+    println!("\nTesting Global Hotkey Configuration & Registration...");
     let default_cfg = HotkeyConfig::default();
     assert_eq!(default_cfg.description, "PrintScreen");
     let fallback_cfg = HotkeyConfig::fallback();
@@ -141,12 +141,12 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     assert!(!loaded_cfg.description.is_empty());
     drop(handle);
     println!("  - Hotkey unregistered, WH_KEYBOARD_LL unhooked, and thread cleanly shut down.");
-    println!("  -> Slice A1: PASSED");
+    println!("  -> PASSED");
 
     // ------------------------------------------------------------
-    // Slice A2: Virtual Screen Capture & Dimming Buffer Pre-rendering
+    // Virtual Screen Capture & Dimming Buffer Pre-rendering
     // ------------------------------------------------------------
-    println!("\n[Slice A2] Testing Full-Screen Virtual Screen Capture (BitBlt)...");
+    println!("\nTesting Full-Screen Virtual Screen Capture (BitBlt)...");
     let capture_start = Instant::now();
     let capture = CaptureBuffer::capture_virtual_screen()?;
     let capture_duration = capture_start.elapsed();
@@ -188,21 +188,21 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     assert_eq!(non_zero_pixels, dimmed_correctly);
-    println!("  -> Slice A2: PASSED");
+    println!("  -> PASSED");
 
     // ------------------------------------------------------------
-    // Slice A3: Overlay Window Architecture
+    // Overlay Window Architecture
     // ------------------------------------------------------------
-    println!("\n[Slice A3] Verifying Fullscreen Layered Overlay Properties...");
+    println!("\nVerifying Fullscreen Layered Overlay Properties...");
     println!("  - Target Styles: WS_POPUP");
     println!("  - Extended Styles: WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST");
     println!("  - Cursor: IDC_CROSS / IDC_HAND");
-    println!("  -> Slice A3: informational; runtime window behavior is verified separately.");
+    println!("  -> informational; runtime window behavior is verified separately.");
 
     // ------------------------------------------------------------
-    // Slice A4: Drag-to-Select Geometry & Fast Scanline Punch-Out
+    // Drag-to-Select Geometry & Fast Scanline Punch-Out
     // ------------------------------------------------------------
-    println!("\n[Slice A4] Testing Drag-to-Select Geometry & Fast Scanline Punch-Out...");
+    println!("\nTesting Drag-to-Select Geometry & Fast Scanline Punch-Out...");
     let p1 = (150, 100);
     let p2 = (650, 480);
     let selection = Rect::normalized(p1, p2).clamp(capture.width, capture.height);
@@ -249,14 +249,12 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         &working_buffer[offset..offset + 4],
         &capture.dimmed[offset..offset + 4]
     );
-    println!("  -> Slice A4: PASSED");
+    println!("  -> PASSED");
 
     // ------------------------------------------------------------
-    // Slice A5: Single-Click Window Snap (EnumWindows + DWM)
+    // Single-Click Window Snap (EnumWindows + DWM)
     // ------------------------------------------------------------
-    println!(
-        "\n[Slice A5] Testing Single-Click Window Snap (EnumWindows + DWM Extended Frame Bounds)..."
-    );
+    println!("\nTesting Single-Click Window Snap (EnumWindows + DWM Extended Frame Bounds)...");
     let windows = get_visible_windows(None);
     assert!(!windows.is_empty());
     for (i, win) in windows.iter().take(5).enumerate() {
@@ -276,12 +274,12 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     let center_y = (first_win.bounds.top + first_win.bounds.bottom) / 2;
     let hit = find_window_at_point((center_x, center_y), None);
     assert!(hit.is_some());
-    println!("  -> Slice A5: PASSED");
+    println!("  -> PASSED");
 
     // ------------------------------------------------------------
-    // Slice A6: Selection Commit & L Toolbar
+    // Selection Commit & Toolbar
     // ------------------------------------------------------------
-    println!("\n[Slice A6] Testing Selection Commit & L Toolbar Layout...");
+    println!("\nTesting Selection Commit & Toolbar Layout...");
     let tb = Toolbar::layout(
         &selection,
         Rect::new(0, 0, capture.width, capture.height),
@@ -339,12 +337,12 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         "  - Toolbar layout: coherent bottom-up L, {} controls aligned.",
         tb.buttons.len()
     );
-    println!("  -> Slice A6: PASSED");
+    println!("  -> PASSED");
 
     // ------------------------------------------------------------
-    // Slices A7, A8, A9, A10: Annotation Objects & Geometry
+    // Annotation Objects & Geometry
     // ------------------------------------------------------------
-    println!("\n[Slices A7 - A10] Testing Annotation Objects (Rectangle, Arrow, Pen, Text)...");
+    println!("\nTesting Annotation Objects (Rectangle, Arrow, Pen, Text)...");
     let mut rect_obj = AnnotationObject::new(
         1,
         AnnotationKind::Rectangle {
@@ -389,12 +387,12 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     );
     assert!(text_obj.hit_test((60, 85)));
     println!("  - Geometric annotations verified.");
-    println!("  -> Slices A7 - A10: PASSED");
+    println!("  -> PASSED");
 
     // ------------------------------------------------------------
-    // Slice A11: Blur / Mosaic Tool
+    // Blur / Mosaic Tool
     // ------------------------------------------------------------
-    println!("\n[Slice A11] Testing Blur / Mosaic Tool (Pixelate Block Averaging)...");
+    println!("\nTesting Blur / Mosaic Tool (Pixelate Block Averaging)...");
     let mut test_image = vec![0u8; 100 * 100 * 4];
     for y in 20..40 {
         for x in 20..80 {
@@ -420,12 +418,12 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     let p1 = ((20 * 100 + 25) * 4) as usize;
     assert_eq!(&test_image[p0..p0 + 4], &test_image[p1..p1 + 4]);
     println!("  - Blur mosaic verified.");
-    println!("  -> Slice A11: PASSED");
+    println!("  -> PASSED");
 
     // ------------------------------------------------------------
-    // Slice A12: Explicit Select & Manipulation
+    // Explicit Select & Manipulation
     // ------------------------------------------------------------
-    println!("\n[Slice A12] Testing Explicit Select & Manipulation...");
+    println!("\nTesting Explicit Select & Manipulation...");
     let objects = [rect_obj.clone(), arrow_obj.clone()];
     let hit_id = objects
         .iter()
@@ -433,12 +431,12 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         .find(|o| o.hit_test((115, 125)))
         .map(|o| o.id);
     assert_eq!(hit_id, Some(rect_obj.id));
-    println!("  -> Slice A12: PASSED");
+    println!("  -> PASSED");
 
     // ------------------------------------------------------------
-    // Slice A13: Command History Undo / Redo Stack
+    // Command History Undo / Redo Stack
     // ------------------------------------------------------------
-    println!("\n[Slice A13] Testing Undo / Redo Command History Stack...");
+    println!("\nTesting Undo / Redo Command History Stack...");
     let mut history = HistoryManager::new(50);
     let mut session_objects = Vec::new();
 
@@ -456,12 +454,12 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(session_objects.len(), 1);
 
     println!("  - Undo/Redo stack verified.");
-    println!("  -> Slice A13: PASSED");
+    println!("  -> PASSED");
 
     // ------------------------------------------------------------
-    // Slice A14: Copy to Clipboard (DIB Flattening)
+    // Copy to Clipboard (DIB Flattening)
     // ------------------------------------------------------------
-    println!("\n[Slice A14] Testing Copy to Clipboard & Standalone DIB Generation...");
+    println!("\nTesting Copy to Clipboard & Standalone DIB Generation...");
     let sample_dib = flatten_selection_to_dib(
         &capture.original,
         capture.width,
@@ -518,22 +516,22 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     drop(large_dib);
     copy_dib_to_clipboard(None, &sample_dib)?;
     println!("  - Standalone 32-bit DIB copied to Windows Clipboard.");
-    println!("  -> Slice A14: PASSED");
+    println!("  -> PASSED");
 
     // ------------------------------------------------------------
-    // Slice A15: Hierarchical Escape & Dismiss Flow
+    // Hierarchical Escape & Dismiss Flow
     // ------------------------------------------------------------
-    println!("\n[Slice A15] Verifying Hierarchical Escape Flow...");
+    println!("\nVerifying Hierarchical Escape Flow...");
     println!("  - Level 1: In text edit -> Esc cancels text input.");
     println!("  - Level 2: Annotation selected -> Esc deselects.");
     println!("  - Level 3: Selection active -> Esc cancels selection.");
     println!("  - Level 4: In hover mode -> Esc destroys window.");
-    println!("  -> Slice A15: covered by the behavioral Escape checks in C1 below.");
+    println!("  -> covered by the keyboard routing checks below.");
 
     // ------------------------------------------------------------
-    // Slice B1: Save to File (PNG via GDI+)
+    // Save to File (PNG via GDI+)
     // ------------------------------------------------------------
-    println!("\n[Slice B1] Testing Save to File (PNG via Native GDI+)...");
+    println!("\nTesting Save to File (PNG via Native GDI+)...");
     let test_dir = std::env::temp_dir();
     let test_png_path = test_dir.join(format!("isolmass-smoke-{}.png", std::process::id()));
 
@@ -635,16 +633,16 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("  - Save directory: '{}'", default_dir.display());
     println!("  - Filename sample: '{}'", gen_name);
-    println!("  -> Slice B1: PASSED");
+    println!("  -> PASSED");
 
     // Free large temporary test buffers so idle memory is measured accurately
     drop(working_buffer);
     drop(capture);
 
     // ------------------------------------------------------------
-    // Slice B2: Color Palette & Thickness Sub-Bar
+    // Color Palette & Thickness Sub-Bar
     // ------------------------------------------------------------
-    println!("\n[Slice B2] Testing Color Palette & Thickness Presets...");
+    println!("\nTesting Color Palette & Thickness Presets...");
     assert_eq!(PRESET_COLORS.len(), 8);
     assert_eq!(PRESET_THICKNESSES, [2, 4, 8]);
 
@@ -682,12 +680,12 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("  - 8 preset colors & 3 thickness levels verified.");
     println!("  - Live object modification with Undo/Redo verified.");
-    println!("  -> Slice B2: PASSED");
+    println!("  -> PASSED");
 
     // ------------------------------------------------------------
-    // Slice B3: Shift-Key Angle & Square Snapping
+    // Shift-Key Angle & Square Snapping
     // ------------------------------------------------------------
-    println!("\n[Slice B3] Testing Shift-Key Angle & Square Snapping Math...");
+    println!("\nTesting Shift-Key Angle & Square Snapping Math...");
 
     // 1. Square snapping: delta_x = 100, delta_y = 60 -> side = 100 -> (100, 100)
     let start = (50, 50);
@@ -717,12 +715,12 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("  - 1:1 Square snapping verified (dx == dy == 100).");
     println!("  - 45° and 0° Arrow angle snapping verified.");
-    println!("  -> Slice B3: PASSED");
+    println!("  -> PASSED");
 
     // ------------------------------------------------------------
-    // Slice B4: Simple/Advanced Native Settings Window & Model
+    // Simple/Advanced Native Settings Window & Model
     // ------------------------------------------------------------
-    println!("\n[Slice B4] Testing Settings Model & JSON Serialization...");
+    println!("\nTesting Settings Model & JSON Serialization...");
     let default_settings = Settings::default();
     let json_str = serde_json::to_string_pretty(&default_settings)?;
     assert!(json_str.contains("hotkey"));
@@ -747,12 +745,12 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("  - Settings serialization & deserialization verified.");
     println!("  - Native settings dialog window available via --settings or Ctrl+,");
-    println!("  -> Slice B4: PASSED");
+    println!("  -> PASSED");
 
     // ------------------------------------------------------------
-    // Slice B5: Build & Size / RAM Verification
+    // Build & Size / RAM Verification
     // ------------------------------------------------------------
-    println!("\n[Slice B5] Verifying Executable Size and Sampling Process Memory...");
+    println!("\nVerifying Executable Size and Sampling Process Memory...");
 
     // 1. Executable size check (target <= 2.5 MB)
     let exe_path = "target/release/isolmass.exe";
@@ -788,19 +786,19 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         "  - Smoke process working set: {} bytes (untrimmed; informational, not an idle budget result).",
         pmc.WorkingSetSize
     );
-    println!("  -> Slice B5: PASSED");
+    println!("  -> PASSED");
 
     // ============================================================
-    // Phase C Verification (Slices C1 to C6)
+    // Interaction, subsystem, tray and settings checks
     // ============================================================
     println!("\n------------------------------------------------------------");
-    println!(" Phase C Verification: Production Hardening & Critical Fixes");
+    println!(" Interaction, subsystem, tray and settings checks");
     println!("------------------------------------------------------------");
 
     // ------------------------------------------------------------
-    // Slice C1: Keyboard Input on Overlay (Esc Dismiss + Text Tool)
+    // Keyboard Input on Overlay (Esc Dismiss + Text Tool)
     // ------------------------------------------------------------
-    println!("\n[Slice C1] Testing Overlay Keyboard Routing, Esc Flow & Text Tool...");
+    println!("\nTesting Overlay Keyboard Routing, Esc Flow & Text Tool...");
 
     // 1. Hook routing when overlay is active
     let kb_esc = hotkey::create_test_kbdllhookstruct(
@@ -986,14 +984,12 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     );
     assert_eq!(reedit_state.caret, 4);
 
-    println!(
-        "  -> Slice C1: PASSED (Esc hierarchical dismiss & text tool production methods verified)"
-    );
+    println!("  -> PASSED (Esc hierarchical dismiss & text tool production methods verified)");
 
     // ------------------------------------------------------------
-    // Slice C2: Select-Only Region Move & Resize
+    // Select-Only Region Move & Resize
     // ------------------------------------------------------------
-    println!("\n[Slice C2] Testing Select-Only Region Move & Corner Resize...");
+    println!("\nTesting Select-Only Region Move & Corner Resize...");
     let sel = Rect::new(100, 100, 300, 200);
 
     // Corner handles (8x8 px centered on vertices, half_h = 4)
@@ -1066,14 +1062,12 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(translated_bounds.top, orig_bounds.top + dy);
     assert_eq!(translated_bounds.right, orig_bounds.right + dx);
     assert_eq!(translated_bounds.bottom, orig_bounds.bottom + dy);
-    println!(
-        "  -> Slice C2: PASSED (Select-only region move and corner resize hit zones verified)"
-    );
+    println!("  -> PASSED (Select-only region move and corner resize hit zones verified)");
 
     // ------------------------------------------------------------
-    // Slice C3: Tool Interaction UX Pass (Contrast Outline + Movement Threshold)
+    // Tool Interaction UX Pass (Contrast Outline + Movement Threshold)
     // ------------------------------------------------------------
-    println!("\n[Slice C3] Testing Dual-Tone Contrast Outline & Movement Threshold...");
+    println!("\nTesting Dual-Tone Contrast Outline & Movement Threshold...");
     let mut test_buf = vec![0u8; 100 * 100 * 4];
     let test_rect = Rect::new(20, 20, 80, 80);
     CaptureBuffer::draw_contrast_selection(
@@ -1105,12 +1099,12 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         "Normal drag must be accepted"
     );
 
-    println!("  -> Slice C3: PASSED (Dual-tone contrast border & 3px movement threshold verified)");
+    println!("  -> PASSED (Dual-tone contrast border & 3px movement threshold verified)");
 
     // ------------------------------------------------------------
-    // Slice C4: Pure GUI Subsystem & Console Attach Verification
+    // Pure GUI Subsystem & Console Attach Verification
     // ------------------------------------------------------------
-    println!("\n[Slice C4] Verifying Pure GUI Subsystem & Console Attachment...");
+    println!("\nVerifying Pure GUI Subsystem & Console Attachment...");
     println!("  - Target Subsystem: #![windows_subsystem = \"windows\"]");
     println!("  - Console Attachment: AttachConsole(ATTACH_PARENT_PROCESS) on CLI arguments");
     println!("  - Daemon Execution: Zero console window on standard launch / double-click");
@@ -1136,12 +1130,12 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         subsystem,
         target_bin.display()
     );
-    println!("  -> Slice C4: PASSED (Pure GUI subsystem & PE header verified)");
+    println!("  -> PASSED (Pure GUI subsystem & PE header verified)");
 
     // ------------------------------------------------------------
-    // Slice C5: System Tray Icon & Right-Click Menu Lifecycle
+    // System Tray Icon & Right-Click Menu Lifecycle
     // ------------------------------------------------------------
-    println!("\n[Slice C5] Testing System Tray Manager Lifecycle...");
+    println!("\nTesting System Tray Manager Lifecycle...");
     let tray_manager = tray::TrayManager::create()?;
     println!("  - System Tray icon registered with Shell_NotifyIconW(NIM_ADD)");
 
@@ -1150,12 +1144,12 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
 
     drop(tray_manager);
     println!("  - System Tray icon cleanly removed with Shell_NotifyIconW(NIM_DELETE)");
-    println!("  -> Slice C5: PASSED (System tray icon registration & clean deletion verified)");
+    println!("  -> PASSED (System tray icon registration & clean deletion verified)");
 
     // ------------------------------------------------------------
-    // Slice C6: Standalone Settings Panel & Behavior Toggles
+    // Standalone Settings Panel & Behavior Toggles
     // ------------------------------------------------------------
-    println!("\n[Slice C6] Testing Standalone Settings Panel & Behavior Toggles...");
+    println!("\nTesting Standalone Settings Panel & Behavior Toggles...");
     let default_settings = Settings::default();
     assert!(
         default_settings.enable_window_snap,
@@ -1227,13 +1221,13 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         "Legacy settings must default close_after_action to true"
     );
     println!(
-        "  -> Slice C6: PASSED (Settings isolated defaults, round-trips, file IO & error propagation verified)"
+        "  -> PASSED (Settings isolated defaults, round-trips, file IO & error propagation verified)"
     );
 
     // ------------------------------------------------------------
-    // C9 packaging check: installer artifact and distribution size budget only
+    // Packaging: installer artifact and distribution size budget only
     // ------------------------------------------------------------
-    println!("\n[C9 Packaging Check] Verifying Installer Artifact & Distribution Size Budget...");
+    println!("\nVerifying Installer Artifact & Distribution Size Budget...");
     const BUDGET_BYTES: u64 = 3 * 1024 * 1024;
     let nsi_path = std::path::Path::new("installer.nsi");
     assert!(
@@ -1330,7 +1324,7 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         setup_size,
         BUDGET_BYTES
     );
-    println!("  -> C9 Packaging Check: PASSED (Installer artifact & <= 3 MB size budget verified)");
+    println!("  -> PASSED (Installer artifact & <= 3 MB size budget verified)");
 
     println!("\n============================================================");
     println!(" AUTOMATED SMOKE CHECKS PASSED (listed behavior and packaging checks)");

@@ -80,6 +80,3 @@ Command line: `--capture-once` (editor without the tray; waits for an upload car
 
 Automated tests do not cover the interactive UI. Before a release, check by hand: both themes and both languages, DPI scaling, every tool and export path, tray and Settings flows, updater rollback in an isolated Windows profile, and Cloudflare setup and upload with a real account. MIT license: [LICENSE](../LICENSE); dependencies: [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
 
-## README media
-
-`docs/media/*.gif` (capture, annotate, edit, redact, share) are recordings of the real release build on a synthetic English demo page in a kiosk browser (no personal data), with English captions added afterwards. Re-record them when the editor, toolbar or upload card changes, and delete the demo uploads from the Worker afterwards.
