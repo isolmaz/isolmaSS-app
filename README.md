@@ -1,25 +1,40 @@
 # isolmaSS
 
-**Capture, mark up, share.** A small native Windows screenshot editor written in Rust. Copy or save locally, or get a share link in about a second from a Worker in **your own Cloudflare account**. No central server, no account, no analytics. Version **0.6.2**.
+**Screenshot, mark up, share a link — from your own Cloudflare account.**
 
-**[Download for Windows 10/11](https://github.com/isolmaz/isolmaSS-app/releases/latest/download/isolmass-setup.exe)** · [Portable ZIP](https://github.com/isolmaz/isolmaSS-app/releases/latest/download/isolmass-portable-windows-x64.zip) · [Website](https://ss.isolmaz.com) · [Guide](docs/GUIDE.md)
+A small, free Windows screenshot editor. Press PrintScreen, draw on the capture, press Ctrl+U, and about a second later a share link is on your clipboard. The image goes only to a private Worker in **your** Cloudflare account, never to someone else's server.
 
-## Highlights
+**[Download for Windows 10/11](https://github.com/isolmaz/isolmaSS-app/releases/latest/download/isolmass-setup.exe)** · [Portable ZIP](https://github.com/isolmaz/isolmaSS-app/releases/latest/download/isolmass-portable-windows-x64.zip) · [Website](https://ss.isolmaz.com) · Version **0.6.2**
 
-- **Instant capture.** PrintScreen freezes every monitor; drag a region or click a window.
-- **Eight annotation tools.** Frame, arrow, pen, highlighter, text, auto-numbered steps, blur and opaque redaction.
-- **Edit after drawing.** Every shape stays an object: select it to move, resize, recolor, change its width or delete it. Undo and redo cover every edit.
-- **Real redaction.** **Redact** (M) replaces pixels with solid dark ones and is applied last, so nothing shows through.
-- **One-key sharing.** Ctrl+U uploads to a private Worker in your own Cloudflare account and copies the link. Optional passwords, limits and expiry.
-- **Small and native.** One ~1.2 MB executable using Win32 and GDI, per-monitor DPI aware, light and dark themes, signed in-app updates.
+## Why isolmaSS
+
+- **Your links stay yours.** Sharing runs on a Worker the app installs in your own Cloudflare account; Cloudflare's free plan is enough. There is no isolmaSS server, account, advertising or analytics.
+- **You stay in control.** Delete any link from the app, add a password, and set limits and how long images are kept.
+- **Fast.** PrintScreen → drag → Ctrl+U. The link is copied before you switch windows.
+- **Drawings stay editable.** Every arrow, frame or text remains an object you can move, resize, recolor or delete.
+- **Tiny and native.** One ~1.2 MB Windows program, light and dark themes, English and Turkish, signed updates. Open source (MIT).
+
+## Share from your own Cloudflare
+
+Ctrl+U uploads the capture to your Worker and copies the link. Anyone you send it to can open it in a browser.
+
+![Uploading with Ctrl+U and opening the link in a browser](docs/media/share.gif)
+
+The Cloudflare window shows your Worker's usage, sets your limits and lists your images. Deleting an image stops its link at once.
+
+![Cloudflare window: usage, limits, and deleting an image](docs/media/cloudflare.gif)
+
+**Setup is a one-time wizard.** The first upload asks you to sign in to Cloudflare in your browser and approve two permissions; the app then creates the Worker for you. You don't paste keys or use a command line. Passwords for new uploads, upload and storage limits, and automatic expiry are built in. Details: [docs/CLOUDFLARE.md](docs/CLOUDFLARE.md).
 
 ## Capture
+
+PrintScreen freezes every monitor; drag a region or click a window.
 
 ![Dragging a region over a dashboard](docs/media/capture.gif)
 
 ## Annotate
 
-Each tool has a one-letter shortcut. Color and line width (1–64 px) sit in the toolbar.
+Eight tools, each with a one-letter shortcut: frame, arrow, pen, highlighter, text, numbered steps, blur and opaque redaction. Color and line width (1–64 px) sit in the toolbar.
 
 ![Frame, arrow, pen, highlighter, text and numbered steps](docs/media/annotate.gif)
 
@@ -31,17 +46,9 @@ Press **V**, click any drawing, then drag it, drag its handles or press Delete. 
 
 ## Hide sensitive details
 
-Blur is a visual effect. For secrets use opaque redaction, which cannot be undone in the exported image.
+Blur is only a visual effect. For secrets use **Redact** (M): it replaces pixels with solid ones and is applied last, so nothing shows through in the exported image.
 
 ![Blurring an email address and redacting an API key](docs/media/redact.gif)
-
-## Share
-
-**Ctrl+C** copies and **Ctrl+S** saves. **Ctrl+U** uploads: the editor closes, and a card shows the link, already on your clipboard.
-
-![Uploading and getting a link](docs/media/share.gif)
-
-The first upload connects Cloudflare once: sign in in the browser, approve two permissions, and the app installs a private Worker in your account. Details: [docs/CLOUDFLARE.md](docs/CLOUDFLARE.md).
 
 ## Shortcuts
 
@@ -57,7 +64,7 @@ The first upload connects Cloudflare once: sign in in the browser, approve two p
 | Arrow keys | Nudge the selection or drawing (Shift: 10 px) |
 | Esc or right-click | Step back or close |
 
-All shortcuts, settings and file locations: [docs/GUIDE.md](docs/GUIDE.md). The interface is in English and Turkish, follows the Windows display language and can be changed in Settings; the toolbar is icon-only.
+All shortcuts, settings and file locations: [docs/GUIDE.md](docs/GUIDE.md). The interface follows the Windows display language (English or Turkish) and can be changed in Settings.
 
 ## Privacy
 
