@@ -11,13 +11,13 @@ Bug reports and pull requests are welcome.
 ## Pull requests
 
 1. Keep changes focused; match the surrounding code's naming, comments and idioms.
-2. Run the local checks. There is no hosted CI and GitHub Actions is disabled for this repository; every check runs on your machine:
+2. Run the local checks. GitHub Actions runs the same checks on every pull request, but running them first saves a round trip:
 
    ```powershell
    powershell -ExecutionPolicy Bypass -File scripts\check.ps1
    ```
 
-   It runs `cargo fmt --check`, Clippy with warnings as errors, the tests and `node --check` on the Worker. Please do not add workflow files.
+   It runs `cargo fmt --check`, Clippy with warnings as errors, the tests and `node --check` on the Worker. The workflow in `.github/workflows/ci.yml` must stay limited to these checks: no secrets, packaging, signing or release steps.
 
 3. Update the affected documentation in the same change: [README.md](README.md), [docs/GUIDE.md](docs/GUIDE.md), [docs/CLOUDFLARE.md](docs/CLOUDFLARE.md) or [SECURITY.md](SECURITY.md).
 4. If the editor, toolbar or upload card changes visibly, mention it so the README media can be re-recorded.

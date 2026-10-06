@@ -74,7 +74,7 @@ powershell -ExecutionPolicy Bypass -File scripts\check.ps1   # fmt, clippy, test
 cmd /c package.bat
 ```
 
-`package.bat` verifies versions, size budgets and SHA-256. Set `ISOLMASS_BUILD_DIR=target\release-candidate` while `target\release\isolmass.exe` is running. Verification runs locally with the commands above; there is no hosted CI and GitHub Actions is disabled. `release.bat` needs the publisher's non-exportable signing key. Release steps: [DISTRIBUTION.md](../DISTRIBUTION.md).
+`package.bat` verifies versions, size budgets and SHA-256. Set `ISOLMASS_BUILD_DIR=target\release-candidate` while `target\release\isolmass.exe` is running. Verification runs locally with the commands above; GitHub Actions only runs fmt, Clippy, tests and the Worker syntax check, never packaging. `release.bat` needs the publisher's non-exportable signing key. Release steps: [DISTRIBUTION.md](../DISTRIBUTION.md).
 
 Command line: `--capture-once` (editor without the tray; waits for an upload card to close), `--settings`, `--check-update`, `--verify-update PATH`, `--benchmark N`, `--fix-printscreen` and `--help`. `--smoke-test` needs an interactive desktop and **changes the clipboard**.
 
