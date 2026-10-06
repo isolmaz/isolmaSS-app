@@ -1,0 +1,56 @@
+[package]
+name = "isolmass"
+version = "0.6.2"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+description = "Native Windows screenshot editor: capture, mark up, and share links from your own Cloudflare Worker"
+repository = "https://github.com/isolmaz/isolmaSS-app"
+homepage = "https://ss.isolmaz.com"
+readme = "README.md"
+keywords = ["screenshot", "windows", "annotation", "cloudflare"]
+categories = ["multimedia::images"]
+publish = false
+
+[dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_GdiPlus",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_LibraryLoader",
+    "Win32_Graphics_Dwm",
+    "Win32_System_DataExchange",
+    "Win32_UI_HiDpi",
+    "Win32_System_Threading",
+    "Win32_System_Time",
+    "Win32_System_Memory",
+    "Win32_System_IO",
+    "Win32_System_SystemInformation",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Console",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_Controls",
+    "Win32_UI_Controls_Dialogs",
+    "Win32_System_Com",
+    "Win32_System_Registry",
+    "Win32_Storage_FileSystem",
+    "Win32_Networking_WinHttp",
+    "Win32_Security_Cryptography",
+    "Win32_Globalization",
+] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[[bin]]
+name = "isolmass"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

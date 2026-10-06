@@ -1,0 +1,14 @@
+{
+  "name": "isolmass-share",
+  "main": "./worker.mjs",
+  "compatibility_date": "2026-09-24",
+  "workers_dev": true,
+  "durable_objects": { "bindings": [{ "name": "STORE", "class_name": "ShareStore" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ShareStore"] }],
+  "ratelimits": [{ "name": "VIEW_LIMITER", "namespace_id": "4917", "simple": { "limit": 60, "period": 60 } }],
+  "secrets": { "required": ["UPLOAD_TOKEN", "ADMIN_TOKEN"] },
+  "observability": {
+    "enabled": true,
+    "traces": { "enabled": true, "head_sampling_rate": 0.01 }
+  }
+}

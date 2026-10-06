@@ -1,0 +1,5 @@
+# Local Worker simulation only. The desktop app generates separate keys and
+# uploads them as Cloudflare Worker secrets after OAuth consent; users never paste them.
+# Never put real credentials in source control.
+UPLOAD_TOKEN=
+ADMIN_TOKEN=
