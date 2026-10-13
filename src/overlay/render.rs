@@ -57,7 +57,7 @@ impl OverlayState {
                         width,
                         height,
                         &snap,
-                        [246, 130, 59, 255],
+                        crate::theme::BRAND_AMBER_BGRA,
                         2,
                     );
                 }
@@ -67,7 +67,14 @@ impl OverlayState {
 
                 if let Some(sel) = self.committed_selection {
                     self.capture.punch_out(buffer, &sel);
-                    CaptureBuffer::draw_border(buffer, width, height, &sel, [246, 130, 59, 255], 2);
+                    CaptureBuffer::draw_border(
+                        buffer,
+                        width,
+                        height,
+                        &sel,
+                        crate::theme::BRAND_AMBER_BGRA,
+                        2,
+                    );
                 }
             }
             OverlayMode::SelectionActive => {
@@ -141,7 +148,7 @@ impl OverlayState {
                         width,
                         height,
                         &sel,
-                        [255, 91, 99, 255],
+                        crate::theme::BRAND_AMBER_BGRA,
                     );
                 }
 
@@ -234,8 +241,8 @@ impl OverlayState {
                                     .1,
                             ),
                             0,
-                            COLORREF(0xffd5c7),
-                            COLORREF(0xffd5c7),
+                            crate::theme::TEXT_SELECTION,
+                            crate::theme::TEXT_SELECTION,
                         );
                     }
                     crate::drawing::text(

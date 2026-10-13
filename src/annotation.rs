@@ -837,7 +837,7 @@ impl AnnotationObject {
             AnnotationKind::Arrow { .. } => self.bounds().inflate(4, 4),
             _ => self.geometry_bounds().inflate(4, 4),
         };
-        let pen = unsafe { CreatePen(PS_DOT, 1, COLORREF(0x00D77800)) }; // Accent blue in BGR
+        let pen = unsafe { CreatePen(PS_DOT, 1, crate::theme::BRAND_AMBER) };
         if pen.is_invalid() {
             return;
         }
@@ -860,16 +860,27 @@ impl AnnotationObject {
             let _ = GdiRectangle(hdc, b.left, b.top, b.right, b.bottom);
         }
 
-        // Corner handles
-        let handle_brush = unsafe { CreateSolidBrush(COLORREF(0x00D77800)) };
-        if handle_brush.is_invalid() {
+        // Handles: white squares with a solid amber outline, readable on any image.
+        let handle_pen = unsafe { CreatePen(PS_SOLID, 1, crate::theme::BRAND_AMBER) };
+        if handle_pen.is_invalid() {
             return; // dashed box is already drawn; degrade to no handles
         }
-        let old_hbrush = unsafe { SelectObject(hdc, HGDIOBJ(handle_brush.0)) };
+        let old_handle_pen = unsafe { SelectObject(hdc, HGDIOBJ(handle_pen.0)) };
+        let _handle_pen_guard = PenGuard {
+            hdc,
+            old: old_handle_pen,
+            pen: handle_pen,
+        };
+        let old_hbrush = unsafe {
+            SelectObject(
+                hdc,
+                GetStockObject(windows::Win32::Graphics::Gdi::WHITE_BRUSH),
+            )
+        };
         let _handle_guard = BrushGuard {
             hdc,
             old: old_hbrush,
-            brush: Some(handle_brush),
+            brush: None,
         };
 
         let (handles, count) = self.resize_handle_points();

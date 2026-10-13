@@ -341,7 +341,7 @@ fn layout(hwnd: HWND, state: &State) -> i32 {
     } else {
         let mut x = MARGIN - 10;
         for (index, name) in tab_names().iter().enumerate() {
-            let width = crate::drawing::measure_text(name, crate::theme::FONT_BODY_PX).0 + 30;
+            let width = crate::drawing::measure_ui_text(name).0 + 2 * crate::drawing::TAB_PADDING;
             place(hwnd, ID_TAB_FIRST + index as i32, (x, 6, width, 40), dpi);
             x += width;
         }
@@ -1119,7 +1119,7 @@ unsafe extern "system" fn wnd_proc(
                 state.page_brush.0 as isize
             })
         }
-        WM_SETTINGCHANGE | WM_DWMCOLORIZATIONCOLORCHANGED if !pointer.is_null() => {
+        WM_SETTINGCHANGE if !pointer.is_null() => {
             crate::theme::invalidate_theme_cache();
             let state = unsafe { &mut *pointer };
             state.refresh_brushes();
@@ -1396,7 +1396,7 @@ fn register() -> Result<()> {
         lpfnWndProc: Some(wnd_proc),
         hInstance: HINSTANCE::default(),
         hIcon: crate::tray::app_icon(),
-        hIconSm: crate::tray::app_icon(),
+        hIconSm: crate::tray::app_icon_small(),
         hCursor: unsafe { LoadCursorW(HINSTANCE::default(), IDC_ARROW).unwrap_or_default() },
         hbrBackground: HBRUSH::default(),
         lpszClassName: CLASS,

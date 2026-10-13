@@ -6,6 +6,7 @@ use windows::Win32::Foundation::{
     ERROR_CLASS_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Controls::{_LI_METRIC, LIM_LARGE, LIM_SMALL, LoadIconMetric};
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIIF_RESPECT_QUIET_TIME, NIM_ADD,
     NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT, NOTIFYICON_VERSION_4, NOTIFYICONDATAW,
@@ -121,18 +122,41 @@ fn copy_wide<const N: usize>(destination: &mut [u16; N], value: &str) {
     }
 }
 
+/// The application icon at the system large-icon size (title bars, Alt+Tab).
 pub fn app_icon() -> HICON {
+    cached_icon(&LARGE_ICON, LIM_LARGE)
+}
+
+/// The application icon at the system small-icon size (tray, caption). Loaded
+/// from its own frame instead of letting Windows shrink the 32 px one.
+pub fn app_icon_small() -> HICON {
+    cached_icon(&SMALL_ICON, LIM_SMALL)
+}
+
+static LARGE_ICON: AtomicIsize = AtomicIsize::new(0);
+static SMALL_ICON: AtomicIsize = AtomicIsize::new(0);
+
+fn cached_icon(slot: &AtomicIsize, metric: _LI_METRIC) -> HICON {
+    let cached = slot.load(Ordering::Acquire);
+    if cached != 0 {
+        return HICON(cached as *mut _);
+    }
     let instance = unsafe {
         GetModuleHandleW(None)
             .ok()
             .map(|module| HINSTANCE(module.0))
             .unwrap_or_default()
     };
-    unsafe {
-        LoadIconW(instance, PCWSTR(RESOURCE_ICON_ID as *const u16))
+    let resource = PCWSTR(RESOURCE_ICON_ID as *const u16);
+    let icon = unsafe {
+        LoadIconMetric(instance, resource, metric)
+            .or_else(|_| LoadIconW(instance, resource))
             .or_else(|_| LoadIconW(HINSTANCE::default(), IDI_APPLICATION))
             .unwrap_or_default()
-    }
+    };
+    // Icons live for the whole process; a lost race only loads one extra copy.
+    slot.store(icon.0 as isize, Ordering::Release);
+    icon
 }
 
 fn base_notify_data(hwnd: HWND) -> NOTIFYICONDATAW {
@@ -142,7 +166,7 @@ fn base_notify_data(hwnd: HWND) -> NOTIFYICONDATAW {
         uID: TRAY_ICON_ID,
         uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
         uCallbackMessage: WM_TRAYICON,
-        hIcon: app_icon(),
+        hIcon: app_icon_small(),
         ..Default::default()
     };
     copy_wide(&mut data.szTip, "isolmaSS - Screenshot Utility");
@@ -265,10 +289,6 @@ unsafe extern "system" fn tray_wnd_proc(
         }
         WM_SETTINGCHANGE => {
             crate::theme::invalidate_theme_cache();
-            LRESULT(0)
-        }
-        WM_DWMCOLORIZATIONCOLORCHANGED => {
-            crate::theme::invalidate_accent();
             LRESULT(0)
         }
         WM_CLOSE => {

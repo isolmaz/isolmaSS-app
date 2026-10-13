@@ -251,6 +251,25 @@ pub fn measure_text(text: &str, font_size: i32) -> (i32, i32) {
     measured
 }
 
+/// Size of `text` in the font [`ui_text`] draws with (body size, regular
+/// weight) at 96 DPI, for laying out controls in design pixels.
+pub fn measure_ui_text(text: &str) -> (i32, i32) {
+    let body = crate::theme::FONT_BODY_PX;
+    let dc = unsafe { CreateCompatibleDC(None) };
+    if dc.is_invalid() {
+        return (body, body);
+    }
+    let wide: Vec<u16> = text.encode_utf16().collect();
+    let mut size = SIZE::default();
+    with_font(dc, -body, 400, || unsafe {
+        let _ = GetTextExtentPoint32W(dc, &wide, &mut size);
+    });
+    unsafe {
+        let _ = DeleteDC(dc);
+    }
+    (size.cx, size.cy)
+}
+
 pub fn text(hdc: HDC, pos: (i32, i32), text: &str, font_size: i32, color: COLORREF) {
     with_font(hdc, font_size, 700, || unsafe {
         let _ = SetTextColor(hdc, color);
@@ -375,6 +394,90 @@ fn smooth_rounded(
     }
 }
 
+/// Strokes a rounded outline `width` px thick that lies entirely inside
+/// `frame`; `diameter` is the corner diameter of `frame`'s outer edge.
+fn stroke_frame(
+    hdc: HDC,
+    frame: windows::Win32::Foundation::RECT,
+    diameter: i32,
+    width: i32,
+    color: COLORREF,
+) {
+    if smooth_stroke(hdc, frame, diameter, width, color) {
+        return;
+    }
+    unsafe {
+        // PS_INSIDEFRAME keeps the wide pen inside the bounding rectangle.
+        let previous = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+        with_pen(hdc, PS_INSIDEFRAME, width, color, || {
+            let _ = RoundRect(
+                hdc,
+                frame.left,
+                frame.top,
+                frame.right,
+                frame.bottom,
+                diameter,
+                diameter,
+            );
+        });
+        SelectObject(hdc, previous);
+    }
+}
+
+fn smooth_stroke(
+    hdc: HDC,
+    frame: windows::Win32::Foundation::RECT,
+    diameter: i32,
+    width: i32,
+    color: COLORREF,
+) -> bool {
+    use windows::Win32::Graphics::GdiPlus::*;
+    if !gdiplus_ready()
+        || frame.right - frame.left <= 2 * width
+        || frame.bottom - frame.top <= 2 * width
+    {
+        return false;
+    }
+    unsafe {
+        let mut graphics = std::ptr::null_mut();
+        if GdipCreateFromHDC(hdc, &mut graphics) != Ok {
+            return false;
+        }
+        GdipSetSmoothingMode(graphics, SmoothingModeAntiAlias8x8);
+        GdipSetPixelOffsetMode(graphics, PixelOffsetModeHalf);
+        let mut drawn = false;
+        let mut path = std::ptr::null_mut();
+        if GdipCreatePath(FillModeAlternate, &mut path) == Ok {
+            // The pen is centred on the path, so the path runs half a stroke
+            // inside the frame.
+            let half = width as f32 / 2.0;
+            let x = frame.left as f32 + half;
+            let y = frame.top as f32 + half;
+            let w = (frame.right - frame.left) as f32 - width as f32;
+            let h = (frame.bottom - frame.top) as f32 - width as f32;
+            let d = (diameter as f32 - width as f32).clamp(0.0, w.min(h));
+            if d < 1.0 {
+                GdipAddPathRectangle(path, x, y, w, h);
+            } else {
+                GdipAddPathArc(path, x, y, d, d, 180.0, 90.0);
+                GdipAddPathArc(path, x + w - d, y, d, d, 270.0, 90.0);
+                GdipAddPathArc(path, x + w - d, y + h - d, d, d, 0.0, 90.0);
+                GdipAddPathArc(path, x, y + h - d, d, d, 90.0, 90.0);
+                GdipClosePathFigure(path);
+            }
+            let mut pen = std::ptr::null_mut();
+            if GdipCreatePen1(argb(color), width as f32, UnitPixel, &mut pen) == Ok {
+                GdipDrawPath(graphics, pen, path);
+                GdipDeletePen(pen);
+                drawn = true;
+            }
+            GdipDeletePath(path);
+        }
+        GdipDeleteGraphics(graphics);
+        drawn
+    }
+}
+
 pub fn label(
     hdc: HDC,
     rect: crate::capture::Rect,
@@ -484,6 +587,30 @@ fn scaled(value: i32, dpi: u32) -> i32 {
     value * dpi as i32 / 96
 }
 
+/// Corner diameter in device pixels for a visible corner `radius` given in
+/// 96-DPI pixels: the unit [`rounded`] takes.
+pub fn corner_diameter(radius: i32, dpi: u32) -> i32 {
+    scaled(radius * 2, dpi)
+}
+
+/// Horizontal placement of single-line text inside its rectangle.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Align {
+    Left,
+    Center,
+    Right,
+}
+
+impl Align {
+    fn format(self) -> DRAW_TEXT_FORMAT {
+        match self {
+            Align::Left => DT_LEFT,
+            Align::Center => DT_CENTER,
+            Align::Right => DT_RIGHT,
+        }
+    }
+}
+
 /// Draws single-line UI text in the body font.
 pub fn ui_text(
     hdc: HDC,
@@ -491,7 +618,7 @@ pub fn ui_text(
     rect: &mut windows::Win32::Foundation::RECT,
     dpi: u32,
     color: COLORREF,
-    centered: bool,
+    align: Align,
 ) {
     // An empty slice carries a dangling pointer that DrawTextW dereferences.
     if text.is_empty() {
@@ -508,14 +635,60 @@ pub fn ui_text(
                 hdc,
                 text,
                 rect,
-                DT_VCENTER
-                    | DT_SINGLELINE
-                    | DT_NOPREFIX
-                    | DT_END_ELLIPSIS
-                    | if centered { DT_CENTER } else { DT_LEFT },
+                DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS | align.format(),
             );
         },
     );
+}
+
+/// Thickness in device pixels of the focus visual's two strokes, from the
+/// control outward: a contrasting inner stroke, then the `text` outer one.
+fn focus_widths(dpi: u32) -> (i32, i32) {
+    (scaled(1, dpi).max(1), scaled(2, dpi).max(1))
+}
+
+/// How far the focus visual reaches beyond the control it surrounds.
+fn focus_extent(dpi: u32) -> i32 {
+    let (inner, outer) = focus_widths(dpi);
+    inner + outer
+}
+
+/// Windows 11 focus visual: a 2 px `text` stroke around `rect`, separated
+/// from the control by a 1 px contrasting stroke (white on light, near black
+/// on dark), anti-aliased. `radius` is the corner radius of `rect` in device
+/// pixels. Both strokes fall outside `rect`, so the window painting them
+/// needs room around the control.
+pub fn focus_ring(hdc: HDC, rect: windows::Win32::Foundation::RECT, radius: i32, dpi: u32) {
+    let tokens = crate::theme::tokens();
+    let (inner, outer) = focus_widths(dpi);
+    // (distance from `rect` to the stroke's outer edge, thickness, colour)
+    for (reach, width, color) in [
+        (inner, inner, tokens.focus_inner),
+        (inner + outer, outer, tokens.text),
+    ] {
+        let frame = windows::Win32::Foundation::RECT {
+            left: rect.left - reach,
+            top: rect.top - reach,
+            right: rect.right + reach,
+            bottom: rect.bottom + reach,
+        };
+        stroke_frame(hdc, frame, (radius + reach) * 2, width, color);
+    }
+}
+
+/// Focus visual for an owner-drawn child window. A child cannot paint
+/// outside its own client rect, so the ring covers the control's outermost
+/// pixels instead: its outer edge is `bounds` and `radius` the control's
+/// corner radius there.
+fn focus_ring_inside(hdc: HDC, bounds: windows::Win32::Foundation::RECT, radius: i32, dpi: u32) {
+    let extent = focus_extent(dpi);
+    let inset = windows::Win32::Foundation::RECT {
+        left: bounds.left + extent,
+        top: bounds.top + extent,
+        right: bounds.right - extent,
+        bottom: bounds.bottom - extent,
+    };
+    focus_ring(hdc, inset, (radius - extent).max(0), dpi);
 }
 
 /// Windows 11 push button (accent-filled when `look.primary`) on `background`.
@@ -533,6 +706,10 @@ pub fn fluent_button(
     }
     let fill = if look.disabled {
         tokens.control_fill
+    } else if look.primary && look.pressed {
+        tokens.accent_pressed
+    } else if look.primary && look.hot {
+        tokens.accent_hover
     } else if look.primary {
         tokens.accent
     } else if look.pressed || look.hot {
@@ -540,17 +717,15 @@ pub fn fluent_button(
     } else {
         tokens.control_fill
     };
-    let border = if look.focus {
-        tokens.text
-    } else if look.primary && !look.disabled {
-        tokens.accent
+    let border = if look.primary && !look.disabled {
+        fill
     } else {
         tokens.stroke
     };
     rounded(
         hdc,
         crate::capture::Rect::new(rect.left + 1, rect.top + 1, rect.right - 1, rect.bottom - 1),
-        scaled(8, dpi),
+        corner_diameter(crate::theme::RADIUS_CONTROL, dpi),
         fill,
         border,
     );
@@ -566,8 +741,14 @@ pub fn fluent_button(
         right: rect.right - scaled(8, dpi),
         ..rect
     };
-    ui_text(hdc, text, &mut inner, dpi, color, true);
+    ui_text(hdc, text, &mut inner, dpi, color, Align::Center);
+    if look.focus {
+        focus_ring_inside(hdc, rect, scaled(crate::theme::RADIUS_CONTROL, dpi), dpi);
+    }
 }
+
+/// Horizontal padding on each side of a tab label, in 96-DPI pixels.
+pub const TAB_PADDING: i32 = 12;
 
 /// Windows 11 SelectorBar item: the label, with a short accent pill under
 /// the selected item.
@@ -592,7 +773,7 @@ pub fn fluent_tab(
         bottom: rect.bottom - scaled(4, dpi),
         ..rect
     };
-    ui_text(hdc, text, &mut label, dpi, color, true);
+    ui_text(hdc, text, &mut label, dpi, color, Align::Center);
     if look.selected {
         let half = scaled(8, dpi);
         let middle = (rect.left + rect.right) / 2;
@@ -605,20 +786,12 @@ pub fn fluent_tab(
                 rect.bottom - scaled(2, dpi),
             ),
             scaled(3, dpi),
-            tokens.accent,
-            tokens.accent,
+            tokens.accent_ink,
+            tokens.accent_ink,
         );
     }
     if look.focus {
-        let focus = windows::Win32::Foundation::RECT {
-            left: rect.left + 2,
-            top: rect.top + 2,
-            right: rect.right - 2,
-            bottom: rect.bottom - 2,
-        };
-        unsafe {
-            let _ = DrawFocusRect(hdc, &focus);
-        }
+        focus_ring_inside(hdc, rect, scaled(crate::theme::RADIUS_CONTROL, dpi), dpi);
     }
 }
 
@@ -639,12 +812,20 @@ pub fn fluent_toggle(
     let on = look.selected;
     let track_width = scaled(40, dpi);
     let track_height = scaled(20, dpi);
-    let x = rect.right - track_width - scaled(2, dpi);
+    // Keeps room right of the switch for its focus visual.
+    let x = rect.right - track_width - focus_extent(dpi);
     let y = (rect.top + rect.bottom - track_height) / 2;
     let (track, border) = if look.disabled {
         (tokens.page, tokens.text_disabled)
     } else if on {
-        (tokens.accent, tokens.accent)
+        let fill = if look.pressed {
+            tokens.accent_pressed
+        } else if look.hot {
+            tokens.accent_hover
+        } else {
+            tokens.accent
+        };
+        (fill, fill)
     } else {
         (tokens.page, tokens.text_secondary)
     };
@@ -681,9 +862,11 @@ pub fn fluent_toggle(
     }
     .encode_utf16()
     .collect();
+    // Right-aligned at a fixed gap from the switch, so the gap does not
+    // change with the word.
     let mut state_rect = windows::Win32::Foundation::RECT {
-        left: x - scaled(60, dpi),
-        right: x - scaled(10, dpi),
+        left: x - scaled(58, dpi),
+        right: x - scaled(8, dpi),
         ..rect
     };
     ui_text(
@@ -692,30 +875,55 @@ pub fn fluent_toggle(
         &mut state_rect,
         dpi,
         tokens.text_secondary,
-        false,
+        Align::Right,
     );
     let mut label = windows::Win32::Foundation::RECT {
         right: state_rect.left - scaled(8, dpi),
         ..rect
     };
-    ui_text(hdc, text, &mut label, dpi, tokens.text, false);
+    ui_text(hdc, text, &mut label, dpi, tokens.text, Align::Left);
     if look.focus {
-        let focus = windows::Win32::Foundation::RECT {
-            left: x - 3,
-            top: y - 3,
-            right: x + track_width + 3,
-            bottom: y + track_height + 3,
+        let switch = windows::Win32::Foundation::RECT {
+            left: x,
+            top: y,
+            right: x + track_width,
+            bottom: y + track_height,
         };
-        unsafe {
-            let _ = DrawFocusRect(hdc, &focus);
-        }
+        focus_ring(hdc, switch, track_height / 2, dpi);
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn icon_face_is_an_installed_icon_font() {
-        assert!(crate::theme::face_installed(super::icon_face()));
+        assert!(crate::theme::face_installed(icon_face()));
+    }
+
+    #[test]
+    fn corner_diameter_is_twice_the_scaled_radius() {
+        assert_eq!(corner_diameter(4, 96), 8);
+        assert_eq!(corner_diameter(8, 96), 16);
+        assert_eq!(corner_diameter(4, 144), 12);
+        assert_eq!(corner_diameter(8, 192), 32);
+    }
+
+    #[test]
+    fn focus_strokes_scale_with_dpi_and_never_vanish() {
+        assert_eq!(focus_widths(96), (1, 2));
+        assert_eq!(focus_widths(192), (2, 4));
+        assert_eq!(focus_extent(96), 3);
+        assert_eq!(focus_extent(192), 6);
+        assert_eq!(focus_widths(48), (1, 1));
+    }
+
+    #[test]
+    fn ui_text_measurement_grows_with_the_text() {
+        let (narrow, height) = measure_ui_text("W");
+        let (wide, _) = measure_ui_text("WWWWWWWW");
+        assert!(height > 0);
+        assert!(wide > narrow * 4);
     }
 }

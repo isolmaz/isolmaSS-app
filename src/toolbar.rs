@@ -2,9 +2,6 @@ use crate::annotation::{ToolKind, bgra_to_colorref};
 use crate::capture::Rect;
 use windows::Win32::Foundation::{COLORREF, HWND, POINT};
 use windows::Win32::Graphics::Gdi::HDC;
-/// Corner radius (96-dpi px, scaled at each use site) for toolbar buttons and
-/// color swatches. Panel radii use `crate::theme::RADIUS_CARD` instead.
-const RADIUS_CONTROL: i32 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolbarAction {
@@ -468,8 +465,11 @@ impl Toolbar {
 
     /// Flat, high-contrast controls share the settings window's visual language.
     pub fn render(&self, hdc: HDC, thickness_input: Option<&str>) {
-        use crate::drawing::{icon, label, rounded};
+        use crate::drawing::{corner_diameter, icon, label, rounded};
+        use crate::theme::{RADIUS_CONTROL, RADIUS_OVERLAY};
         let scale = |value: i32| (value * self.dpi as i32 / 96).max(1);
+        // `rounded` takes the corner diameter; the radii are visible radii.
+        let corner = |radius: i32| corner_diameter(radius, self.dpi);
         // Native Fluent chrome from the shared token set (light/dark aware).
         let tokens = crate::theme::tokens();
         let card = tokens.card;
@@ -488,11 +488,11 @@ impl Toolbar {
             rounded(
                 hdc,
                 panel.inflate(1, 1),
-                scale(crate::theme::RADIUS_CARD),
+                corner(RADIUS_OVERLAY + 1),
                 stroke,
                 stroke,
             );
-            rounded(hdc, panel, scale(crate::theme::RADIUS_CARD), card, stroke);
+            rounded(hdc, panel, corner(RADIUS_OVERLAY), card, stroke);
         }
         let mut wheel_drawn = false;
         for button in &self.buttons {
@@ -504,11 +504,11 @@ impl Toolbar {
                 rounded(
                     hdc,
                     wheel.inflate(1, 1),
-                    scale(crate::theme::RADIUS_CARD),
+                    corner(RADIUS_OVERLAY + 1),
                     stroke,
                     stroke,
                 );
-                rounded(hdc, wheel, scale(crate::theme::RADIUS_CARD), card, stroke);
+                rounded(hdc, wheel, corner(RADIUS_OVERLAY), card, stroke);
             }
             let hovered = self.hovered_item == Some(button.item) && button.is_enabled;
             let selected = button.is_checked
@@ -520,10 +520,15 @@ impl Toolbar {
                         | ToolbarItem::ThicknessOption(_)
                 );
             let primary = button.item == ToolbarItem::Action(ToolbarAction::Copy);
-            let fill = if primary {
+            // Hover stays neutral so it never reads as a second selection.
+            let fill = if primary && hovered {
+                tokens.accent_hover
+            } else if primary {
                 accent
-            } else if selected || hovered {
+            } else if selected {
                 tint
+            } else if hovered {
+                tokens.subtle_hover
             } else {
                 card
             };
@@ -532,16 +537,16 @@ impl Toolbar {
             } else if primary {
                 tokens.accent_text
             } else if selected {
-                accent
+                tokens.accent_ink
             } else {
                 text
             };
             rounded(
                 hdc,
                 button.rect,
-                scale(RADIUS_CONTROL),
+                corner(RADIUS_CONTROL),
                 fill,
-                if selected { accent } else { fill },
+                if selected { tokens.accent_ink } else { fill },
             );
             match button.item {
                 ToolbarItem::Color => {
@@ -549,7 +554,7 @@ impl Toolbar {
                     rounded(
                         hdc,
                         swatch,
-                        scale(RADIUS_CONTROL - 2),
+                        corner(RADIUS_CONTROL),
                         bgra_to_colorref(self.active_color),
                         stroke,
                     );
@@ -591,7 +596,7 @@ impl Toolbar {
                 }
                 ToolbarItem::ThicknessOption(value) => {
                     let ink = if button.is_checked {
-                        accent
+                        tokens.accent_ink
                     } else if (value - self.active_thickness).abs() > 1 {
                         muted
                     } else {
@@ -677,7 +682,7 @@ impl Toolbar {
             rounded(
                 hdc,
                 bounds,
-                scale(crate::theme::RADIUS_CARD),
+                corner(RADIUS_OVERLAY),
                 tokens.card,
                 tokens.stroke,
             );
@@ -727,9 +732,11 @@ fn draw_tool_icon(
 
 /// Presents the toolbar's commands as a native popup menu for keyboard and screen-reader
 /// access (F10 / Apps key). Returns the chosen command; the overlay is never mutated.
+/// The menu opens at `anchor` (screen pixels) or, without one, at the cursor.
 pub fn show_command_menu(
     owner: HWND,
     buttons: &[ToolbarButton],
+    anchor: Option<(i32, i32)>,
 ) -> windows::core::Result<Option<ToolbarItem>> {
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, MF_CHECKED, MF_GRAYED, MF_STRING,
@@ -830,10 +837,16 @@ pub fn show_command_menu(
         }
         mapping.push(button.item);
     }
-    let mut point = POINT::default();
-    if unsafe { GetCursorPos(&mut point) }.is_err() {
-        return Ok(None);
-    }
+    let point = match anchor {
+        Some((x, y)) => POINT { x, y },
+        None => {
+            let mut cursor = POINT::default();
+            if unsafe { GetCursorPos(&mut cursor) }.is_err() {
+                return Ok(None);
+            }
+            cursor
+        }
+    };
     let command = unsafe {
         TrackPopupMenuEx(
             menu.0,
