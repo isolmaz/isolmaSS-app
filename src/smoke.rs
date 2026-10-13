@@ -893,11 +893,43 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(overlay_state.selected_id(), None);
     assert_eq!(overlay_state.mode(), overlay::OverlayMode::SelectionActive);
 
+    // Case 2b: Gesture in progress -> Esc cancels only the gesture, never the session
+    overlay_state.add_test_rectangle(Rect::new(120, 120, 200, 180));
+    overlay_state.begin_test_rectangle_gesture((210, 210), (260, 250));
+    assert!(overlay_state.has_active_gesture());
+    let action2b = overlay_state.handle_escape_action();
+    assert_eq!(action2b, overlay::EscapeAction::CancelledGesture);
+    assert!(!overlay_state.has_active_gesture());
+    assert_eq!(overlay_state.object_count(), 1);
+    assert_eq!(
+        overlay_state.committed_selection(),
+        Some(Rect::new(100, 100, 400, 300))
+    );
+    overlay_state.begin_test_selection_move();
+    let action2c = overlay_state.handle_escape_action();
+    assert_eq!(action2c, overlay::EscapeAction::CancelledGesture);
+    assert_eq!(
+        overlay_state.committed_selection(),
+        Some(Rect::new(100, 100, 400, 300))
+    );
+    assert_eq!(overlay_state.mode(), overlay::OverlayMode::SelectionActive);
+
     // Case 3: Selection active -> Esc cancels selection back to hovering/idle
     let action3 = overlay_state.handle_escape_action();
     assert_eq!(action3, overlay::EscapeAction::CancelledSelection);
     assert_eq!(overlay_state.mode(), overlay::OverlayMode::Hovering);
     assert!(overlay_state.committed_selection().is_none());
+    assert_eq!(overlay_state.object_count(), 0);
+
+    // Case 3b: the discarded session is kept for Ctrl+Z while hovering
+    assert!(overlay_state.restore_discarded_session());
+    assert_eq!(overlay_state.mode(), overlay::OverlayMode::SelectionActive);
+    assert_eq!(overlay_state.object_count(), 1);
+    assert_eq!(
+        overlay_state.handle_escape_action(),
+        overlay::EscapeAction::CancelledSelection
+    );
+    assert_eq!(overlay_state.mode(), overlay::OverlayMode::Hovering);
 
     // Case 4: Idle/Hovering -> Esc closes overlay
     let action4 = overlay_state.handle_escape_action();
@@ -1076,6 +1108,7 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         100,
         &test_rect,
         [246, 130, 59, 255],
+        96,
     );
 
     // Verify 8x8 corner handle has white fill [255, 255, 255, 255]

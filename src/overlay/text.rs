@@ -1,3 +1,31 @@
+use windows::Win32::Foundation::{HWND, POINT, RECT};
+use windows::Win32::Graphics::Gdi::{DEFAULT_CHARSET, LOGFONTW};
+
+/// The few `imm32` calls needed here; the `windows` crate exposes them only behind the
+/// `Win32_UI_Input_Ime` feature.
+mod ime {
+    use std::ffi::c_void;
+    use windows::Win32::Foundation::{HWND, POINT, RECT};
+    use windows::Win32::Graphics::Gdi::LOGFONTW;
+
+    pub const CFS_POINT: u32 = 0x0002;
+
+    #[repr(C)]
+    pub struct CompositionForm {
+        pub style: u32,
+        pub current_pos: POINT,
+        pub area: RECT,
+    }
+
+    #[link(name = "imm32")]
+    unsafe extern "system" {
+        pub fn ImmGetContext(hwnd: HWND) -> *mut c_void;
+        pub fn ImmReleaseContext(hwnd: HWND, himc: *mut c_void) -> i32;
+        pub fn ImmSetCompositionWindow(himc: *mut c_void, form: *const CompositionForm) -> i32;
+        pub fn ImmSetCompositionFontW(himc: *mut c_void, font: *const LOGFONTW) -> i32;
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TextEditState {
     pub pos: (i32, i32),
@@ -187,6 +215,51 @@ impl TextEditState {
     pub fn select_all(&mut self) {
         self.anchor = Some(0);
         self.caret = self.text.chars().count();
+    }
+
+    /// Horizontal distance from the box origin to the caret.
+    pub(super) fn caret_offset(&self) -> i32 {
+        let before: String = self.text.chars().take(self.caret).collect();
+        if before.is_empty() {
+            0
+        } else {
+            crate::drawing::measure_text(&before, self.font_size).0
+        }
+    }
+
+    /// Moves the IME composition window to the caret; otherwise Windows opens it, and
+    /// the candidate list, at the origin of the virtual screen.
+    pub(super) fn place_ime_window(&self, hwnd: HWND) {
+        let form = ime::CompositionForm {
+            style: ime::CFS_POINT,
+            current_pos: POINT {
+                x: self.pos.0 + self.caret_offset(),
+                y: self.pos.1,
+            },
+            area: RECT::default(),
+        };
+        let mut font = LOGFONTW {
+            lfHeight: self.font_size,
+            lfWeight: 700,
+            lfCharSet: DEFAULT_CHARSET,
+            ..Default::default()
+        };
+        for (slot, unit) in font
+            .lfFaceName
+            .iter_mut()
+            .zip(crate::theme::ui_face().encode_utf16().take(31))
+        {
+            *slot = unit;
+        }
+        unsafe {
+            let context = ime::ImmGetContext(hwnd);
+            if context.is_null() {
+                return;
+            }
+            let _ = ime::ImmSetCompositionWindow(context, &form);
+            let _ = ime::ImmSetCompositionFontW(context, &font);
+            let _ = ime::ImmReleaseContext(hwnd, context);
+        }
     }
 
     pub fn insert_utf16(&mut self, unit: u32) {

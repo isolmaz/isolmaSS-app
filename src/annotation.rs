@@ -1,5 +1,6 @@
 use crate::capture::Rect;
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{COLORREF, POINT};
 use windows::Win32::Graphics::Gdi::{
     CreatePen, CreateSolidBrush, DeleteObject, GetStockObject, HBRUSH, HDC, HGDIOBJ, HPEN,
@@ -99,6 +100,7 @@ pub enum AnnotationKind {
         pos: (i32, i32),
         number: u32,
         color: [u8; 4],
+        radius: i32,
     },
     Text {
         pos: (i32, i32),
@@ -133,6 +135,11 @@ pub enum AnnotationResizeHandle {
 }
 
 type ResizeHandlePoints = ([(AnnotationResizeHandle, (i32, i32)); 4], usize);
+
+/// Half the grip size, and the gap between an object and its dashed indicator.
+fn grip_half(dpi: u32) -> i32 {
+    (4 * dpi / 96).max(4) as i32
+}
 
 pub fn render_pen_preview(hdc: HDC, points: &[(i32, i32)], color: [u8; 4], thickness: i32) {
     if points.len() < 2 {
@@ -201,9 +208,12 @@ impl AnnotationObject {
                 };
                 Rect::new(left, top, right + 1, bottom + 1).inflate(radius, radius)
             }
-            AnnotationKind::Step { pos, .. } => {
-                Rect::new(pos.0 - 14, pos.1 - 14, pos.0 + 15, pos.1 + 15)
-            }
+            AnnotationKind::Step { pos, radius, .. } => Rect::new(
+                pos.0 - radius,
+                pos.1 - radius,
+                pos.0 + radius + 1,
+                pos.1 + radius + 1,
+            ),
             AnnotationKind::Text {
                 pos,
                 text,
@@ -217,18 +227,14 @@ impl AnnotationObject {
         }
     }
 
-    /// Tests if point `pt` hits this annotation object.
+    /// Tests if point `pt` hits this annotation object. A hollow frame counts
+    /// as hit across its whole interior; `hit_test_stroke` is the frame band only.
     pub fn hit_test(&self, pt: (i32, i32)) -> bool {
         match &self.kind {
             AnnotationKind::Rectangle {
                 rect, thickness, ..
             } => {
                 let tol = (*thickness).max(6);
-                let outer = rect.inflate(tol, tol);
-                if !outer.contains(pt.0, pt.1) {
-                    return false;
-                }
-                // Click on border or inside selection
                 rect.inflate(tol, tol).contains(pt.0, pt.1)
             }
             AnnotationKind::Arrow {
@@ -276,6 +282,21 @@ impl AnnotationObject {
             AnnotationKind::Blur { rect, .. } | AnnotationKind::Redact { rect } => {
                 rect.contains(pt.0, pt.1)
             }
+        }
+    }
+
+    /// Like `hit_test`, but a hollow frame only hits on its border band, so
+    /// objects drawn inside a frame stay selectable.
+    pub fn hit_test_stroke(&self, pt: (i32, i32)) -> bool {
+        match &self.kind {
+            AnnotationKind::Rectangle {
+                rect, thickness, ..
+            } => {
+                let tol = (*thickness).max(6);
+                rect.inflate(tol, tol).contains(pt.0, pt.1)
+                    && !rect.inflate(-tol, -tol).contains(pt.0, pt.1)
+            }
+            _ => self.hit_test(pt),
         }
     }
 
@@ -337,7 +358,7 @@ impl AnnotationObject {
         }
     }
 
-    fn resize_handle_points(&self) -> ResizeHandlePoints {
+    fn resize_handle_points(&self, dpi: u32) -> ResizeHandlePoints {
         if let AnnotationKind::Arrow { start, end, .. } = &self.kind {
             return (
                 [
@@ -355,7 +376,8 @@ impl AnnotationObject {
         }
         // Same rect as render_selection_indicator so handles sit on the visible
         // dashed box; hit-testing follows these points automatically.
-        let b = self.geometry_bounds().inflate(4, 4);
+        let gap = grip_half(dpi);
+        let b = self.geometry_bounds().inflate(gap, gap);
         (
             [
                 (AnnotationResizeHandle::TopLeft, (b.left, b.top)),
@@ -367,8 +389,13 @@ impl AnnotationObject {
         )
     }
 
-    pub fn hit_resize_handle(&self, pt: (i32, i32), radius: i32) -> Option<AnnotationResizeHandle> {
-        let (handles, count) = self.resize_handle_points();
+    pub fn hit_resize_handle(
+        &self,
+        pt: (i32, i32),
+        radius: i32,
+        dpi: u32,
+    ) -> Option<AnnotationResizeHandle> {
+        let (handles, count) = self.resize_handle_points(dpi);
         handles[..count]
             .iter()
             .find(|(_, (x, y))| (pt.0 - *x).abs() <= radius && (pt.1 - *y).abs() <= radius)
@@ -763,17 +790,22 @@ impl AnnotationObject {
                 color,
                 thickness,
             } => render_pen_preview(hdc, points, *color, *thickness),
-            AnnotationKind::Step { number, color, .. } => {
+            AnnotationKind::Step {
+                number,
+                color,
+                radius,
+                ..
+            } => {
                 let circle = self.bounds();
                 let ink = bgra_to_colorref(*color);
-                crate::drawing::rounded(hdc, circle, 28, ink, ink);
+                crate::drawing::rounded(hdc, circle, 2 * radius, ink, ink);
                 let brightness =
                     (color[2] as u32 * 299 + color[1] as u32 * 587 + color[0] as u32 * 114) / 1000;
                 crate::drawing::label(
                     hdc,
                     circle,
                     &number.to_string(),
-                    14,
+                    *radius,
                     if brightness > 140 {
                         COLORREF(0)
                     } else {
@@ -820,7 +852,7 @@ impl AnnotationObject {
                     for x in rect.left..rect.right {
                         let offset = (y as usize * width as usize + x as usize) * 4;
                         if let Some(pixel) = buffer.get_mut(offset..offset + 4) {
-                            pixel.copy_from_slice(&[24, 24, 24, 255]);
+                            pixel.copy_from_slice(&crate::theme::BRAND_INK_BGRA);
                         }
                     }
                 }
@@ -830,12 +862,13 @@ impl AnnotationObject {
     }
 
     /// Renders selection bounding indicators (dashed rectangle + corner handles) around this object.
-    pub fn render_selection_indicator(&self, hdc: HDC) {
+    pub fn render_selection_indicator(&self, hdc: HDC, dpi: u32) {
         // Same rect as resize_handle_points so handles sit on the dashed box the
         // user sees; arrows keep the stroke-inflated bounds to contain the head.
+        let half = grip_half(dpi);
         let b = match &self.kind {
-            AnnotationKind::Arrow { .. } => self.bounds().inflate(4, 4),
-            _ => self.geometry_bounds().inflate(4, 4),
+            AnnotationKind::Arrow { .. } => self.bounds().inflate(half, half),
+            _ => self.geometry_bounds().inflate(half, half),
         };
         let pen = unsafe { CreatePen(PS_DOT, 1, crate::theme::BRAND_AMBER) };
         if pen.is_invalid() {
@@ -883,10 +916,10 @@ impl AnnotationObject {
             brush: None,
         };
 
-        let (handles, count) = self.resize_handle_points();
+        let (handles, count) = self.resize_handle_points(dpi);
         for (_, (cx, cy)) in &handles[..count] {
             unsafe {
-                let _ = GdiRectangle(hdc, cx - 4, cy - 4, cx + 4, cy + 4);
+                let _ = GdiRectangle(hdc, cx - half, cy - half, cx + half, cy + half);
             }
         }
     }
@@ -1116,12 +1149,25 @@ pub enum EditCommand {
     },
 }
 
+/// Source of a repeatable edit; consecutive edits from one source merge into
+/// a single undo step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeKey {
+    Nudge,
+    Thickness,
+}
+
+/// Longest pause between two edits that still merge into the same undo step.
+const MERGE_WINDOW: Duration = Duration::from_secs(1);
+
 /// Manages the Undo / Redo history stack (capped at 50 commands).
 pub struct HistoryManager {
     undo_stack: Vec<EditCommand>,
     redo_stack: Vec<EditCommand>,
     max_entries: usize,
     selection_update: Option<Rect>,
+    /// Source and time of the most recent edit when it sits on top of the undo stack.
+    merge_marker: Option<(MergeKey, Instant)>,
 }
 
 impl Default for HistoryManager {
@@ -1137,6 +1183,7 @@ impl HistoryManager {
             redo_stack: Vec::new(),
             max_entries,
             selection_update: None,
+            merge_marker: None,
         }
     }
 
@@ -1144,6 +1191,7 @@ impl HistoryManager {
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.selection_update = None;
+        self.merge_marker = None;
     }
 
     pub fn take_selection_update(&mut self) -> Option<Rect> {
@@ -1156,6 +1204,56 @@ impl HistoryManager {
             self.undo_stack.remove(0);
         }
         self.redo_stack.clear();
+        self.merge_marker = None;
+    }
+
+    /// Records `cmd`, folding it into the top undo entry when that entry came
+    /// from the same `key` less than a second ago and edits the same object
+    /// (`Modify`) or the same selection (`Selection`). The merged entry keeps
+    /// its original `old_kind`/`before`, so one undo reverts the whole run.
+    pub fn record_merge(&mut self, cmd: EditCommand, key: MergeKey) {
+        self.record_merge_at(cmd, key, Instant::now());
+    }
+
+    fn record_merge_at(&mut self, cmd: EditCommand, key: MergeKey, now: Instant) {
+        let recent = self.merge_marker.is_some_and(|(marker_key, at)| {
+            marker_key == key && now.saturating_duration_since(at) < MERGE_WINDOW
+        });
+        if recent {
+            match (self.undo_stack.last_mut(), &cmd) {
+                (
+                    Some(EditCommand::Modify { id, new_kind, .. }),
+                    EditCommand::Modify {
+                        id: new_id,
+                        new_kind: latest,
+                        ..
+                    },
+                ) if *id == *new_id => {
+                    *new_kind = latest.clone();
+                    self.redo_stack.clear();
+                    self.merge_marker = Some((key, now));
+                    return;
+                }
+                (
+                    Some(EditCommand::Selection { after, shift, .. }),
+                    EditCommand::Selection {
+                        after: latest,
+                        shift: step,
+                        ..
+                    },
+                ) => {
+                    *after = *latest;
+                    shift.0 += step.0;
+                    shift.1 += step.1;
+                    self.redo_stack.clear();
+                    self.merge_marker = Some((key, now));
+                    return;
+                }
+                _ => {}
+            }
+        }
+        self.record(cmd);
+        self.merge_marker = Some((key, now));
     }
 
     pub fn can_undo(&self) -> bool {
@@ -1171,6 +1269,7 @@ impl HistoryManager {
         let Some(cmd) = self.undo_stack.pop() else {
             return false;
         };
+        self.merge_marker = None;
 
         match cmd {
             EditCommand::Add(obj) => {
@@ -1222,6 +1321,7 @@ impl HistoryManager {
         let Some(cmd) = self.redo_stack.pop() else {
             return false;
         };
+        self.merge_marker = None;
 
         match cmd {
             EditCommand::Add(obj) => {
@@ -1456,7 +1556,7 @@ mod tests {
         .render_blur(&mut pixels, 12, 12);
         assert_eq!(
             &pixels[(3 * 12 + 2) * 4..(3 * 12 + 2) * 4 + 4],
-            &[24, 24, 24, 255]
+            &crate::theme::BRAND_INK_BGRA
         );
         assert_eq!(&pixels[..4], &[200; 4]);
         let narrow = crate::drawing::measure_text("iiii", 22);
@@ -1498,5 +1598,266 @@ mod tests {
             &pixels[(10 * 40 + 30) * 4..(10 * 40 + 30) * 4 + 4],
             &original
         );
+    }
+
+    fn frame_at(x: i32) -> AnnotationKind {
+        AnnotationKind::Rectangle {
+            rect: Rect::new(x, 0, x + 10, 10),
+            color: COLOR,
+            thickness: 2,
+        }
+    }
+
+    fn nudge(id: usize, from: i32, to: i32) -> EditCommand {
+        EditCommand::Modify {
+            id,
+            old_kind: frame_at(from),
+            new_kind: frame_at(to),
+        }
+    }
+
+    fn undo_steps(history: &mut HistoryManager, objects: &mut Vec<AnnotationObject>) -> usize {
+        let mut steps = 0;
+        while history.undo(objects) {
+            steps += 1;
+        }
+        steps
+    }
+
+    #[test]
+    fn record_merge_folds_repeats_into_one_undo_step() {
+        let t0 = Instant::now();
+        let mut history = HistoryManager::default();
+        // Each gap is under the window even though the run lasts 1.7 s overall.
+        history.record_merge_at(nudge(7, 0, 1), MergeKey::Nudge, t0);
+        history.record_merge_at(
+            nudge(7, 1, 2),
+            MergeKey::Nudge,
+            t0 + Duration::from_millis(900),
+        );
+        history.record_merge_at(
+            nudge(7, 2, 3),
+            MergeKey::Nudge,
+            t0 + Duration::from_millis(1700),
+        );
+        let mut objects = vec![AnnotationObject::new(7, frame_at(3))];
+
+        assert!(history.undo(&mut objects));
+        assert_eq!(objects[0].kind, frame_at(0));
+        assert!(!history.can_undo());
+        assert!(history.redo(&mut objects));
+        assert_eq!(objects[0].kind, frame_at(3));
+    }
+
+    #[test]
+    fn record_merge_starts_a_new_step_after_the_window() {
+        let t0 = Instant::now();
+        let mut history = HistoryManager::default();
+        history.record_merge_at(nudge(7, 0, 1), MergeKey::Nudge, t0);
+        history.record_merge_at(nudge(7, 1, 2), MergeKey::Nudge, t0 + MERGE_WINDOW);
+        let mut objects = vec![AnnotationObject::new(7, frame_at(2))];
+
+        assert!(history.undo(&mut objects));
+        assert_eq!(objects[0].kind, frame_at(1));
+        assert_eq!(undo_steps(&mut history, &mut objects), 1);
+        assert_eq!(objects[0].kind, frame_at(0));
+    }
+
+    #[test]
+    fn record_merge_keeps_different_objects_and_sources_apart() {
+        let t0 = Instant::now();
+        let mut history = HistoryManager::default();
+        history.record_merge_at(nudge(1, 0, 1), MergeKey::Nudge, t0);
+        history.record_merge_at(
+            nudge(2, 0, 1),
+            MergeKey::Nudge,
+            t0 + Duration::from_millis(10),
+        );
+        history.record_merge_at(
+            nudge(2, 1, 2),
+            MergeKey::Thickness,
+            t0 + Duration::from_millis(20),
+        );
+        let mut objects = vec![
+            AnnotationObject::new(1, frame_at(1)),
+            AnnotationObject::new(2, frame_at(2)),
+        ];
+
+        assert_eq!(undo_steps(&mut history, &mut objects), 3);
+        assert_eq!(objects[0].kind, frame_at(0));
+        assert_eq!(objects[1].kind, frame_at(0));
+    }
+
+    #[test]
+    fn record_merge_accumulates_selection_nudges() {
+        let t0 = Instant::now();
+        let before = Rect::new(0, 0, 50, 50);
+        let mut history = HistoryManager::default();
+        history.record_merge_at(
+            EditCommand::Selection {
+                before,
+                after: Rect::new(1, 0, 51, 50),
+                shift: (1, 0),
+            },
+            MergeKey::Nudge,
+            t0,
+        );
+        history.record_merge_at(
+            EditCommand::Selection {
+                before: Rect::new(1, 0, 51, 50),
+                after: Rect::new(2, 1, 52, 51),
+                shift: (1, 1),
+            },
+            MergeKey::Nudge,
+            t0 + Duration::from_millis(50),
+        );
+        // The object moved by the combined shift of both nudges.
+        let mut objects = vec![AnnotationObject::new(1, frame_at(0))];
+        objects[0].translate(2, 1);
+
+        assert!(history.undo(&mut objects));
+        assert_eq!(history.take_selection_update(), Some(before));
+        assert_eq!(objects[0].kind, frame_at(0));
+        assert!(!history.can_undo());
+        assert!(history.redo(&mut objects));
+        assert_eq!(
+            history.take_selection_update(),
+            Some(Rect::new(2, 1, 52, 51))
+        );
+    }
+
+    #[test]
+    fn plain_record_undo_and_redo_end_a_merge_run() {
+        let t0 = Instant::now();
+        let soon = t0 + Duration::from_millis(10);
+        let mut objects = vec![
+            AnnotationObject::new(7, frame_at(1)),
+            AnnotationObject::new(8, frame_at(50)),
+        ];
+
+        let mut history = HistoryManager::default();
+        history.record_merge_at(nudge(7, 0, 1), MergeKey::Nudge, t0);
+        history.record(EditCommand::Add(objects[1].clone()));
+        history.record_merge_at(nudge(7, 1, 2), MergeKey::Nudge, soon);
+        assert_eq!(undo_steps(&mut history, &mut objects), 3);
+
+        let mut history = HistoryManager::default();
+        history.record_merge_at(nudge(7, 0, 1), MergeKey::Nudge, t0);
+        assert!(history.undo(&mut objects));
+        assert!(history.can_redo());
+        history.record_merge_at(nudge(7, 0, 1), MergeKey::Nudge, soon);
+        assert!(!history.can_redo());
+        history.record_merge_at(nudge(7, 1, 2), MergeKey::Nudge, soon);
+        assert_eq!(undo_steps(&mut history, &mut objects), 1);
+
+        let mut history = HistoryManager::default();
+        history.record_merge_at(nudge(7, 0, 1), MergeKey::Nudge, t0);
+        assert!(history.undo(&mut objects));
+        assert!(history.redo(&mut objects));
+        history.record_merge_at(nudge(7, 1, 2), MergeKey::Nudge, soon);
+        assert_eq!(undo_steps(&mut history, &mut objects), 2);
+    }
+
+    #[test]
+    fn frame_stroke_hit_test_excludes_the_interior() {
+        let frame = AnnotationObject::new(
+            1,
+            AnnotationKind::Rectangle {
+                rect: Rect::new(100, 100, 300, 200),
+                color: COLOR,
+                thickness: 2,
+            },
+        );
+        // Band is `tol = 6` px either side of the frame edge.
+        assert!(frame.hit_test_stroke((100, 150)));
+        assert!(frame.hit_test_stroke((200, 105)));
+        assert!(frame.hit_test_stroke((200, 195)));
+        assert!(!frame.hit_test_stroke((200, 150)));
+        assert!(!frame.hit_test_stroke((50, 50)));
+        // `hit_test` keeps counting the interior.
+        assert!(frame.hit_test((200, 150)));
+        assert!(frame.hit_test((100, 150)));
+        assert!(!frame.hit_test((50, 50)));
+
+        let tiny = AnnotationObject::new(
+            2,
+            AnnotationKind::Rectangle {
+                rect: Rect::new(10, 10, 14, 14),
+                color: COLOR,
+                thickness: 2,
+            },
+        );
+        assert!(tiny.hit_test_stroke((12, 12)));
+    }
+
+    #[test]
+    fn stroke_hit_test_matches_hit_test_for_non_frames() {
+        let kinds = [
+            AnnotationKind::Arrow {
+                start: (0, 0),
+                end: (100, 0),
+                color: COLOR,
+                thickness: 2,
+            },
+            AnnotationKind::Redact {
+                rect: Rect::new(10, 10, 60, 60),
+            },
+            AnnotationKind::Step {
+                pos: (30, 30),
+                number: 1,
+                color: COLOR,
+                radius: 14,
+            },
+        ];
+        for kind in kinds {
+            let object = AnnotationObject::new(1, kind);
+            for pt in [(30, 30), (50, 0), (50, 40), (500, 500)] {
+                assert_eq!(object.hit_test_stroke(pt), object.hit_test(pt), "{pt:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn step_geometry_follows_radius() {
+        let step = |radius| {
+            AnnotationObject::new(
+                1,
+                AnnotationKind::Step {
+                    pos: (50, 60),
+                    number: 3,
+                    color: COLOR,
+                    radius,
+                },
+            )
+        };
+        assert_eq!(step(14).bounds(), Rect::new(36, 46, 65, 75));
+        let large = step(28);
+        assert_eq!(large.bounds(), Rect::new(22, 32, 79, 89));
+        assert!(large.hit_test((22, 60)));
+        assert!(!step(14).hit_test((22, 60)));
+    }
+
+    #[test]
+    fn object_grips_and_indicator_gap_scale_with_dpi() {
+        let rectangle = AnnotationObject::new(
+            1,
+            AnnotationKind::Rectangle {
+                rect: Rect::new(100, 100, 200, 200),
+                color: COLOR,
+                thickness: 2,
+            },
+        );
+        let top_left = |dpi| rectangle.resize_handle_points(dpi).0[0].1;
+        assert_eq!(top_left(96), (96, 96));
+        assert_eq!(top_left(192), (92, 92));
+        // Never smaller than the 96-DPI size.
+        assert_eq!(top_left(48), (96, 96));
+
+        // Same pointer and radius: the grip sits at (92, 92) only at 192 DPI.
+        assert_eq!(
+            rectangle.hit_resize_handle((92, 92), 3, 192),
+            Some(AnnotationResizeHandle::TopLeft)
+        );
+        assert_eq!(rectangle.hit_resize_handle((92, 92), 3, 96), None);
     }
 }

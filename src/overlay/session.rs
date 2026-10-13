@@ -146,7 +146,12 @@ fn run_session(
         dragging_object: None,
         dragging_selection: None,
         text_edit: None,
+        pending_reselect: None,
+        reselecting: false,
+        discarded_session: None,
+        last_down_mode: None,
         toolbar: None,
+        hud_rect: None,
         tools_expanded: false,
 
         mem_dc,
