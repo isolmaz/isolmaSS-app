@@ -70,11 +70,11 @@ Invalid settings JSON is copied to `settings.corrupt.json` before defaults are u
 Windows x64, the Windows SDK / Visual Studio C++ Build Tools, Rust **1.98.0** and NSIS are required. `Cargo.lock` pins dependencies.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\check.ps1   # fmt, clippy, tests, Worker syntax
+powershell -ExecutionPolicy Bypass -File scripts\check.ps1   # fmt, clippy, Worker syntax
 cmd /c package.bat
 ```
 
-`package.bat` verifies versions, size budgets and SHA-256. Set `ISOLMASS_BUILD_DIR=target\release-candidate` while `target\release\isolmass.exe` is running. Verification runs locally with the commands above; GitHub Actions only runs fmt, Clippy, tests and the Worker syntax check, never packaging. `release.bat` needs the publisher's non-exportable signing key. Release steps: [DISTRIBUTION.md](../DISTRIBUTION.md).
+`package.bat` verifies versions, size budgets and SHA-256. Set `ISOLMASS_BUILD_DIR=target\release-candidate` while `target\release\isolmass.exe` is running. Local verification is fmt, Clippy and the Worker syntax check; tests run in GitHub Actions, which never packages. `release.bat` needs the publisher's non-exportable signing key. Release steps: [DISTRIBUTION.md](../DISTRIBUTION.md).
 
 Command line: `--capture-once` (editor without the tray; waits for an upload card to close), `--settings`, `--check-update`, `--verify-update PATH`, `--benchmark N`, `--fix-printscreen` and `--help`. `--smoke-test` needs an interactive desktop and **changes the clipboard**.
 
