@@ -14,7 +14,7 @@ A small, free Windows screenshot editor. Press PrintScreen, draw on the capture,
 - **You stay in control.** Delete any link from the app, add a password, and set limits and how long images are kept.
 - **Fast.** PrintScreen → drag → Ctrl+U. The link is copied before you switch windows.
 - **Drawings stay editable.** Every arrow, frame or text remains an object you can move, resize, recolor or delete.
-- **Tiny and native.** One ~1.2 MB Windows program, light and dark themes, English and Turkish, signed updates. Open source (MIT).
+- **Tiny and native.** One ~1.4 MB Windows program, light and dark themes, English and Turkish, signed updates. Open source (MIT).
 
 ## Share from your own Cloudflare
 

@@ -90,7 +90,6 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Choose an account; a new Worker is created only in the account you choose.",
         "Hesabı seçin; yalnızca seçilen hesabınızda yeni Worker oluşturulur.",
     ),
-    ("Choose color...", "Renk seç..."),
     (
         "Choose the account to install into.",
         "Kurulum yapılacak hesabı seçin.",
@@ -632,7 +631,6 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Limits", "Sınırlar"),
     ("Limits saved.", "Sınırlar kaydedildi."),
     ("Line width", "Çizgi kalınlığı"),
-    ("Line width...", "Çizgi kalınlığı..."),
     (
         "Link copied to the clipboard.",
         "Bağlantı panoya kopyalandı.",
@@ -1335,4 +1333,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Press {} to capture. isolmaSS waits in the notification area.",
         "Ekran görüntüsü almak için {} kısayolunu kullanın. isolmaSS bildirim alanında bekler.",
     ),
+    ("Choose color…", "Renk seç…"),
+    ("Line width…", "Çizgi kalınlığı…"),
+    ("Cut failed", "Metin kesme başarısız"),
 ];

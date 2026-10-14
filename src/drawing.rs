@@ -312,7 +312,99 @@ pub fn rounded(
     });
 }
 
-fn gdiplus_ready() -> bool {
+/// Translucent black layers (rectangle, corner diameter, alpha) that form the soft
+/// flyout shadow under `rect`: each is wider, lower and fainter than the one before.
+fn elevation_layers(
+    rect: crate::capture::Rect,
+    radius_px: i32,
+    dpi: u32,
+) -> [(crate::capture::Rect, i32, u8); 4] {
+    // (offset down, growth, alpha), the offset and growth in 96-DPI pixels.
+    const STEPS: [(i32, i32, u8); 4] = [(1, 1, 0x1c), (2, 2, 0x12), (4, 4, 0x0a), (8, 6, 0x05)];
+    STEPS.map(|(offset, grow, alpha)| {
+        let offset = scaled(offset, dpi).max(1);
+        let grow = scaled(grow, dpi).max(1);
+        let layer = crate::capture::Rect::new(
+            rect.left - grow,
+            rect.top - grow + offset,
+            rect.right + grow,
+            rect.bottom + grow + offset,
+        );
+        (layer, (radius_px + grow) * 2, alpha)
+    })
+}
+
+/// Fluent flyout elevation: a soft shadow under a floating panel, drawn before the
+/// panel itself. `radius_px` is the panel's visible corner radius in device pixels.
+/// GDI cannot blend, so without GDI+ the panel is simply drawn without a shadow.
+/// Meant for small chrome rectangles only: the layers are filled in one GDI+ session
+/// (one graphics, brush and path for all of them) and cost about four small fills.
+pub(crate) fn elevation(hdc: HDC, rect: crate::capture::Rect, radius_px: i32, dpi: u32) {
+    use windows::Win32::Graphics::GdiPlus::*;
+    if !gdiplus_ready() {
+        return;
+    }
+    unsafe {
+        let mut graphics = std::ptr::null_mut();
+        if GdipCreateFromHDC(hdc, &mut graphics) != Ok {
+            return;
+        }
+        // The layers are faint and soft, so the cheaper anti-aliasing mode is enough.
+        GdipSetSmoothingMode(graphics, SmoothingModeAntiAlias);
+        GdipSetPixelOffsetMode(graphics, PixelOffsetModeHalf);
+        let mut path = std::ptr::null_mut();
+        let mut brush = std::ptr::null_mut();
+        if GdipCreatePath(FillModeAlternate, &mut path) == Ok
+            && GdipCreateSolidFill(0, &mut brush) == Ok
+        {
+            for (layer, diameter, alpha) in elevation_layers(rect, radius_px, dpi) {
+                GdipResetPath(path);
+                add_rounded_outline(path, layer, diameter);
+                // Black at `alpha`: 0xAA000000.
+                GdipSetSolidFillColor(brush, u32::from(alpha) << 24);
+                GdipFillPath(graphics, brush.cast(), path);
+            }
+        }
+        if !brush.is_null() {
+            GdipDeleteBrush(brush.cast());
+        }
+        if !path.is_null() {
+            GdipDeletePath(path);
+        }
+        GdipDeleteGraphics(graphics);
+    }
+}
+
+/// Adds the outline of `rect` with corner `radius` (a diameter, as in `RoundRect`) to
+/// `path`, inside [left, right) × [top, bottom).
+///
+/// # Safety
+/// `path` must be a valid GDI+ path.
+unsafe fn add_rounded_outline(
+    path: *mut windows::Win32::Graphics::GdiPlus::GpPath,
+    rect: crate::capture::Rect,
+    radius: i32,
+) {
+    use windows::Win32::Graphics::GdiPlus::*;
+    let x = rect.left as f32 + 0.5;
+    let y = rect.top as f32 + 0.5;
+    let w = (rect.right - rect.left) as f32 - 1.0;
+    let h = (rect.bottom - rect.top) as f32 - 1.0;
+    let d = (radius as f32).clamp(0.0, w.min(h));
+    unsafe {
+        if d < 1.0 {
+            GdipAddPathRectangle(path, x, y, w, h);
+        } else {
+            GdipAddPathArc(path, x, y, d, d, 180.0, 90.0);
+            GdipAddPathArc(path, x + w - d, y, d, d, 270.0, 90.0);
+            GdipAddPathArc(path, x + w - d, y + h - d, d, d, 0.0, 90.0);
+            GdipAddPathArc(path, x, y + h - d, d, d, 90.0, 90.0);
+            GdipClosePathFigure(path);
+        }
+    }
+}
+
+pub(crate) fn gdiplus_ready() -> bool {
     use std::sync::LazyLock;
     use windows::Win32::Graphics::GdiPlus::{GdiplusStartup, GdiplusStartupInput, Ok};
     static READY: LazyLock<bool> = LazyLock::new(|| {
@@ -359,21 +451,7 @@ fn smooth_rounded(
         let mut path = std::ptr::null_mut();
         let mut drawn = false;
         if GdipCreatePath(FillModeAlternate, &mut path) == Ok {
-            // Match RoundRect: the outline sits inside [left, right) × [top, bottom).
-            let x = rect.left as f32 + 0.5;
-            let y = rect.top as f32 + 0.5;
-            let w = (rect.right - rect.left) as f32 - 1.0;
-            let h = (rect.bottom - rect.top) as f32 - 1.0;
-            let d = (radius as f32).clamp(0.0, w.min(h));
-            if d < 1.0 {
-                GdipAddPathRectangle(path, x, y, w, h);
-            } else {
-                GdipAddPathArc(path, x, y, d, d, 180.0, 90.0);
-                GdipAddPathArc(path, x + w - d, y, d, d, 270.0, 90.0);
-                GdipAddPathArc(path, x + w - d, y + h - d, d, d, 0.0, 90.0);
-                GdipAddPathArc(path, x, y + h - d, d, d, 90.0, 90.0);
-                GdipClosePathFigure(path);
-            }
+            add_rounded_outline(path, rect, radius);
             let mut brush = std::ptr::null_mut();
             if GdipCreateSolidFill(argb(fill), &mut brush) == Ok {
                 GdipFillPath(graphics, brush.cast(), path);
@@ -908,6 +986,32 @@ mod tests {
         assert_eq!(corner_diameter(8, 96), 16);
         assert_eq!(corner_diameter(4, 144), 12);
         assert_eq!(corner_diameter(8, 192), 32);
+    }
+
+    #[test]
+    fn elevation_layers_widen_sink_and_fade_and_scale_with_dpi() {
+        use crate::capture::Rect;
+        let panel = Rect::new(100, 200, 400, 300);
+        let layers = elevation_layers(panel, 8, 96);
+        for (layer, diameter, _) in layers {
+            assert!(layer.left < panel.left && layer.right > panel.right);
+            assert!(layer.bottom > panel.bottom);
+            assert!(diameter > 16);
+        }
+        for pair in layers.windows(2) {
+            assert!(pair[1].0.bottom > pair[0].0.bottom, "{pair:?}");
+            assert!(pair[1].0.left < pair[0].0.left, "{pair:?}");
+            assert!(pair[1].2 < pair[0].2, "{pair:?}");
+        }
+        let doubled = elevation_layers(panel, 16, 192);
+        for (single, double) in layers.iter().zip(doubled) {
+            assert_eq!(
+                double.0.bottom - panel.bottom,
+                (single.0.bottom - panel.bottom) * 2
+            );
+            assert_eq!(panel.left - double.0.left, (panel.left - single.0.left) * 2);
+            assert_eq!(double.1, single.1 * 2);
+        }
     }
 
     #[test]

@@ -17,19 +17,44 @@ fn points_extent(points: &[(i32, i32)]) -> Rect {
         })
 }
 
+/// Outline colour that keeps a caret of `color` visible: dark around light carets,
+/// white around dark ones.
+fn caret_halo(color: [u8; 4]) -> [u8; 4] {
+    let [blue, green, red, _] = color;
+    let luma = (299 * red as u32 + 587 * green as u32 + 114 * blue as u32) / 1000;
+    if luma >= 128 {
+        crate::theme::BRAND_INK_BGRA
+    } else {
+        [255, 255, 255, 255]
+    }
+}
+
 impl OverlayState {
+    /// What the size readout measures: the region being selected, else the hovered window.
+    fn hud_target(&self) -> Option<Rect> {
+        self.committed_selection.or(self.hover_snap_rect)
+    }
+
     fn render_capture_hud(&self) {
-        let (Some(selection), Some(bounds)) = (self.committed_selection, self.hud_rect) else {
+        let (Some(selection), Some(bounds)) = (self.hud_target(), self.hud_rect) else {
             return;
         };
         let scale = |value: i32| (value * self.dpi as i32 / 96).max(1);
         let tokens = crate::theme::tokens();
         let label = format!("{} × {} px", selection.width(), selection.height());
-        let hovered = bounds.contains(self.pointer.0, self.pointer.1);
+        // The readout is only a handle to move the selection once there is one to move.
+        let hovered = self.mode == OverlayMode::SelectionActive
+            && bounds.contains(self.pointer.0, self.pointer.1);
+        crate::drawing::elevation(
+            self.mem_dc,
+            bounds,
+            scale(crate::theme::RADIUS_OVERLAY),
+            self.dpi,
+        );
         crate::drawing::rounded(
             self.mem_dc,
             bounds,
-            scale(6),
+            crate::drawing::corner_diameter(crate::theme::RADIUS_OVERLAY, self.dpi),
             if hovered {
                 tokens.accent_tint
             } else {
@@ -47,7 +72,7 @@ impl OverlayState {
     /// Places the size readout after the toolbar layout of this frame, clear of the
     /// panels, the wheel and every selection grip.
     fn place_capture_hud(&mut self) {
-        self.hud_rect = self.committed_selection.map(|selection| {
+        self.hud_rect = self.hud_target().map(|selection| {
             let obstacles = self
                 .toolbar
                 .as_ref()
@@ -211,9 +236,36 @@ impl OverlayState {
         }
     }
 
-    /// Text selection highlight and caret: editor chrome drawn above the redactions.
+    /// Dotted amber frame, the style of the selected-object indicator.
+    fn draw_text_frame(&self, frame: Rect) {
+        use windows::Win32::Graphics::Gdi::{
+            GetStockObject, NULL_BRUSH, PS_DOT, Rectangle, SetBkMode, TRANSPARENT,
+        };
+        crate::drawing::with_pen(
+            self.mem_dc,
+            PS_DOT,
+            1,
+            crate::theme::BRAND_AMBER,
+            || unsafe {
+                // The gaps of a dotted pen take the background colour unless it is transparent.
+                let _ = SetBkMode(self.mem_dc, TRANSPARENT);
+                let previous = SelectObject(self.mem_dc, GetStockObject(NULL_BRUSH));
+                let _ = Rectangle(
+                    self.mem_dc,
+                    frame.left,
+                    frame.top,
+                    frame.right,
+                    frame.bottom,
+                );
+                SelectObject(self.mem_dc, previous);
+            },
+        );
+    }
+
+    /// Text box frame, selection highlight and caret: editor chrome drawn above the redactions.
     fn render_text_chrome(&self, buffer: &mut [u8], sel: Rect, edit: &TextEditState) {
         let (width, height) = (self.capture.width, self.capture.height);
+        let bounds = edit.bounds();
         if let Some(range) = edit.selection() {
             let prefix: String = edit.text.chars().take(range.start).collect();
             let selected: String = edit.text.chars().take(range.end).collect();
@@ -225,9 +277,9 @@ impl OverlayState {
             let right = crate::drawing::measure_text(&selected, edit.font_size).0;
             let highlight = Rect::new(
                 edit.pos.0 + left,
-                edit.pos.1,
+                bounds.top,
                 edit.pos.0 + right,
-                edit.pos.1 + crate::drawing::measure_text(&edit.text, edit.font_size).1,
+                bounds.bottom,
             );
             crate::drawing::rounded(
                 self.mem_dc,
@@ -247,18 +299,22 @@ impl OverlayState {
                 );
             });
         }
+        let margin = super::text::text_box_margin(self.dpi);
+        self.draw_text_frame(bounds.inflate(margin, margin));
         if edit.caret_visible {
-            let x = edit.caret_offset();
+            let x = edit.pos.0 + edit.caret_offset();
             let caret = Rect::new(
-                edit.pos.0 + x,
-                edit.pos.1,
-                edit.pos.0 + x + 1,
-                edit.pos.1 + edit.font_size,
+                x,
+                bounds.top,
+                x + (self.dpi / 96).max(1) as i32,
+                bounds.bottom,
             );
             unsafe {
                 let _ = GdiFlush();
             }
-            CaptureBuffer::draw_border(buffer, width, height, &caret, edit.color, 1);
+            let halo = caret.inflate(1, 1);
+            CaptureBuffer::fill_rect(buffer, width, height, &halo, caret_halo(edit.color));
+            CaptureBuffer::fill_rect(buffer, width, height, &caret, edit.color);
         }
     }
 
@@ -277,7 +333,7 @@ impl OverlayState {
         }
         // Grips, toolbar and readout all follow the DPI of the monitor holding the selection.
         if policy.toolbar_and_tooltip
-            && let Some(selection) = self.committed_selection
+            && let Some(selection) = self.hud_target()
         {
             self.dpi = selection_monitor_dpi(&self.capture, selection, self.dpi);
         }
@@ -297,9 +353,9 @@ impl OverlayState {
                         buffer,
                         width,
                         height,
-                        &rect,
+                        &rect.selection_frame(self.dpi),
                         crate::theme::BRAND_AMBER_BGRA,
-                        2,
+                        Rect::selection_frame_thickness(self.dpi),
                     );
                 }
             }
@@ -438,9 +494,13 @@ impl OverlayState {
                         self.dpi,
                     );
                     if let Some(existing) = &self.toolbar {
-                        tb.hovered_item = existing
-                            .hovered_item
-                            .filter(|item| tb.buttons.iter().any(|button| button.item == *item));
+                        let still_shown = |item: Option<ToolbarItem>| {
+                            item.filter(|item| tb.buttons.iter().any(|button| button.item == *item))
+                        };
+                        let hovered = still_shown(existing.hovered_item);
+                        let pressed = still_shown(existing.pressed_item);
+                        tb.hovered_item = hovered;
+                        tb.pressed_item = pressed;
                     }
                     tb.render(self.mem_dc, self.thickness_input.as_deref());
                     self.toolbar = Some(tb);
@@ -455,5 +515,37 @@ impl OverlayState {
         unsafe {
             let _ = GdiFlush();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn caret_halo_contrasts_with_the_caret_colour() {
+        assert_eq!(caret_halo([0, 0, 0, 255]), [255, 255, 255, 255]);
+        assert_eq!(
+            caret_halo([255, 255, 255, 255]),
+            crate::theme::BRAND_INK_BGRA
+        );
+        // Blue (BGRA order) is dark, amber is light.
+        assert_eq!(caret_halo([224, 49, 49, 255]), [255, 255, 255, 255]);
+        assert_eq!(
+            caret_halo(crate::theme::BRAND_AMBER_BGRA),
+            crate::theme::BRAND_INK_BGRA
+        );
+    }
+
+    #[test]
+    fn size_readout_measures_the_selection_else_the_hovered_window() {
+        let mut state = OverlayState::create_test_state(Rc::new(CaptureBuffer::dummy(800, 600)));
+        assert_eq!(state.hud_target(), None);
+        let window = Rect::new(10, 20, 410, 320);
+        state.hover_snap_rect = Some(window);
+        assert_eq!(state.hud_target(), Some(window));
+        let region = Rect::new(50, 60, 150, 160);
+        state.committed_selection = Some(region);
+        assert_eq!(state.hud_target(), Some(region));
     }
 }
