@@ -86,5 +86,11 @@ export async function bytesOf(response) {
   return new Uint8Array(await response.arrayBuffer());
 }
 
+/** Compares byte arrays; toEqual walks a megabyte array element by element, which takes seconds. */
+export function expectSameBytes(actual, expected) {
+  expect(actual.length).toBe(expected.length);
+  expect(actual.findIndex((byte, index) => byte !== expected[index])).toBe(-1);
+}
+
 /** Bindings that fail the test when the Durable Object is touched. */
 export const untouchedStore = { getByName() { throw new Error('The Durable Object must not be used.'); } };

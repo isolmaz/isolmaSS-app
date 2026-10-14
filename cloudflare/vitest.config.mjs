@@ -18,6 +18,8 @@ export default defineConfig({
   ],
   test: {
     include: ['test/**/*.test.mjs'],
+    // Password hashing and megabyte uploads take seconds on a loaded runner, with the test files running in parallel.
+    testTimeout: 30_000,
     coverage: {
       provider: 'istanbul',
       include: ['worker.mjs'],

@@ -1,6 +1,6 @@
 import { reset } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { PASSWORD, admin, bytesOf, call, jpeg, navigate, png, sql, upload } from './helpers.mjs';
+import { PASSWORD, admin, bytesOf, call, expectSameBytes, jpeg, navigate, png, sql, upload } from './helpers.mjs';
 
 const ROBOTS = 'noindex, nofollow, noimageindex';
 const THIRTY_DAYS = 30 * 86400;
@@ -145,7 +145,7 @@ describe('raw image response', () => {
     const id = await upload(bytes);
     const response = await call(`/i/${id}.png`);
     expect(response.headers.get('Content-Length')).toBe('2500000');
-    expect(await bytesOf(response)).toEqual(bytes);
+    expectSameBytes(await bytesOf(response), bytes);
   });
 
   it('stops being cached when the image expires sooner than the default', async () => {
