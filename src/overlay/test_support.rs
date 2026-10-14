@@ -292,6 +292,38 @@ impl Drop for ClipboardHold {
     }
 }
 
+/// The Unicode text on the clipboard exactly as stored, line breaks included (the paste
+/// path of the editor flattens them), `None` when it holds none.
+pub(super) fn raw_clipboard_text() -> Option<String> {
+    use windows::Win32::System::DataExchange::{GetClipboardData, IsClipboardFormatAvailable};
+    use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+    const CF_UNICODETEXT: u32 = 13;
+    unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT) }.ok()?;
+    unsafe { OpenClipboard(None) }.ok()?;
+    let text = unsafe {
+        let handle = GetClipboardData(CF_UNICODETEXT).ok();
+        let memory = handle.map(|handle| windows::Win32::Foundation::HGLOBAL(handle.0));
+        memory
+            .map(|memory| (memory, GlobalLock(memory)))
+            .filter(|(_, pointer)| !pointer.is_null())
+            .map(|(memory, pointer)| {
+                let units =
+                    std::slice::from_raw_parts(pointer.cast::<u16>(), GlobalSize(memory) / 2);
+                let end = units
+                    .iter()
+                    .position(|unit| *unit == 0)
+                    .unwrap_or(units.len());
+                let text = String::from_utf16_lossy(&units[..end]);
+                let _ = GlobalUnlock(memory);
+                text
+            })
+    };
+    unsafe {
+        let _ = CloseClipboard();
+    }
+    text
+}
+
 /// The text on the clipboard, `None` when it holds none.
 pub(super) fn clipboard_text() -> Option<String> {
     crate::clipboard::read_text(HWND::default())

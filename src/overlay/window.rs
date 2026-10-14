@@ -281,6 +281,12 @@ pub(super) unsafe extern "system" fn overlay_wnd_proc(
             }
             LRESULT(0)
         }
+        WM_EDITOR_RECOGNIZED => {
+            if !state_ptr.is_null() {
+                unsafe { (*state_ptr).finish_recognition(hwnd, lparam.0 as u64) };
+            }
+            LRESULT(0)
+        }
         WM_EDITOR_ERROR => {
             let error = ACTION_ERROR.with(|pending| pending.borrow_mut().take());
             if let Some((title, message)) = error {

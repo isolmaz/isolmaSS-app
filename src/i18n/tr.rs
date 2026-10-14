@@ -237,6 +237,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Copy", "Kopyala"),
     ("Copy failed", "Kopyalama başarısız"),
     ("Copy link", "Bağlantıyı kopyala"),
+    ("Copy text", "Metni kopyala"),
     ("Copy to clipboard", "Panoya kopyala"),
     (
         "Could not activate the Cloudflare keys: {}",
@@ -684,10 +685,15 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     ("No connection found.", "Bağlantı bulunamadı."),
     (
+        "No email addresses or phone numbers found",
+        "E-posta adresi veya telefon numarası bulunamadı",
+    ),
+    (
         "No free Worker name was found; try again.",
         "Boş bir Worker adı bulunamadı; tekrar deneyin.",
     ),
     ("No screenshots yet", "Henüz ekran görüntüsü yok"),
+    ("No text found in the selection", "Seçimde metin bulunamadı"),
     ("None", "Yok"),
     (
         "None of the authorized accounts give you Workers access. Connect again and pick an account where you can use Workers on the Cloudflare consent page; if it persists, make sure the app's OAuth client is public.",
@@ -735,6 +741,12 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Red", "Kırmızı"),
     ("Redact", "Karart"),
     ("Redact (opaque)", "Karart (opak)"),
+    (
+        "Redact emails and phone numbers",
+        "E-posta ve telefonları karart",
+    ),
+    ("Redacted 1 item", "1 öğe karartıldı"),
+    ("Redacted {} items", "{} öğe karartıldı"),
     ("Redo", "Yinele"),
     ("Refresh", "Yenile"),
     (
@@ -803,6 +815,8 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("System", "Sistem"),
     ("Teal", "Camgöbeği"),
     ("Text", "Metin"),
+    ("Text copied", "Metin kopyalandı"),
+    ("Text recognition failed", "Metin tanıma başarısız"),
     (
         "The Cloudflare address changed. Connect this computer again before uploading.",
         "Cloudflare adresi değişti. Yüklemeden önce bu bilgisayarı yeniden bağlayın.",
@@ -1199,6 +1213,10 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     (
         "Windows did not allocate a usable screenshot bitmap.",
         "Windows kullanılabilir bir ekran görüntüsü bit eşlemi ayıramadı.",
+    ),
+    (
+        "Windows has no text recognition language installed. Add a language under Settings › Time & language › Language & region.",
+        "Windows'ta yüklü bir metin tanıma dili yok. Ayarlar › Zaman ve dil › Dil ve bölge bölümünden bir dil ekleyin.",
     ),
     (
         "Windows rejected the clipboard image: {}",

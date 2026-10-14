@@ -463,8 +463,8 @@ fn the_command_menu_lists_every_tool_even_when_the_strip_is_collapsed() {
     let menu = state.command_menu_buttons().expect("a toolbar is laid out");
     assert_eq!(
         menu.len(),
-        shown.len() + MORE_TOOLS.len() + 1,
-        "the hidden tools and Pin"
+        shown.len() + MORE_TOOLS.len() + 1 + 2,
+        "the hidden tools, Pin and the two text recognition commands"
     );
     let items: Vec<ToolbarItem> = menu.iter().map(|b| b.item).collect();
     let undo = items
@@ -503,11 +503,12 @@ fn an_expanded_strip_needs_no_extra_tool_entries() {
     state.tools_expanded = true;
     state.composite_scene();
     let shown = state.toolbar.as_ref().unwrap().buttons.len();
-    assert_eq!(state.command_menu_buttons().unwrap().len(), shown + 1);
+    // Only Pin and the two text recognition commands are added.
+    assert_eq!(state.command_menu_buttons().unwrap().len(), shown + 1 + 2);
 }
 
 #[test]
-fn the_command_menu_offers_pin_to_screen_right_after_upload() {
+fn the_command_menu_offers_pin_and_the_text_recognition_commands_right_after_upload() {
     let state = state_with_toolbar();
     let items: Vec<ToolbarItem> = state
         .command_menu_buttons()
@@ -519,14 +520,23 @@ fn the_command_menu_offers_pin_to_screen_right_after_upload() {
         .iter()
         .position(|item| *item == ToolbarItem::Action(ToolbarAction::Upload))
         .unwrap();
-    assert_eq!(items[upload + 1], ToolbarItem::Action(ToolbarAction::Pin));
     assert_eq!(
-        items
-            .iter()
-            .filter(|item| **item == items[upload + 1])
-            .count(),
-        1
+        &items[upload + 1..upload + 5],
+        &[
+            ToolbarItem::Action(ToolbarAction::Pin),
+            ToolbarItem::Action(ToolbarAction::CopyText),
+            ToolbarItem::Action(ToolbarAction::RedactSensitive),
+            ToolbarItem::Action(ToolbarAction::Settings),
+        ]
     );
+    for command in [
+        ToolbarAction::Pin,
+        ToolbarAction::CopyText,
+        ToolbarAction::RedactSensitive,
+    ] {
+        let item = ToolbarItem::Action(command);
+        assert_eq!(items.iter().filter(|listed| **listed == item).count(), 1);
+    }
 }
 
 #[test]
