@@ -680,8 +680,14 @@ pub(super) unsafe extern "system" fn overlay_wnd_proc(
                                         };
                                         object.translate(dx, dy);
                                     }
-                                    DragObjectAction::Resize(handle) => {
-                                        object.resize_from(original_kind, handle, pt, selection);
+                                    DragObjectAction::Resize(handle, grab) => {
+                                        let cursor = (pt.0 - grab.0, pt.1 - grab.1);
+                                        object.resize_from(
+                                            original_kind,
+                                            handle,
+                                            cursor,
+                                            selection,
+                                        );
                                     }
                                 }
                                 old_bounds.union(&object.bounds()).inflate(8, 8)
@@ -699,25 +705,13 @@ pub(super) unsafe extern "system" fn overlay_wnd_proc(
                         let region = state.committed_selection.unwrap_or_default();
                         if let Some(shape) = &mut state.drawing_shape {
                             match shape {
-                                InProgressDrawing::Rectangle { start, current } => {
-                                    *current = clamp_point(
-                                        if shift_down {
-                                            snap_square(*start, pt)
-                                        } else {
-                                            pt
-                                        },
-                                        region,
-                                    );
+                                InProgressDrawing::Rectangle { start, current }
+                                | InProgressDrawing::Ellipse { start, current } => {
+                                    *current = frame_drag_end(*start, pt, shift_down, region);
                                 }
-                                InProgressDrawing::Arrow { start, current } => {
-                                    *current = clamp_point(
-                                        if shift_down {
-                                            snap_angle_45(*start, pt)
-                                        } else {
-                                            pt
-                                        },
-                                        pixel_bounds(region),
-                                    );
+                                InProgressDrawing::Arrow { start, current }
+                                | InProgressDrawing::Line { start, current } => {
+                                    *current = segment_drag_end(*start, pt, shift_down, region);
                                 }
                                 InProgressDrawing::Pen { points } => {
                                     let pt = clamp_point(pt, pixel_bounds(region));
@@ -893,7 +887,10 @@ pub(super) unsafe extern "system" fn overlay_wnd_proc(
                             {
                                 state.dragging_object = Some(DragObjectState {
                                     id: object.id,
-                                    action: DragObjectAction::Resize(handle),
+                                    action: DragObjectAction::Resize(
+                                        handle,
+                                        object.resize_grab(handle, pt),
+                                    ),
                                     last_pos: pt,
                                     original_kind: object.kind.clone(),
                                 });
@@ -967,8 +964,20 @@ pub(super) unsafe extern "system" fn overlay_wnd_proc(
                                         current: pt,
                                     });
                                 }
+                                ToolKind::Ellipse => {
+                                    state.drawing_shape = Some(InProgressDrawing::Ellipse {
+                                        start: pt,
+                                        current: pt,
+                                    });
+                                }
                                 ToolKind::Arrow => {
                                     state.drawing_shape = Some(InProgressDrawing::Arrow {
+                                        start: pt,
+                                        current: pt,
+                                    });
+                                }
+                                ToolKind::Line => {
+                                    state.drawing_shape = Some(InProgressDrawing::Line {
                                         start: pt,
                                         current: pt,
                                     });
@@ -1194,55 +1203,49 @@ pub(super) unsafe extern "system" fn overlay_wnd_proc(
                         if let Some(shape) = state.drawing_shape.take() {
                             // Annotations never leave the region that will be exported.
                             let region = state.committed_selection.unwrap_or_default();
+                            let (color, thickness) = (state.active_color, state.active_thickness);
+                            let make = |kind| AnnotationObject::new(state.next_id, kind);
                             let new_obj = match shape {
                                 InProgressDrawing::Rectangle { start, current } => {
-                                    let final_cur = clamp_point(
-                                        if shift_down {
-                                            snap_square(start, current)
-                                        } else {
-                                            current
-                                        },
-                                        region,
-                                    );
-                                    let r = Rect::normalized(start, final_cur);
-                                    if r.width() >= 6 && r.height() >= 6 {
-                                        Some(AnnotationObject::new(
-                                            state.next_id,
-                                            AnnotationKind::Rectangle {
-                                                rect: r,
-                                                color: state.active_color,
-                                                thickness: state.active_thickness,
-                                            },
-                                        ))
-                                    } else {
-                                        None
-                                    }
+                                    dragged_frame(start, current, shift_down, region).map(|rect| {
+                                        make(AnnotationKind::Rectangle {
+                                            rect,
+                                            color,
+                                            thickness,
+                                        })
+                                    })
                                 }
-                                InProgressDrawing::Arrow { start, current } => {
-                                    let final_cur = clamp_point(
-                                        if shift_down {
-                                            snap_angle_45(start, current)
-                                        } else {
-                                            current
-                                        },
-                                        pixel_bounds(region),
-                                    );
-                                    let dx = (final_cur.0 - start.0).abs();
-                                    let dy = (final_cur.1 - start.1).abs();
-                                    if dx >= 3 || dy >= 3 {
-                                        Some(AnnotationObject::new(
-                                            state.next_id,
-                                            AnnotationKind::Arrow {
-                                                start,
-                                                end: final_cur,
-                                                color: state.active_color,
-                                                thickness: state.active_thickness,
-                                            },
-                                        ))
-                                    } else {
-                                        None
-                                    }
+                                InProgressDrawing::Ellipse { start, current } => {
+                                    dragged_frame(start, current, shift_down, region).map(|rect| {
+                                        make(AnnotationKind::Ellipse {
+                                            rect,
+                                            color,
+                                            thickness,
+                                        })
+                                    })
                                 }
+                                InProgressDrawing::Arrow { start, current } => dragged_segment(
+                                    start, current, shift_down, region,
+                                )
+                                .map(|(start, end)| {
+                                    make(AnnotationKind::Arrow {
+                                        start,
+                                        end,
+                                        color,
+                                        thickness,
+                                    })
+                                }),
+                                InProgressDrawing::Line { start, current } => dragged_segment(
+                                    start, current, shift_down, region,
+                                )
+                                .map(|(start, end)| {
+                                    make(AnnotationKind::Line {
+                                        start,
+                                        end,
+                                        color,
+                                        thickness,
+                                    })
+                                }),
                                 InProgressDrawing::Pen { points } => {
                                     let min_x = points.iter().map(|p| p.0).min().unwrap_or(0);
                                     let max_x = points.iter().map(|p| p.0).max().unwrap_or(0);

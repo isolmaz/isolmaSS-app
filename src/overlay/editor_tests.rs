@@ -409,10 +409,11 @@ fn the_cursor_shows_which_way_a_selected_object_grip_resizes_it() {
     let mut state = cursor_state();
     let id = state.objects[0].id;
     state.set_selected_id(Some(id));
-    assert_eq!(state.editor_cursor((146, 146)), IDC_SIZENWSE);
-    assert_eq!(state.editor_cursor((254, 254)), IDC_SIZENWSE);
-    assert_eq!(state.editor_cursor((254, 146)), IDC_SIZENESW);
-    assert_eq!(state.editor_cursor((146, 254)), IDC_SIZENESW);
+    // The 4 px stroke reaches 2 px beyond the rectangle and the gap adds 4 more.
+    assert_eq!(state.editor_cursor((144, 144)), IDC_SIZENWSE);
+    assert_eq!(state.editor_cursor((256, 256)), IDC_SIZENWSE);
+    assert_eq!(state.editor_cursor((256, 144)), IDC_SIZENESW);
+    assert_eq!(state.editor_cursor((144, 256)), IDC_SIZENESW);
     // The body of a selected object moves it; empty selection area is plain.
     assert_eq!(state.editor_cursor((200, 200)), IDC_SIZEALL);
     assert_eq!(state.editor_cursor((400, 300)), IDC_ARROW);
@@ -671,6 +672,8 @@ fn letters_select_tools() {
         ('v', ToolKind::Select),
         ('r', ToolKind::Rectangle),
         ('a', ToolKind::Arrow),
+        ('e', ToolKind::Ellipse),
+        ('l', ToolKind::Line),
         ('p', ToolKind::Pen),
         ('t', ToolKind::Text),
         ('h', ToolKind::Highlight),

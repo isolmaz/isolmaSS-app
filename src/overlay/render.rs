@@ -236,10 +236,33 @@ impl OverlayState {
                     )
                     .render_gdi(self.mem_dc);
                 }
+                Some(InProgressDrawing::Ellipse { start, current }) => {
+                    AnnotationObject::new(
+                        0,
+                        AnnotationKind::Ellipse {
+                            rect: Rect::normalized(*start, *current),
+                            color: self.active_color,
+                            thickness: self.active_thickness,
+                        },
+                    )
+                    .render_gdi(self.mem_dc);
+                }
                 Some(InProgressDrawing::Arrow { start, current }) => {
                     AnnotationObject::new(
                         0,
                         AnnotationKind::Arrow {
+                            start: *start,
+                            end: *current,
+                            color: self.active_color,
+                            thickness: self.active_thickness,
+                        },
+                    )
+                    .render_gdi(self.mem_dc);
+                }
+                Some(InProgressDrawing::Line { start, current }) => {
+                    AnnotationObject::new(
+                        0,
+                        AnnotationKind::Line {
                             start: *start,
                             end: *current,
                             color: self.active_color,
@@ -521,7 +544,9 @@ impl OverlayState {
                         } else {
                             match self.active_tool {
                                 ToolKind::Rectangle
+                                | ToolKind::Ellipse
                                 | ToolKind::Arrow
+                                | ToolKind::Line
                                 | ToolKind::Pen
                                 | ToolKind::Highlight => {
                                     (self.active_color, self.active_thickness, true, true)
@@ -967,7 +992,15 @@ mod tests {
                 start: (120, 90),
                 current: (240, 170),
             },
+            InProgressDrawing::Ellipse {
+                start: (120, 90),
+                current: (240, 170),
+            },
             InProgressDrawing::Arrow {
+                start: (110, 100),
+                current: (250, 170),
+            },
+            InProgressDrawing::Line {
                 start: (110, 100),
                 current: (250, 170),
             },
@@ -986,6 +1019,29 @@ mod tests {
             export.drawing_shape = Some(shape);
             export.composite_scene_with(CompositionPolicy::EXPORT);
             assert_eq!(red(&export), 0);
+        }
+    }
+
+    #[test]
+    fn finished_ellipses_and_lines_are_part_of_the_export() {
+        let red = |state: &OverlayState| count_color(state, SEL, RED);
+        for kind in [
+            AnnotationKind::Ellipse {
+                rect: Rect::new(120, 90, 240, 170),
+                color: RED,
+                thickness: 4,
+            },
+            AnnotationKind::Line {
+                start: (110, 100),
+                end: (250, 170),
+                color: RED,
+                thickness: 4,
+            },
+        ] {
+            let mut export = scene();
+            export.objects.push(AnnotationObject::new(1, kind.clone()));
+            export.composite_scene_with(CompositionPolicy::EXPORT);
+            assert!(red(&export) > 20, "{kind:?}");
         }
     }
 

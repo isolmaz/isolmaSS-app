@@ -607,6 +607,12 @@ fn letter_keys_pick_tools_and_remember_the_choice() {
     assert!(state.preferences_dirty);
     press(&mut state, &window, key('b'), 0);
     assert_eq!(state.active_tool, ToolKind::Blur);
+    press(&mut state, &window, key('e'), 0);
+    assert_eq!(state.active_tool, ToolKind::Ellipse);
+    assert_eq!(state.settings.last_tool, ToolKind::Ellipse);
+    press(&mut state, &window, key('l'), 0);
+    assert_eq!(state.active_tool, ToolKind::Line);
+    assert_eq!(state.settings.last_tool, ToolKind::Line);
 }
 
 #[test]
@@ -987,4 +993,34 @@ fn choosing_another_tool_ends_the_picker_and_saves_that_tool() {
     assert_eq!(state.active_tool, ToolKind::Pen);
     assert_eq!(state.tool_before_pick, None);
     assert_eq!(state.settings.last_tool, ToolKind::Pen);
+}
+
+#[test]
+fn i_without_a_region_does_not_arm_the_picker_so_escape_still_closes_the_editor() {
+    let window = TestWindow::new();
+    let mut state = plain_state();
+    assert_eq!(state.mode(), OverlayMode::Hovering);
+    press(&mut state, &window, key('i'), 0);
+    assert_eq!(state.active_tool, ToolKind::Rectangle);
+    assert_eq!(state.tool_before_pick, None);
+    assert!(!state.preferences_dirty);
+    press(&mut state, &window, ESCAPE, 0);
+    assert!(!window.exists(), "Esc from idle closes the editor");
+}
+
+#[test]
+fn discarding_the_region_while_picking_disarms_the_picker() {
+    let window = TestWindow::new();
+    let mut state = state_with_rectangle();
+    press(&mut state, &window, key('i'), 0);
+    assert_eq!(state.active_tool, ToolKind::ColorPicker);
+    state.activate_toolbar_item(window.0, ToolbarItem::Action(ToolbarAction::Cancel), (0, 0));
+    assert_eq!(state.mode(), OverlayMode::Hovering);
+    assert_eq!(state.active_tool, ToolKind::Rectangle);
+    assert_eq!(state.tool_before_pick, None);
+    press(&mut state, &window, ESCAPE, 0);
+    assert!(
+        !window.exists(),
+        "the first Esc is not swallowed by the picker"
+    );
 }

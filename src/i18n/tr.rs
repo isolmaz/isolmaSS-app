@@ -528,6 +528,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Downloading update", "Güncelleme indiriliyor"),
     ("Duplicate OAuth parameter.", "Yinelenen OAuth parametresi."),
     ("Editor", "Düzenleyici"),
+    ("Ellipse", "Elips"),
     (
         "Enter a positive whole number in every field.",
         "Her alana pozitif bir tam sayı girin.",
@@ -635,6 +636,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Light yellow", "Açık sarı"),
     ("Limits", "Sınırlar"),
     ("Limits saved.", "Sınırlar kaydedildi."),
+    ("Line", "Çizgi"),
     ("Line width", "Çizgi kalınlığı"),
     (
         "Link copied to the clipboard.",
