@@ -178,6 +178,8 @@ const fn rgb(hex: u32) -> COLORREF {
 pub const BRAND_AMBER: COLORREF = rgb(0xF59E0B);
 /// `BRAND_AMBER` as B, G, R, A bytes for the overlay's pixel buffers.
 pub const BRAND_AMBER_BGRA: [u8; 4] = [0x0B, 0x9E, 0xF5, 0xFF];
+/// `BRAND_INK` as B, G, R, A bytes: selection outlines and redaction fill.
+pub const BRAND_INK_BGRA: [u8; 4] = [0x13, 0x14, 0x14, 0xFF];
 /// Background behind selected characters while editing overlay text.
 pub const TEXT_SELECTION: COLORREF = rgb(0xFDE3A7);
 /// Brand ink: the warm near-black of the app icon.

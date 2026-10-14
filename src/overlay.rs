@@ -1,12 +1,12 @@
 use crate::annotation::{
     AnnotationKind, AnnotationObject, AnnotationResizeHandle, EditCommand, HistoryManager,
-    ToolKind, bgra_to_colorref, render_pen_preview, snap_angle_45, snap_square,
+    MergeKey, ToolKind, bgra_to_colorref, render_pen_preview, snap_angle_45, snap_square,
 };
 use crate::capture::{CaptureBuffer, Rect, SelectionHitZone};
 use crate::clipboard::{copy_dib_to_clipboard, flatten_selection_to_dib};
 use crate::hotkey::{
-    WM_OVERLAY_CHAR, WM_OVERLAY_KEYDOWN, register_overlay, set_overlay_text_editing,
-    unregister_overlay,
+    WM_OVERLAY_CHAR, WM_OVERLAY_KEYDOWN, register_overlay, set_overlay_ime_composing,
+    set_overlay_text_editing, unregister_overlay,
 };
 use crate::save::save_screenshot;
 use crate::settings::{Settings, show_settings_dialog};
@@ -19,10 +19,11 @@ use windows::Win32::Foundation::{
     RECT as WIN_RECT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection,
-    DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, GdiFlush, GetDC, GetMonitorInfoW, HBITMAP,
-    HDC, HGDIOBJ, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect, RGBQUAD,
-    ReleaseDC, SRCCOPY, ScreenToClient, SelectObject,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, BitBlt, ClientToScreen, CreateCompatibleDC,
+    CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, GdiFlush, GetDC,
+    GetMonitorInfoW, HBITMAP, HDC, HGDIOBJ, IntersectClipRect, InvalidateRect,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect, RGBQUAD, ReleaseDC, RestoreDC, SRCCOPY,
+    SaveDC, ScreenToClient, SelectObject,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, MOD_CONTROL, ReleaseCapture, SetCapture, SetFocus, VK_BACK, VK_CONTROL, VK_DELETE,
@@ -32,10 +33,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CS_DBLCLKS, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetCursorPos,
     GetWindowLongPtrW, IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_IBEAM, IDC_SIZEALL, IDC_SIZENESW,
     IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, KillTimer, LWA_ALPHA, LoadCursorW, MA_ACTIVATE,
-    RegisterClassExW, SW_SHOW, SetCursor, SetForegroundWindow, SetLayeredWindowAttributes,
-    SetTimer, SetWindowLongPtrW, ShowWindow, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
-    WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER,
+    RegisterClassExW, SM_CXDRAG, SM_CYDRAG, SW_SHOW, SetCursor, SetForegroundWindow,
+    SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, ShowWindow, WM_CHAR, WM_CLOSE,
+    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION,
+    WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SYSKEYDOWN, WM_TIMER,
     WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, Result, w};
@@ -83,26 +85,184 @@ pub fn is_editor_shortcut(vk: u32, modifiers: u32, editing: bool) -> bool {
     }
 }
 
-fn capture_hud_bounds(capture: &CaptureBuffer, selection: Rect, dpi: u32) -> Rect {
-    let viewport = selection_work_viewport(capture, selection);
+fn rects_intersect(a: &Rect, b: &Rect) -> bool {
+    !a.is_empty()
+        && !b.is_empty()
+        && a.left < b.right
+        && b.left < a.right
+        && a.top < b.bottom
+        && b.top < a.bottom
+}
+
+fn intersect_rects(a: Rect, b: Rect) -> Rect {
+    let left = a.left.max(b.left);
+    let top = a.top.max(b.top);
+    Rect::new(
+        left,
+        top,
+        a.right.min(b.right).max(left),
+        a.bottom.min(b.bottom).max(top),
+    )
+}
+
+/// Edge length of a selection grip; `Rect::hit_test_selection` uses half of it.
+fn selection_handle_size(dpi: u32) -> i32 {
+    8 * dpi as i32 / 96
+}
+
+fn hit_selection(selection: &Rect, pt: (i32, i32), dpi: u32) -> SelectionHitZone {
+    selection.hit_test_selection(pt, 4 * dpi as i32 / 96, selection_handle_size(dpi))
+}
+
+/// Half size, in pixels, of an object's resize grip and its hit tolerance.
+fn object_grip_radius(dpi: u32) -> i32 {
+    4 * dpi as i32 / 96
+}
+
+fn selection_grip_boxes(selection: &Rect, half: i32) -> [Rect; 8] {
+    let middle_x = selection.left + selection.width() / 2;
+    let middle_y = selection.top + selection.height() / 2;
+    [
+        (selection.left, selection.top),
+        (selection.right, selection.top),
+        (selection.left, selection.bottom),
+        (selection.right, selection.bottom),
+        (middle_x, selection.top),
+        (selection.right, middle_y),
+        (middle_x, selection.bottom),
+        (selection.left, middle_y),
+    ]
+    .map(|(x, y)| Rect::new(x - half, y - half, x + half, y + half))
+}
+
+/// Places the "W × H px" readout: above the selection, else below it, else inside its
+/// top-left corner past the grip. The first candidate that fits the viewport and clears
+/// every obstacle (toolbar panels) and selection grip wins; the inside one is the fallback.
+fn place_capture_hud(selection: Rect, viewport: Rect, dpi: u32, obstacles: &[Rect]) -> Rect {
     let scale = |value: i32| (value * dpi as i32 / 96).max(1);
     let width = scale(136).min(viewport.width().max(1));
     let height = scale(28);
-    let x = selection
-        .left
-        .clamp(viewport.left, (viewport.right - width).max(viewport.left));
-    let y = (selection.top - height - scale(4))
+    let grip = selection_handle_size(dpi);
+    let gap = grip / 2 + scale(4);
+    let max_x = (viewport.right - width).max(viewport.left);
+    let x = selection.left.clamp(viewport.left, max_x);
+    let above = Rect::new(
+        x,
+        selection.top - gap - height,
+        x + width,
+        selection.top - gap,
+    );
+    let below = Rect::new(
+        x,
+        selection.bottom + gap,
+        x + width,
+        selection.bottom + gap + height,
+    );
+    let inside_x = (selection.left + scale(8) + grip).clamp(viewport.left, max_x);
+    let inside_y = (selection.top + scale(8) + grip)
         .clamp(viewport.top, (viewport.bottom - height).max(viewport.top));
-    Rect::new(x, y, x + width, y + height)
+    let inside = Rect::new(inside_x, inside_y, inside_x + width, inside_y + height);
+    let grips = selection_grip_boxes(&selection, grip / 2 + scale(1));
+    [above, below, inside]
+        .into_iter()
+        .filter(|rect| rect.top >= viewport.top && rect.bottom <= viewport.bottom)
+        .find(|rect| {
+            !obstacles
+                .iter()
+                .chain(&grips)
+                .any(|blocked| rects_intersect(rect, blocked))
+        })
+        .unwrap_or(inside)
 }
 
-fn selection_work_viewport(capture: &CaptureBuffer, selection: Rect) -> Rect {
-    let screen_selection = WIN_RECT {
+/// Pointer travel, in pixels, that turns a click into a drag (`SM_CXDRAG`/`SM_CYDRAG`).
+fn drag_threshold(dpi: u32) -> (i32, i32) {
+    unsafe {
+        (
+            windows::Win32::UI::HiDpi::GetSystemMetricsForDpi(SM_CXDRAG, dpi).max(1),
+            windows::Win32::UI::HiDpi::GetSystemMetricsForDpi(SM_CYDRAG, dpi).max(1),
+        )
+    }
+}
+
+fn exceeds_drag_threshold(origin: (i32, i32), pt: (i32, i32), threshold: (i32, i32)) -> bool {
+    (pt.0 - origin.0).abs() > threshold.0 || (pt.1 - origin.1).abs() > threshold.1
+}
+
+/// Distance from the pressed point to the edge being resized, so the edge keeps that
+/// offset from the pointer instead of snapping to it.
+fn resize_grab_offset(zone: SelectionHitZone, selection: Rect, press: (i32, i32)) -> (i32, i32) {
+    let edge_x = match zone {
+        SelectionHitZone::TopLeftCorner
+        | SelectionHitZone::BottomLeftCorner
+        | SelectionHitZone::LeftEdge => selection.left,
+        SelectionHitZone::TopRightCorner
+        | SelectionHitZone::BottomRightCorner
+        | SelectionHitZone::RightEdge => selection.right,
+        _ => press.0,
+    };
+    let edge_y = match zone {
+        SelectionHitZone::TopLeftCorner
+        | SelectionHitZone::TopRightCorner
+        | SelectionHitZone::TopEdge => selection.top,
+        SelectionHitZone::BottomLeftCorner
+        | SelectionHitZone::BottomRightCorner
+        | SelectionHitZone::BottomEdge => selection.bottom,
+        _ => press.1,
+    };
+    (press.0 - edge_x, press.1 - edge_y)
+}
+
+/// Clamps `pt` into `bounds`, edges included.
+fn clamp_point(pt: (i32, i32), bounds: Rect) -> (i32, i32) {
+    (
+        pt.0.clamp(bounds.left, bounds.right.max(bounds.left)),
+        pt.1.clamp(bounds.top, bounds.bottom.max(bounds.top)),
+    )
+}
+
+/// The last pixel column and row of `selection`: inclusive bounds for pixel positions.
+fn pixel_bounds(selection: Rect) -> Rect {
+    Rect::new(
+        selection.left,
+        selection.top,
+        selection.right - 1,
+        selection.bottom - 1,
+    )
+}
+
+fn selection_screen_rect(capture: &CaptureBuffer, selection: Rect) -> WIN_RECT {
+    WIN_RECT {
         left: selection.left + capture.x,
         top: selection.top + capture.y,
         right: selection.right + capture.x,
         bottom: selection.bottom + capture.y,
-    };
+    }
+}
+
+fn selection_monitor_dpi(capture: &CaptureBuffer, selection: Rect, fallback: u32) -> u32 {
+    let screen_selection = selection_screen_rect(capture, selection);
+    let monitor = unsafe { MonitorFromRect(&screen_selection, MONITOR_DEFAULTTONEAREST) };
+    let mut dpi_x = fallback;
+    let mut dpi_y = fallback;
+    if unsafe {
+        windows::Win32::UI::HiDpi::GetDpiForMonitor(
+            monitor,
+            windows::Win32::UI::HiDpi::MDT_EFFECTIVE_DPI,
+            &mut dpi_x,
+            &mut dpi_y,
+        )
+    }
+    .is_ok()
+    {
+        dpi_x.max(48)
+    } else {
+        fallback
+    }
+}
+
+fn selection_work_viewport(capture: &CaptureBuffer, selection: Rect) -> Rect {
+    let screen_selection = selection_screen_rect(capture, selection);
     let monitor = unsafe { MonitorFromRect(&screen_selection, MONITOR_DEFAULTTONEAREST) };
     let mut info = MONITORINFO {
         cbSize: std::mem::size_of::<MONITORINFO>() as u32,
@@ -184,12 +344,36 @@ enum DragSelectionAction {
 struct DragSelectionState {
     original_selection: Rect,
     action: DragSelectionAction,
-    start_pos: (i32, i32),
     last_pos: (i32, i32),
+    /// Pointer offset from the grabbed edge at press time (resizes only).
+    grab: (i32, i32),
+}
+
+impl DragSelectionState {
+    fn new(selection: Rect, action: DragSelectionAction, press: (i32, i32)) -> Self {
+        let grab = match action {
+            DragSelectionAction::Move => (0, 0),
+            DragSelectionAction::Resize(zone) => resize_grab_offset(zone, selection, press),
+        };
+        Self {
+            original_selection: selection,
+            action,
+            last_pos: press,
+            grab,
+        }
+    }
+}
+
+/// Everything a discarded selection held, kept so Ctrl+Z can bring it back.
+struct DiscardedSession {
+    selection: Rect,
+    objects: Vec<AnnotationObject>,
+    history: HistoryManager,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EscapeAction {
+    CancelledGesture,
     CancelledTextEdit,
     CancelledThicknessEdit,
     DeselectedObject(usize),
@@ -212,6 +396,15 @@ struct DragObjectState {
     action: DragObjectAction,
     last_pos: (i32, i32),
     original_kind: AnnotationKind,
+}
+
+/// Stops the caret timer and hands the keyboard back to shortcuts and the IME.
+fn stop_text_input(hwnd: HWND) {
+    unsafe {
+        let _ = KillTimer(hwnd, 1);
+    }
+    set_overlay_text_editing(false);
+    set_overlay_ime_composing(false);
 }
 
 struct ScreenDcGuard(HDC);
@@ -271,8 +464,16 @@ pub struct OverlayState {
     dragging_object: Option<DragObjectState>,
     dragging_selection: Option<DragSelectionState>,
     text_edit: Option<TextEditState>,
+    /// A press outside the selection becomes a new region only once the pointer drags.
+    pending_reselect: Option<(i32, i32)>,
+    /// A new region was started outside the previous session; Esc puts that session back.
+    reselecting: bool,
+    discarded_session: Option<DiscardedSession>,
+    last_down_mode: Option<OverlayMode>,
 
     toolbar: Option<Toolbar>,
+    /// Size readout placed after the toolbar layout of the latest frame.
+    hud_rect: Option<Rect>,
     tools_expanded: bool,
 
     mem_dc: HDC,
@@ -301,6 +502,7 @@ pub(crate) struct ThicknessDrag {
 impl Drop for OverlayState {
     fn drop(&mut self) {
         unregister_overlay();
+        set_overlay_ime_composing(false);
         crate::drawing::clear_text_metrics();
         unsafe {
             if !self.mem_dc.0.is_null() {
@@ -315,8 +517,104 @@ impl Drop for OverlayState {
 }
 
 impl OverlayState {
+    /// Aborts the gesture in progress and puts back the state it started from.
+    fn cancel_active_gesture(&mut self) -> bool {
+        let mut cancelled = self.pending_reselect.take().is_some();
+        cancelled |= self.drawing_shape.take().is_some();
+        if let Some(drag) = self.dragging_object.take() {
+            if let Some(object) = self.objects.iter_mut().find(|object| object.id == drag.id) {
+                object.kind = drag.original_kind;
+            }
+            cancelled = true;
+        }
+        if let Some(drag) = self.dragging_selection.take() {
+            if drag.action == DragSelectionAction::Move
+                && let Some(current) = self.committed_selection
+            {
+                let dx = drag.original_selection.left - current.left;
+                let dy = drag.original_selection.top - current.top;
+                for object in &mut self.objects {
+                    object.translate(dx, dy);
+                }
+            }
+            self.committed_selection = Some(drag.original_selection);
+            cancelled = true;
+        }
+        if let Some(drag) = self.thickness_drag.take() {
+            if let Some((id, kind)) = self.thickness_drag_original.take()
+                && let Some(object) = self.objects.iter_mut().find(|object| object.id == id)
+            {
+                object.kind = kind;
+            }
+            self.active_thickness = drag.start_value;
+            cancelled = true;
+        }
+        if self.reselecting {
+            cancelled |= self.restore_discarded_session();
+        }
+        if cancelled {
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+        }
+        cancelled
+    }
+
+    /// Drops the selection and every annotation. An active selection is kept as one
+    /// snapshot so Ctrl+Z in `Hovering` can bring the session back.
+    fn discard_session(&mut self) {
+        if self.mode == OverlayMode::SelectionActive
+            && let Some(selection) = self.committed_selection
+        {
+            self.discarded_session = Some(DiscardedSession {
+                selection,
+                objects: std::mem::take(&mut self.objects),
+                history: std::mem::take(&mut self.history),
+            });
+        }
+        self.mode = OverlayMode::Hovering;
+        self.drag_start = None;
+        self.hover_snap_rect = None;
+        self.committed_selection = None;
+        self.toolbar = None;
+        self.hud_rect = None;
+        self.objects.clear();
+        self.history.clear();
+        self.selected_id = None;
+        self.drawing_shape = None;
+        self.dragging_object = None;
+        self.dragging_selection = None;
+        self.pending_reselect = None;
+        self.reselecting = false;
+    }
+
+    pub fn restore_discarded_session(&mut self) -> bool {
+        let Some(session) = self.discarded_session.take() else {
+            return false;
+        };
+        self.mode = OverlayMode::SelectionActive;
+        self.committed_selection = Some(session.selection);
+        self.objects = session.objects;
+        self.history = session.history;
+        self.hover_snap_rect = None;
+        self.drag_start = None;
+        self.reselecting = false;
+        self.selected_id = None;
+        true
+    }
+
+    /// Starts a new region from `origin`; the previous session stays restorable.
+    fn begin_reselect(&mut self, origin: (i32, i32)) {
+        self.discard_session();
+        self.mode = OverlayMode::DraggingSelection;
+        self.drag_start = Some(origin);
+        self.reselecting = true;
+    }
+
     pub fn handle_escape_action(&mut self) -> EscapeAction {
-        if self.thickness_input.take().is_some() {
+        if self.cancel_active_gesture() {
+            EscapeAction::CancelledGesture
+        } else if self.thickness_input.take().is_some() {
             set_overlay_text_editing(false);
             EscapeAction::CancelledThicknessEdit
         } else if self.text_edit.take().is_some() {
@@ -327,16 +625,7 @@ impl OverlayState {
             self.mode,
             OverlayMode::SelectionActive | OverlayMode::DraggingSelection
         ) {
-            self.mode = OverlayMode::Hovering;
-            self.drag_start = None;
-            self.hover_snap_rect = None;
-            self.committed_selection = None;
-            self.toolbar = None;
-            self.objects.clear();
-            self.history.clear();
-            self.drawing_shape = None;
-            self.dragging_object = None;
-            self.dragging_selection = None;
+            self.discard_session();
             unsafe {
                 let _ = ReleaseCapture();
             }
@@ -371,7 +660,12 @@ impl OverlayState {
             dragging_object: None,
             dragging_selection: None,
             text_edit: None,
+            pending_reselect: None,
+            reselecting: false,
+            discarded_session: None,
+            last_down_mode: None,
             toolbar: None,
+            hud_rect: None,
             tools_expanded: false,
             mem_dc: HDC::default(),
             dib: HBITMAP::default(),
@@ -416,12 +710,49 @@ impl OverlayState {
         self.committed_selection = Some(rect);
     }
 
+    pub fn object_count(&self) -> usize {
+        self.objects.len()
+    }
+
+    pub fn add_test_rectangle(&mut self, rect: Rect) {
+        let object = AnnotationObject::new(
+            self.next_id,
+            AnnotationKind::Rectangle {
+                rect,
+                color: self.active_color,
+                thickness: self.active_thickness,
+            },
+        );
+        self.next_id += 1;
+        self.history.record(EditCommand::Add(object.clone()));
+        self.objects.push(object);
+    }
+
+    /// Smoke-test hooks: start a gesture without synthesising mouse input.
+    pub fn begin_test_rectangle_gesture(&mut self, start: (i32, i32), current: (i32, i32)) {
+        self.drawing_shape = Some(InProgressDrawing::Rectangle { start, current });
+    }
+
+    pub fn begin_test_selection_move(&mut self) {
+        if let Some(selection) = self.committed_selection {
+            self.dragging_selection = Some(DragSelectionState::new(
+                selection,
+                DragSelectionAction::Move,
+                (0, 0),
+            ));
+        }
+    }
+
+    pub fn has_active_gesture(&self) -> bool {
+        self.drawing_shape.is_some()
+            || self.dragging_object.is_some()
+            || self.dragging_selection.is_some()
+            || self.thickness_drag.is_some()
+    }
+
     fn commit_text(&mut self, hwnd: HWND) {
         if let Some(edit) = self.text_edit.take() {
-            unsafe {
-                let _ = KillTimer(hwnd, 1);
-            }
-            set_overlay_text_editing(false);
+            stop_text_input(hwnd);
             let text = edit.text.clone();
             if text.trim().is_empty() {
                 if let Some(index) = edit
@@ -453,11 +784,13 @@ impl OverlayState {
                     if let Some(existing) = self.objects.iter_mut().find(|o| o.id == obj_id) {
                         let old_kind = existing.kind.clone();
                         existing.kind = new_kind.clone();
-                        self.history.record(EditCommand::Modify {
-                            id: obj_id,
-                            old_kind,
-                            new_kind,
-                        });
+                        if old_kind != new_kind {
+                            self.history.record(EditCommand::Modify {
+                                id: obj_id,
+                                old_kind,
+                                new_kind,
+                            });
+                        }
                     } else {
                         let old_kind = AnnotationKind::Text {
                             pos: edit.pos,
@@ -511,8 +844,8 @@ impl OverlayState {
                     }
                 }
                 value if value == VK_ESCAPE.0 as usize => {
-                    self.thickness_input = None;
-                    set_overlay_text_editing(false);
+                    // A wheel drag is cancelled first; the wheel closes on the next Esc.
+                    self.handle_escape_action();
                 }
                 _ => {}
             }
@@ -554,7 +887,17 @@ impl OverlayState {
                     );
                 }
             }
-            match crate::toolbar::show_command_menu(hwnd, &buttons, None) {
+            let anchor = self.toolbar.as_ref().map(|toolbar| {
+                let mut origin = windows::Win32::Foundation::POINT {
+                    x: toolbar.action_bounds.left,
+                    y: toolbar.action_bounds.top,
+                };
+                unsafe {
+                    let _ = ClientToScreen(hwnd, &mut origin);
+                }
+                (origin.x, origin.y)
+            });
+            match crate::toolbar::show_command_menu(hwnd, &buttons, anchor) {
                 Ok(Some(ToolbarItem::Tool(tool))) => {
                     self.active_tool = tool;
                     self.selected_id = None;
@@ -604,13 +947,11 @@ impl OverlayState {
         if vk == VK_ESCAPE.0 as usize {
             match self.handle_escape_action() {
                 EscapeAction::CancelledTextEdit => {
-                    unsafe {
-                        let _ = KillTimer(hwnd, 1);
-                    }
-                    set_overlay_text_editing(false);
+                    stop_text_input(hwnd);
                     self.redraw(hwnd);
                 }
-                EscapeAction::CancelledThicknessEdit
+                EscapeAction::CancelledGesture
+                | EscapeAction::CancelledThicknessEdit
                 | EscapeAction::DeselectedObject(_)
                 | EscapeAction::CancelledSelection => {
                     self.redraw(hwnd);
@@ -741,6 +1082,10 @@ impl OverlayState {
 
         // 6. Undo: Ctrl+Z
         if ctrl_down && vk == 'Z' as usize {
+            if self.mode == OverlayMode::Hovering && self.restore_discarded_session() {
+                self.redraw(hwnd);
+                return LRESULT(0);
+            }
             self.history.undo(&mut self.objects);
             if let Some(selection) = self.history.take_selection_update() {
                 self.committed_selection = Some(selection);
@@ -822,11 +1167,14 @@ impl OverlayState {
                 }
                 let old_kind = object.kind.clone();
                 object.translate(dx, dy);
-                self.history.record(EditCommand::Modify {
-                    id: object.id,
-                    old_kind,
-                    new_kind: object.kind.clone(),
-                });
+                self.history.record_merge(
+                    EditCommand::Modify {
+                        id: object.id,
+                        old_kind,
+                        new_kind: object.kind.clone(),
+                    },
+                    MergeKey::Nudge,
+                );
             } else if let Some(before) = self.committed_selection {
                 let mut after = before;
                 let shift = if ctrl_down {
@@ -850,11 +1198,14 @@ impl OverlayState {
                     (dx, dy)
                 };
                 if after != before {
-                    self.history.record(EditCommand::Selection {
-                        before,
-                        after,
-                        shift,
-                    });
+                    self.history.record_merge(
+                        EditCommand::Selection {
+                            before,
+                            after,
+                            shift,
+                        },
+                        MergeKey::Nudge,
+                    );
                     self.committed_selection = Some(after);
                 }
             }
@@ -1051,10 +1402,8 @@ impl OverlayState {
         let Some(selection) = self.committed_selection else {
             return IDC_CROSS;
         };
-        if capture_hud_bounds(&self.capture, selection, self.dpi).contains(pt.0, pt.1) {
-            return IDC_SIZEALL;
-        }
-        match selection.hit_test_selection(pt, 4 * self.dpi as i32 / 96, 8 * self.dpi as i32 / 96) {
+        let zone = hit_selection(&selection, pt, self.dpi);
+        match zone {
             SelectionHitZone::TopLeftCorner | SelectionHitZone::BottomRightCorner => {
                 return IDC_SIZENWSE;
             }
@@ -1065,8 +1414,14 @@ impl OverlayState {
             SelectionHitZone::LeftEdge | SelectionHitZone::RightEdge => return IDC_SIZEWE,
             _ => {}
         }
+        if self.hud_rect.is_some_and(|hud| hud.contains(pt.0, pt.1)) {
+            return IDC_SIZEALL;
+        }
         if self.active_tool != ToolKind::Select {
-            return if self.active_tool == ToolKind::Text {
+            // Drawing tools only act inside the selection.
+            return if !selection.contains(pt.0, pt.1) {
+                IDC_ARROW
+            } else if self.active_tool == ToolKind::Text {
                 IDC_IBEAM
             } else {
                 IDC_CROSS
@@ -1077,8 +1432,9 @@ impl OverlayState {
             .selected_id
             .and_then(|id| self.objects.iter().find(|object| object.id == id))
         {
-            let radius = 7 * self.dpi as i32 / 96;
-            if let Some(handle) = object.hit_resize_handle(pt, radius) {
+            if let Some(handle) =
+                object.hit_resize_handle(pt, object_grip_radius(self.dpi), self.dpi)
+            {
                 return match handle {
                     AnnotationResizeHandle::TopLeft | AnnotationResizeHandle::BottomRight => {
                         IDC_SIZENWSE
@@ -1096,14 +1452,14 @@ impl OverlayState {
             }
         }
 
-        match selection.hit_test_selection(pt, 4 * self.dpi as i32 / 96, 8 * self.dpi as i32 / 96) {
+        match zone {
             SelectionHitZone::TopLeftCorner | SelectionHitZone::BottomRightCorner => IDC_SIZENWSE,
             SelectionHitZone::TopRightCorner | SelectionHitZone::BottomLeftCorner => IDC_SIZENESW,
             SelectionHitZone::TopEdge | SelectionHitZone::BottomEdge => IDC_SIZENS,
             SelectionHitZone::LeftEdge | SelectionHitZone::RightEdge => IDC_SIZEWE,
             SelectionHitZone::BorderEdge => IDC_SIZEALL,
             SelectionHitZone::Interior => {
-                if self.objects.iter().rev().any(|object| object.hit_test(pt)) {
+                if self.topmost_object_at(pt).is_some() {
                     IDC_SIZEALL
                 } else {
                     IDC_ARROW
@@ -1111,6 +1467,16 @@ impl OverlayState {
             }
             SelectionHitZone::None => IDC_CROSS,
         }
+    }
+
+    /// The topmost object whose visible stroke is under `pt`; a hollow frame's interior
+    /// only counts when no stroke is hit, so objects inside a frame stay selectable.
+    fn topmost_object_at(&self, pt: (i32, i32)) -> Option<&AnnotationObject> {
+        self.objects
+            .iter()
+            .rev()
+            .find(|object| object.hit_test_stroke(pt))
+            .or_else(|| self.objects.iter().rev().find(|object| object.hit_test(pt)))
     }
 
     fn change_color(&mut self, color: [u8; 4]) {
@@ -1141,11 +1507,14 @@ impl OverlayState {
             let before = object.kind.clone();
             object.set_thickness(self.active_thickness);
             if record && before != object.kind {
-                self.history.record(EditCommand::Modify {
-                    id: object.id,
-                    old_kind: before,
-                    new_kind: object.kind.clone(),
-                });
+                self.history.record_merge(
+                    EditCommand::Modify {
+                        id: object.id,
+                        old_kind: before,
+                        new_kind: object.kind.clone(),
+                    },
+                    MergeKey::Thickness,
+                );
             }
         }
         if record {
@@ -1242,6 +1611,10 @@ unsafe extern "system" fn overlay_wnd_proc(
                     let state = unsafe { &mut *state_ptr };
                     state.settings.last_custom_color = color;
                     state.change_color(color);
+                    if let Some(edit) = &mut state.text_edit {
+                        edit.color = color;
+                        edit.caret_visible = true;
+                    }
                     state.redraw(hwnd);
                 }
                 Ok(_) => {}
@@ -1250,6 +1623,15 @@ unsafe extern "system" fn overlay_wnd_proc(
                     crate::i18n::t("Could not open the color picker"),
                     &error.to_string(),
                 ),
+            }
+            // The dialog took the keyboard; typing continues in the same text box.
+            if unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(hwnd).as_bool() }
+                && unsafe { (*state_ptr).text_edit.is_some() }
+            {
+                unsafe {
+                    let _ = SetForegroundWindow(hwnd);
+                    let _ = SetFocus(hwnd);
+                }
             }
         }
         return LRESULT(0);
@@ -1470,8 +1852,13 @@ unsafe extern "system" fn overlay_wnd_proc(
                     let _ = SetFocus(hwnd);
                 }
 
+                let over_toolbar = state
+                    .toolbar
+                    .as_ref()
+                    .is_some_and(|toolbar| toolbar.contains_point(pt));
                 if state.mode == OverlayMode::SelectionActive
                     && state.active_tool == ToolKind::Select
+                    && !over_toolbar
                 {
                     // Double-click on existing committed text object: re-opens it in text editing mode with caret at the end!
                     if let Some(pos) = state.objects.iter().rposition(|o| {
@@ -1506,6 +1893,11 @@ unsafe extern "system" fn overlay_wnd_proc(
                             return LRESULT(0);
                         }
                     }
+                }
+                // A fast second press is an ordinary press, unless the first one belonged
+                // to another mode (double-clicking a hovered window to snap it).
+                if state.last_down_mode == Some(state.mode) {
+                    return unsafe { overlay_wnd_proc(hwnd, WM_LBUTTONDOWN, wparam, lparam) };
                 }
             }
             LRESULT(0)
@@ -1595,15 +1987,21 @@ unsafe extern "system" fn overlay_wnd_proc(
                 let pt = (client_x, client_y);
                 let previous_pointer = state.pointer;
                 state.pointer = pt;
-                if let Some(selection) = state.committed_selection
+                if let Some(hud) = state.hud_rect
                     && state.mode == OverlayMode::SelectionActive
-                {
-                    let hud = capture_hud_bounds(&state.capture, selection, state.dpi);
-                    if hud.contains(previous_pointer.0, previous_pointer.1)
+                    && hud.contains(previous_pointer.0, previous_pointer.1)
                         != hud.contains(pt.0, pt.1)
-                    {
-                        state.redraw_chrome(hwnd);
+                {
+                    state.redraw_chrome(hwnd);
+                }
+
+                // A press outside the selection only becomes a new region once it drags.
+                if let Some(origin) = state.pending_reselect {
+                    if !exceeds_drag_threshold(origin, pt, drag_threshold(state.dpi)) {
+                        return LRESULT(0);
                     }
+                    state.pending_reselect = None;
+                    state.begin_reselect(origin);
                 }
 
                 let shift_down = (unsafe { GetKeyState(VK_SHIFT.0 as i32) } as u16 & 0x8000) != 0;
@@ -1646,7 +2044,11 @@ unsafe extern "system" fn overlay_wnd_proc(
                         }
                     }
                     OverlayMode::DraggingSelection => {
-                        if let Some(start) = state.drag_start {
+                        // Jitter within the click threshold keeps the window highlight.
+                        if let Some(start) = state.drag_start
+                            && (state.committed_selection.is_some()
+                                || exceeds_drag_threshold(start, pt, drag_threshold(state.dpi)))
+                        {
                             let adjusted_pt = if shift_down {
                                 snap_square(start, pt)
                             } else {
@@ -1712,46 +2114,43 @@ unsafe extern "system" fn overlay_wnd_proc(
                                         }
                                     }
                                     DragSelectionAction::Resize(zone) => {
+                                        // The edge keeps the offset it was grabbed at.
+                                        let edge_x = client_x - drag.grab.0;
+                                        let edge_y = client_y - drag.grab.1;
                                         match zone {
                                             SelectionHitZone::TopLeftCorner => {
-                                                sel.left =
-                                                    client_x.clamp(0, (sel.right - 8).max(0));
-                                                sel.top =
-                                                    client_y.clamp(0, (sel.bottom - 8).max(0));
+                                                sel.left = edge_x.clamp(0, (sel.right - 8).max(0));
+                                                sel.top = edge_y.clamp(0, (sel.bottom - 8).max(0));
                                             }
                                             SelectionHitZone::TopRightCorner => {
-                                                sel.right = client_x
-                                                    .clamp((sel.left + 8).min(max_w), max_w);
-                                                sel.top =
-                                                    client_y.clamp(0, (sel.bottom - 8).max(0));
+                                                sel.right =
+                                                    edge_x.clamp((sel.left + 8).min(max_w), max_w);
+                                                sel.top = edge_y.clamp(0, (sel.bottom - 8).max(0));
                                             }
                                             SelectionHitZone::BottomLeftCorner => {
-                                                sel.left =
-                                                    client_x.clamp(0, (sel.right - 8).max(0));
+                                                sel.left = edge_x.clamp(0, (sel.right - 8).max(0));
                                                 sel.bottom =
-                                                    client_y.clamp((sel.top + 8).min(max_h), max_h);
+                                                    edge_y.clamp((sel.top + 8).min(max_h), max_h);
                                             }
                                             SelectionHitZone::BottomRightCorner => {
-                                                sel.right = client_x
-                                                    .clamp((sel.left + 8).min(max_w), max_w);
+                                                sel.right =
+                                                    edge_x.clamp((sel.left + 8).min(max_w), max_w);
                                                 sel.bottom =
-                                                    client_y.clamp((sel.top + 8).min(max_h), max_h);
+                                                    edge_y.clamp((sel.top + 8).min(max_h), max_h);
                                             }
                                             SelectionHitZone::TopEdge => {
-                                                sel.top =
-                                                    client_y.clamp(0, (sel.bottom - 8).max(0));
+                                                sel.top = edge_y.clamp(0, (sel.bottom - 8).max(0));
                                             }
                                             SelectionHitZone::RightEdge => {
-                                                sel.right = client_x
-                                                    .clamp((sel.left + 8).min(max_w), max_w);
+                                                sel.right =
+                                                    edge_x.clamp((sel.left + 8).min(max_w), max_w);
                                             }
                                             SelectionHitZone::BottomEdge => {
                                                 sel.bottom =
-                                                    client_y.clamp((sel.top + 8).min(max_h), max_h);
+                                                    edge_y.clamp((sel.top + 8).min(max_h), max_h);
                                             }
                                             SelectionHitZone::LeftEdge => {
-                                                sel.left =
-                                                    client_x.clamp(0, (sel.right - 8).max(0));
+                                                sel.left = edge_x.clamp(0, (sel.right - 8).max(0));
                                             }
                                             _ => {}
                                         }
@@ -1761,10 +2160,8 @@ unsafe extern "system" fn overlay_wnd_proc(
                             }
 
                             state.dragging_selection = Some(DragSelectionState {
-                                original_selection: drag.original_selection,
-                                action: drag.action,
-                                start_pos: drag.start_pos,
                                 last_pos: pt,
+                                ..drag
                             });
                             let dirty = match (old_selection, state.committed_selection) {
                                 (Some(old), Some(new)) => old.union(&new).inflate(8, 8),
@@ -1824,24 +2221,32 @@ unsafe extern "system" fn overlay_wnd_proc(
                             return LRESULT(0);
                         }
 
-                        // 3. Drawing in-progress shape
+                        // 3. Drawing in-progress shape, kept inside the exported region
+                        let region = state.committed_selection.unwrap_or_default();
                         if let Some(shape) = &mut state.drawing_shape {
                             match shape {
                                 InProgressDrawing::Rectangle { start, current } => {
-                                    *current = if shift_down {
-                                        snap_square(*start, pt)
-                                    } else {
-                                        pt
-                                    };
+                                    *current = clamp_point(
+                                        if shift_down {
+                                            snap_square(*start, pt)
+                                        } else {
+                                            pt
+                                        },
+                                        region,
+                                    );
                                 }
                                 InProgressDrawing::Arrow { start, current } => {
-                                    *current = if shift_down {
-                                        snap_angle_45(*start, pt)
-                                    } else {
-                                        pt
-                                    };
+                                    *current = clamp_point(
+                                        if shift_down {
+                                            snap_angle_45(*start, pt)
+                                        } else {
+                                            pt
+                                        },
+                                        pixel_bounds(region),
+                                    );
                                 }
                                 InProgressDrawing::Pen { points } => {
+                                    let pt = clamp_point(pt, pixel_bounds(region));
                                     if points.len() < 32_768
                                         && points.last().is_none_or(|last| {
                                             (last.0 - pt.0).abs() + (last.1 - pt.1).abs() >= 2
@@ -1851,11 +2256,14 @@ unsafe extern "system" fn overlay_wnd_proc(
                                     }
                                 }
                                 InProgressDrawing::Blur { start, current, .. } => {
-                                    *current = if shift_down {
-                                        snap_square(*start, pt)
-                                    } else {
-                                        pt
-                                    };
+                                    *current = clamp_point(
+                                        if shift_down {
+                                            snap_square(*start, pt)
+                                        } else {
+                                            pt
+                                        },
+                                        region,
+                                    );
                                 }
                             }
                             state.redraw_chrome(hwnd);
@@ -1885,6 +2293,8 @@ unsafe extern "system" fn overlay_wnd_proc(
                     let _ = SetFocus(hwnd);
                     SetCapture(hwnd);
                 }
+                state.last_down_mode = Some(state.mode);
+                state.pending_reselect = None;
 
                 match state.mode {
                     OverlayMode::Hovering => {
@@ -1902,7 +2312,10 @@ unsafe extern "system" fn overlay_wnd_proc(
                             {
                                 set_overlay_text_editing(false);
                             }
-                            state.commit_text(hwnd);
+                            // Picking a color recolors the text being typed instead of ending it.
+                            if item != ToolbarItem::Color {
+                                state.commit_text(hwnd);
+                            }
 
                             match item {
                                 ToolbarItem::Tool(k) => {
@@ -1987,15 +2400,7 @@ unsafe extern "system" fn overlay_wnd_proc(
                                     );
                                 },
                                 ToolbarItem::Action(ToolbarAction::Cancel) => {
-                                    state.mode = OverlayMode::Hovering;
-                                    state.committed_selection = None;
-                                    state.toolbar = None;
-                                    state.objects.clear();
-                                    state.history.clear();
-                                    state.drawing_shape = None;
-                                    state.dragging_object = None;
-                                    state.dragging_selection = None;
-                                    state.selected_id = None;
+                                    state.discard_session();
                                     state.redraw(hwnd);
                                 }
                                 ToolbarItem::Color => unsafe {
@@ -2034,6 +2439,15 @@ unsafe extern "system" fn overlay_wnd_proc(
                             return LRESULT(0);
                         }
 
+                        // Panel padding, gaps and disabled buttons swallow the click.
+                        if state
+                            .toolbar
+                            .as_ref()
+                            .is_some_and(|toolbar| toolbar.contains_point(pt))
+                        {
+                            return LRESULT(0);
+                        }
+
                         if state.thickness_input.take().is_some() {
                             set_overlay_text_editing(false);
                         }
@@ -2046,23 +2460,7 @@ unsafe extern "system" fn overlay_wnd_proc(
                             return LRESULT(0);
                         };
 
-                        if capture_hud_bounds(&state.capture, sel, state.dpi).contains(pt.0, pt.1) {
-                            state.dragging_selection = Some(DragSelectionState {
-                                original_selection: sel,
-                                action: DragSelectionAction::Move,
-                                start_pos: pt,
-                                last_pos: pt,
-                            });
-                            state.selected_id = None;
-                            state.redraw(hwnd);
-                            return LRESULT(0);
-                        }
-
-                        let selection_zone = sel.hit_test_selection(
-                            pt,
-                            4 * state.dpi as i32 / 96,
-                            8 * state.dpi as i32 / 96,
-                        );
+                        let selection_zone = hit_selection(&sel, pt, state.dpi);
                         if matches!(
                             selection_zone,
                             SelectionHitZone::TopLeftCorner
@@ -2074,23 +2472,33 @@ unsafe extern "system" fn overlay_wnd_proc(
                                 | SelectionHitZone::BottomEdge
                                 | SelectionHitZone::LeftEdge
                         ) {
-                            state.dragging_selection = Some(DragSelectionState {
-                                original_selection: sel,
-                                action: DragSelectionAction::Resize(selection_zone),
-                                start_pos: pt,
-                                last_pos: pt,
-                            });
+                            state.dragging_selection = Some(DragSelectionState::new(
+                                sel,
+                                DragSelectionAction::Resize(selection_zone),
+                                pt,
+                            ));
+                            state.selected_id = None;
+                            state.redraw(hwnd);
+                            return LRESULT(0);
+                        }
+
+                        if state.hud_rect.is_some_and(|hud| hud.contains(pt.0, pt.1)) {
+                            state.dragging_selection =
+                                Some(DragSelectionState::new(sel, DragSelectionAction::Move, pt));
                             state.selected_id = None;
                             state.redraw(hwnd);
                             return LRESULT(0);
                         }
 
                         if state.active_tool == ToolKind::Select {
-                            let handle_radius = 7 * state.dpi as i32 / 96;
                             if let Some(object) = state
                                 .selected_id
                                 .and_then(|id| state.objects.iter().find(|object| object.id == id))
-                                && let Some(handle) = object.hit_resize_handle(pt, handle_radius)
+                                && let Some(handle) = object.hit_resize_handle(
+                                    pt,
+                                    object_grip_radius(state.dpi),
+                                    state.dpi,
+                                )
                             {
                                 state.dragging_object = Some(DragObjectState {
                                     id: object.id,
@@ -2111,12 +2519,11 @@ unsafe extern "system" fn overlay_wnd_proc(
                                 | SelectionHitZone::BottomEdge
                                 | SelectionHitZone::LeftEdge => unreachable!(),
                                 SelectionHitZone::BorderEdge => {
-                                    state.dragging_selection = Some(DragSelectionState {
-                                        original_selection: sel,
-                                        action: DragSelectionAction::Move,
-                                        start_pos: pt,
-                                        last_pos: pt,
-                                    });
+                                    state.dragging_selection = Some(DragSelectionState::new(
+                                        sel,
+                                        DragSelectionAction::Move,
+                                        pt,
+                                    ));
                                     state.selected_id = None;
                                     state.redraw(hwnd);
                                     return LRESULT(0);
@@ -2133,13 +2540,7 @@ unsafe extern "system" fn overlay_wnd_proc(
                                                 .inflate(4, 4)
                                                 .contains(pt.0, pt.1)
                                         })
-                                        .or_else(|| {
-                                            state
-                                                .objects
-                                                .iter()
-                                                .rev()
-                                                .find(|object| object.hit_test(pt))
-                                        });
+                                        .or_else(|| state.topmost_object_at(pt));
                                     if let Some(object) = hit_object {
                                         let id = object.id;
                                         let original_kind = object.kind.clone();
@@ -2161,16 +2562,8 @@ unsafe extern "system" fn overlay_wnd_proc(
                                         state.selected_id = None;
                                         state.redraw(hwnd);
                                     } else {
-                                        state.mode = OverlayMode::DraggingSelection;
-                                        state.drag_start = Some(pt);
-                                        state.committed_selection = None;
-                                        state.toolbar = None;
-                                        state.objects.clear();
-                                        state.history.clear();
-                                        state.drawing_shape = None;
-                                        state.dragging_object = None;
-                                        state.dragging_selection = None;
-                                        state.redraw(hwnd);
+                                        // The session is only replaced once the pointer drags.
+                                        state.pending_reselect = Some(pt);
                                     }
                                 }
                             }
@@ -2208,14 +2601,15 @@ unsafe extern "system" fn overlay_wnd_proc(
                                         .max()
                                         .unwrap_or(0)
                                         .saturating_add(1);
+                                    let radius = (14 * state.dpi as i32 / 96).max(14);
                                     let center = (
-                                        if sel.width() >= 29 {
-                                            pt.0.clamp(sel.left + 14, sel.right - 15)
+                                        if sel.width() > 2 * radius {
+                                            pt.0.clamp(sel.left + radius, sel.right - radius - 1)
                                         } else {
                                             (sel.left + sel.right) / 2
                                         },
-                                        if sel.height() >= 29 {
-                                            pt.1.clamp(sel.top + 14, sel.bottom - 15)
+                                        if sel.height() > 2 * radius {
+                                            pt.1.clamp(sel.top + radius, sel.bottom - radius - 1)
                                         } else {
                                             (sel.top + sel.bottom) / 2
                                         },
@@ -2226,6 +2620,7 @@ unsafe extern "system" fn overlay_wnd_proc(
                                             pos: center,
                                             number,
                                             color: state.active_color,
+                                            radius,
                                         },
                                     );
                                     state.next_id += 1;
@@ -2273,6 +2668,7 @@ unsafe extern "system" fn overlay_wnd_proc(
 
                 let _ = unsafe { ReleaseCapture() };
                 let shift_down = (unsafe { GetKeyState(VK_SHIFT.0 as i32) } as u16 & 0x8000) != 0;
+                state.pending_reselect = None;
                 if let Some(drag) = state.thickness_drag.take() {
                     if !drag.moved {
                         state.change_thickness(drag.picked, false);
@@ -2297,11 +2693,9 @@ unsafe extern "system" fn overlay_wnd_proc(
 
                 match state.mode {
                     OverlayMode::DraggingSelection => {
+                        state.reselecting = false;
                         if let Some(start) = state.drag_start.take() {
-                            let dx = (client_x - start.0).abs();
-                            let dy = (client_y - start.1).abs();
-
-                            if dx <= 3 && dy <= 3 {
+                            if !exceeds_drag_threshold(start, pt, drag_threshold(state.dpi)) {
                                 if state.settings.enable_window_snap {
                                     let screen_x = client_x + state.capture.x;
                                     let screen_y = client_y + state.capture.y;
@@ -2389,15 +2783,19 @@ unsafe extern "system" fn overlay_wnd_proc(
                         }
 
                         if let Some(shape) = state.drawing_shape.take() {
+                            // Annotations never leave the region that will be exported.
+                            let region = state.committed_selection.unwrap_or_default();
                             let new_obj = match shape {
                                 InProgressDrawing::Rectangle { start, current } => {
-                                    let final_cur = if shift_down {
-                                        snap_square(start, current)
-                                    } else {
-                                        current
-                                    };
-                                    let r = Rect::normalized(start, final_cur)
-                                        .clamp(state.capture.width, state.capture.height);
+                                    let final_cur = clamp_point(
+                                        if shift_down {
+                                            snap_square(start, current)
+                                        } else {
+                                            current
+                                        },
+                                        region,
+                                    );
+                                    let r = Rect::normalized(start, final_cur);
                                     if r.width() >= 6 && r.height() >= 6 {
                                         Some(AnnotationObject::new(
                                             state.next_id,
@@ -2412,11 +2810,14 @@ unsafe extern "system" fn overlay_wnd_proc(
                                     }
                                 }
                                 InProgressDrawing::Arrow { start, current } => {
-                                    let final_cur = if shift_down {
-                                        snap_angle_45(start, current)
-                                    } else {
-                                        current
-                                    };
+                                    let final_cur = clamp_point(
+                                        if shift_down {
+                                            snap_angle_45(start, current)
+                                        } else {
+                                            current
+                                        },
+                                        pixel_bounds(region),
+                                    );
                                     let dx = (final_cur.0 - start.0).abs();
                                     let dy = (final_cur.1 - start.1).abs();
                                     if dx >= 3 || dy >= 3 {
@@ -2466,13 +2867,15 @@ unsafe extern "system" fn overlay_wnd_proc(
                                     current,
                                     redact,
                                 } => {
-                                    let final_cur = if shift_down {
-                                        snap_square(start, current)
-                                    } else {
-                                        current
-                                    };
-                                    let r = Rect::normalized(start, final_cur)
-                                        .clamp(state.capture.width, state.capture.height);
+                                    let final_cur = clamp_point(
+                                        if shift_down {
+                                            snap_square(start, current)
+                                        } else {
+                                            current
+                                        },
+                                        region,
+                                    );
+                                    let r = Rect::normalized(start, final_cur);
                                     if r.width() >= 6 && r.height() >= 6 {
                                         Some(AnnotationObject::new(
                                             state.next_id,
@@ -2529,6 +2932,37 @@ unsafe extern "system" fn overlay_wnd_proc(
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
 
+        // F10 and Shift+F10 arrive as system keys. Handling them here opens the command
+        // menu and keeps Windows from entering its own menu mode.
+        WM_SYSKEYDOWN if wparam.0 == 0x79 => {
+            let repeat = lparam.0 & (1 << 30) != 0;
+            if !state_ptr.is_null() && !repeat && !crate::hotkey::overlay_input_suspended() {
+                let state = unsafe { &mut *state_ptr };
+                return state.handle_key_down(
+                    hwnd,
+                    0x79,
+                    crate::hotkey::get_current_modifiers() as isize,
+                );
+            }
+            LRESULT(0)
+        }
+
+        // While an IME composes, the keyboard hook must leave every key to the IME.
+        WM_IME_STARTCOMPOSITION => {
+            if !state_ptr.is_null()
+                && let Some(edit) = unsafe { &(*state_ptr).text_edit }
+            {
+                set_overlay_ime_composing(true);
+                edit.place_ime_window(hwnd);
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+
+        WM_IME_ENDCOMPOSITION => {
+            set_overlay_ime_composing(false);
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+
         WM_RBUTTONDOWN => {
             unsafe {
                 let _ = SetForegroundWindow(hwnd);
@@ -2542,14 +2976,12 @@ unsafe extern "system" fn overlay_wnd_proc(
                 let state = unsafe { &mut *state_ptr };
                 match state.handle_escape_action() {
                     EscapeAction::CancelledTextEdit => {
-                        unsafe {
-                            let _ = KillTimer(hwnd, 1);
-                        }
-                        set_overlay_text_editing(false);
+                        stop_text_input(hwnd);
                         state.redraw(hwnd);
                         return LRESULT(0);
                     }
-                    EscapeAction::CancelledThicknessEdit
+                    EscapeAction::CancelledGesture
+                    | EscapeAction::CancelledThicknessEdit
                     | EscapeAction::DeselectedObject(_)
                     | EscapeAction::CancelledSelection => {
                         state.redraw(hwnd);
@@ -2572,9 +3004,250 @@ unsafe extern "system" fn overlay_wnd_proc(
 
         WM_DESTROY => {
             unregister_overlay();
+            set_overlay_ime_composing(false);
             LRESULT(0)
         }
 
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const VIEWPORT: Rect = Rect::new(0, 0, 1920, 1040);
+
+    fn test_state() -> OverlayState {
+        OverlayState::create_test_state(Rc::new(CaptureBuffer::dummy(800, 600)))
+    }
+
+    fn state_with_rectangle() -> OverlayState {
+        let mut state = test_state();
+        state.set_selection_active(Rect::new(100, 100, 500, 400));
+        state.add_test_rectangle(Rect::new(150, 150, 250, 250));
+        state
+    }
+
+    #[test]
+    fn hud_goes_above_the_selection_when_nothing_blocks_it() {
+        let selection = Rect::new(400, 300, 1000, 700);
+        assert_eq!(
+            place_capture_hud(selection, VIEWPORT, 96, &[]),
+            Rect::new(400, 264, 536, 292)
+        );
+    }
+
+    #[test]
+    fn hud_drops_below_a_selection_touching_the_top() {
+        let selection = Rect::new(200, 0, 900, 400);
+        assert_eq!(
+            place_capture_hud(selection, VIEWPORT, 96, &[]),
+            Rect::new(200, 408, 336, 436)
+        );
+    }
+
+    #[test]
+    fn hud_moves_below_when_the_action_bar_sits_above() {
+        let selection = Rect::new(400, 300, 1000, 700);
+        let action_bar = Rect::new(348, 250, 632, 292);
+        assert_eq!(
+            place_capture_hud(selection, VIEWPORT, 96, &[action_bar]),
+            Rect::new(400, 708, 536, 736)
+        );
+    }
+
+    #[test]
+    fn hud_sits_inside_past_the_corner_grip_for_a_full_screen_selection() {
+        let hud = place_capture_hud(VIEWPORT, VIEWPORT, 96, &[]);
+        assert_eq!(hud, Rect::new(16, 16, 152, 44));
+        let grips = selection_grip_boxes(&VIEWPORT, 4);
+        assert!(grips.iter().all(|grip| !rects_intersect(&hud, grip)));
+    }
+
+    #[test]
+    fn hud_falls_back_inside_when_every_outside_spot_is_blocked() {
+        let selection = Rect::new(400, 300, 1000, 700);
+        let above = Rect::new(0, 200, 1920, 300);
+        let below = Rect::new(0, 690, 1920, 800);
+        assert_eq!(
+            place_capture_hud(selection, VIEWPORT, 96, &[above, below]),
+            Rect::new(416, 316, 552, 344)
+        );
+    }
+
+    #[test]
+    fn hud_scales_with_dpi() {
+        let selection = Rect::new(400, 300, 1000, 700);
+        let hud = place_capture_hud(selection, VIEWPORT, 192, &[]);
+        assert_eq!((hud.width(), hud.height()), (272, 56));
+        assert!(hud.bottom <= selection.top);
+    }
+
+    #[test]
+    fn rect_intersection_ignores_touching_and_empty_rects() {
+        let a = Rect::new(0, 0, 10, 10);
+        assert!(!rects_intersect(&a, &Rect::new(10, 0, 20, 10)));
+        assert!(rects_intersect(&a, &Rect::new(5, 5, 15, 15)));
+        assert!(!rects_intersect(&a, &Rect::default()));
+        assert_eq!(
+            intersect_rects(a, Rect::new(5, 5, 15, 15)),
+            Rect::new(5, 5, 10, 10)
+        );
+        assert!(intersect_rects(a, Rect::new(20, 20, 30, 30)).is_empty());
+    }
+
+    #[test]
+    fn drag_starts_only_beyond_the_threshold() {
+        let threshold = (4, 4);
+        assert!(!exceeds_drag_threshold((50, 50), (54, 46), threshold));
+        assert!(exceeds_drag_threshold((50, 50), (55, 50), threshold));
+        assert!(exceeds_drag_threshold((50, 50), (50, 44), threshold));
+    }
+
+    #[test]
+    fn resize_keeps_the_offset_the_edge_was_grabbed_at() {
+        let selection = Rect::new(100, 100, 300, 200);
+        assert_eq!(
+            resize_grab_offset(SelectionHitZone::TopLeftCorner, selection, (103, 98)),
+            (3, -2)
+        );
+        assert_eq!(
+            resize_grab_offset(SelectionHitZone::RightEdge, selection, (297, 150)),
+            (-3, 0)
+        );
+        assert_eq!(
+            resize_grab_offset(SelectionHitZone::BottomEdge, selection, (200, 204)),
+            (0, 4)
+        );
+    }
+
+    #[test]
+    fn drawing_points_stay_inside_the_selection() {
+        let selection = Rect::new(100, 100, 300, 200);
+        assert_eq!(clamp_point((50, 400), selection), (100, 200));
+        assert_eq!(clamp_point((50, 400), pixel_bounds(selection)), (100, 199));
+        assert_eq!(clamp_point((150, 150), selection), (150, 150));
+    }
+
+    #[test]
+    fn escape_cancels_a_shape_without_touching_the_session() {
+        let mut state = state_with_rectangle();
+        state.begin_test_rectangle_gesture((300, 300), (350, 350));
+        assert_eq!(state.handle_escape_action(), EscapeAction::CancelledGesture);
+        assert!(!state.has_active_gesture());
+        assert_eq!(state.object_count(), 1);
+        assert_eq!(state.mode(), OverlayMode::SelectionActive);
+        assert!(state.history.can_undo());
+    }
+
+    #[test]
+    fn escape_restores_a_dragged_object() {
+        let mut state = state_with_rectangle();
+        let id = state.objects[0].id;
+        let original_kind = state.objects[0].kind.clone();
+        state.objects[0].translate(30, 20);
+        state.dragging_object = Some(DragObjectState {
+            id,
+            action: DragObjectAction::Move,
+            last_pos: (0, 0),
+            original_kind: original_kind.clone(),
+        });
+        assert_eq!(state.handle_escape_action(), EscapeAction::CancelledGesture);
+        assert_eq!(state.objects[0].kind, original_kind);
+        assert!(state.dragging_object.is_none());
+    }
+
+    #[test]
+    fn escape_restores_a_moved_selection_and_its_objects() {
+        let mut state = state_with_rectangle();
+        let original = state.committed_selection().unwrap();
+        let original_kind = state.objects[0].kind.clone();
+        state.dragging_selection = Some(DragSelectionState::new(
+            original,
+            DragSelectionAction::Move,
+            (200, 200),
+        ));
+        state.committed_selection = Some(Rect::new(140, 125, 540, 425));
+        state.objects[0].translate(40, 25);
+        assert_eq!(state.handle_escape_action(), EscapeAction::CancelledGesture);
+        assert_eq!(state.committed_selection(), Some(original));
+        assert_eq!(state.objects[0].kind, original_kind);
+    }
+
+    #[test]
+    fn escape_restores_a_resized_selection_without_moving_objects() {
+        let mut state = state_with_rectangle();
+        let original = state.committed_selection().unwrap();
+        let original_kind = state.objects[0].kind.clone();
+        state.dragging_selection = Some(DragSelectionState::new(
+            original,
+            DragSelectionAction::Resize(SelectionHitZone::RightEdge),
+            (500, 250),
+        ));
+        state.committed_selection = Some(Rect::new(100, 100, 460, 400));
+        assert_eq!(state.handle_escape_action(), EscapeAction::CancelledGesture);
+        assert_eq!(state.committed_selection(), Some(original));
+        assert_eq!(state.objects[0].kind, original_kind);
+    }
+
+    #[test]
+    fn escape_restores_a_thickness_drag() {
+        let mut state = state_with_rectangle();
+        let id = state.objects[0].id;
+        let original_kind = state.objects[0].kind.clone();
+        let start_value = state.active_thickness;
+        state.selected_id = Some(id);
+        state.thickness_drag = Some(ThicknessDrag {
+            start_y: 0,
+            start_value,
+            picked: start_value,
+            moved: true,
+        });
+        state.thickness_drag_original = Some((id, original_kind.clone()));
+        state.change_thickness(start_value + 5, false);
+        assert_ne!(state.objects[0].kind, original_kind);
+        assert_eq!(state.handle_escape_action(), EscapeAction::CancelledGesture);
+        assert_eq!(state.objects[0].kind, original_kind);
+        assert_eq!(state.active_thickness, start_value);
+    }
+
+    #[test]
+    fn a_pending_click_outside_is_cancelled_without_discarding_anything() {
+        let mut state = state_with_rectangle();
+        state.pending_reselect = Some((10, 10));
+        assert_eq!(state.handle_escape_action(), EscapeAction::CancelledGesture);
+        assert!(state.pending_reselect.is_none());
+        assert_eq!(state.object_count(), 1);
+        assert_eq!(state.mode(), OverlayMode::SelectionActive);
+    }
+
+    #[test]
+    fn a_cancelled_session_comes_back_with_its_history() {
+        let mut state = state_with_rectangle();
+        assert_eq!(
+            state.handle_escape_action(),
+            EscapeAction::CancelledSelection
+        );
+        assert_eq!(state.object_count(), 0);
+        assert!(!state.history.can_undo());
+        assert!(state.restore_discarded_session());
+        assert_eq!(state.mode(), OverlayMode::SelectionActive);
+        assert_eq!(state.object_count(), 1);
+        assert!(state.history.can_undo());
+        assert!(!state.restore_discarded_session());
+    }
+
+    #[test]
+    fn escape_during_a_new_region_puts_the_old_session_back() {
+        let mut state = state_with_rectangle();
+        let original = state.committed_selection().unwrap();
+        state.begin_reselect((10, 10));
+        assert_eq!(state.mode(), OverlayMode::DraggingSelection);
+        assert_eq!(state.object_count(), 0);
+        assert_eq!(state.handle_escape_action(), EscapeAction::CancelledGesture);
+        assert_eq!(state.mode(), OverlayMode::SelectionActive);
+        assert_eq!(state.committed_selection(), Some(original));
+        assert_eq!(state.object_count(), 1);
     }
 }

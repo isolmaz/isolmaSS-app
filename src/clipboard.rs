@@ -12,14 +12,21 @@ use windows::core::{Error, Result, w};
 
 pub const CF_DIB_FORMAT: u32 = 8; // Standard Windows CF_DIB format
 
+const CF_UNICODETEXT_FORMAT: u32 = 13;
+
+/// Reads pasteable text; an empty string means the clipboard holds no text
+/// (an image, or nothing), which is not an error.
 pub fn read_text(owner: HWND) -> Result<String> {
-    use windows::Win32::System::DataExchange::GetClipboardData;
+    use windows::Win32::System::DataExchange::{GetClipboardData, IsClipboardFormatAvailable};
     use windows::Win32::System::Memory::GlobalSize;
+    if unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT_FORMAT) }.is_err() {
+        return Ok(String::new());
+    }
     unsafe {
         OpenClipboard(owner)?;
     }
     let _clipboard = ClipboardGuard;
-    let handle = unsafe { GetClipboardData(13)? };
+    let handle = unsafe { GetClipboardData(CF_UNICODETEXT_FORMAT)? };
     let memory = HGLOBAL(handle.0);
     let full_size = unsafe { GlobalSize(memory) };
     if full_size == 0 {
@@ -51,7 +58,15 @@ pub fn read_text(owner: HWND) -> Result<String> {
             crate::i18n::t("Clipboard text exceeded 32768 bytes and was truncated."),
         );
     }
-    Ok(text.replace(['\r', '\n'], " ").replace('\t', "    "))
+    Ok(single_line(&text))
+}
+
+/// Flattens pasted text for the single-line editor: one space per line break
+/// (CRLF counts once) and tabs as four spaces.
+fn single_line(text: &str) -> String {
+    text.replace("\r\n", " ")
+        .replace(['\r', '\n'], " ")
+        .replace('\t', "    ")
 }
 
 pub(crate) struct ClipboardGuard;
@@ -274,8 +289,28 @@ pub fn copy_text_to_clipboard(hwnd: Option<HWND>, text: &str) -> Result<()> {
     let _clipboard = ClipboardGuard;
     unsafe {
         EmptyClipboard()?;
-        SetClipboardData(13, HANDLE(memory.0))?; // CF_UNICODETEXT
+        SetClipboardData(CF_UNICODETEXT_FORMAT, HANDLE(memory.0))?;
     }
     allocation.0 = HGLOBAL::default(); // Windows now owns the allocation.
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::single_line;
+
+    #[test]
+    fn line_breaks_become_one_space_each() {
+        assert_eq!(single_line("a\r\nb"), "a b");
+        assert_eq!(single_line("a\nb"), "a b");
+        assert_eq!(single_line("a\rb"), "a b");
+        assert_eq!(single_line("a\r\n\r\nb\n\rc"), "a  b  c");
+    }
+
+    #[test]
+    fn tabs_expand_and_plain_text_is_untouched() {
+        assert_eq!(single_line("a\tb"), "a    b");
+        assert_eq!(single_line("plain text"), "plain text");
+        assert_eq!(single_line(""), "");
+    }
 }

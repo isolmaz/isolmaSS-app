@@ -646,34 +646,35 @@ impl CaptureBuffer {
         }
     }
 
-    /// Draws a dual-tone high-contrast selection border and eight resize handles.
-    /// Outer border: 1px black outline.
-    /// Main border: 2px accent outline.
-    /// Corner handles: 8x8 px squares with white fill and 1px black border.
+    /// Draws a dual-tone high-contrast selection border and eight resize handles,
+    /// sized for `dpi` so they match the hit-test geometry.
+    /// Outer border: dark outline, `(dpi / 96).max(1)` px.
+    /// Main border: accent outline, `(2 * dpi / 96).max(2)` px.
+    /// Handles: white squares, `8 * dpi / 96` px (at least 8) with a dark border.
     pub fn draw_contrast_selection(
         target: &mut [u8],
         width: i32,
         height: i32,
         rect: &Rect,
         accent_bgra: [u8; 4],
+        dpi: u32,
     ) {
         if rect.is_empty() || width <= 0 || height <= 0 {
             return;
         }
 
-        let dark_border = [15, 15, 15, 255]; // Deep charcoal/black
+        let dark_border = crate::theme::BRAND_INK_BGRA;
         let handle_fill = [255, 255, 255, 255]; // Crisp white
+        let frame = (2 * dpi / 96).max(2) as i32;
+        let outline = (dpi / 96).max(1) as i32;
 
-        // 1. Dual-tone selection rectangle:
-        // Outer 1px dark border
-        let outer = Rect::new(rect.left - 1, rect.top - 1, rect.right + 1, rect.bottom + 1);
-        Self::draw_border(target, width, height, &outer, dark_border, 1);
-
-        // Inner 2px accent border
-        Self::draw_border(target, width, height, rect, accent_bgra, 2);
+        // 1. Dual-tone selection rectangle: dark outline around the accent frame.
+        let outer = rect.inflate(outline, outline);
+        Self::draw_border(target, width, height, &outer, dark_border, outline);
+        Self::draw_border(target, width, height, rect, accent_bgra, frame);
 
         // Four corners and four edge midpoints share the hit-test geometry.
-        let half_h = 4;
+        let half_h = (4 * dpi / 96).max(4) as i32;
         let middle_x = rect.left + rect.width() / 2;
         let middle_y = rect.top + rect.height() / 2;
         let handles = [
@@ -690,7 +691,7 @@ impl CaptureBuffer {
         for (cx, cy) in handles {
             let handle_rect = Rect::new(cx - half_h, cy - half_h, cx + half_h, cy + half_h);
             Self::fill_rect(target, width, height, &handle_rect, handle_fill);
-            Self::draw_border(target, width, height, &handle_rect, dark_border, 1);
+            Self::draw_border(target, width, height, &handle_rect, dark_border, outline);
         }
     }
 }
@@ -755,10 +756,62 @@ mod tests {
     fn test_contrast_selection_and_fill() {
         let mut buffer = vec![0u8; 100 * 100 * 4];
         let rect = Rect::new(10, 10, 50, 50);
-        CaptureBuffer::draw_contrast_selection(&mut buffer, 100, 100, &rect, [246, 130, 59, 255]);
+        CaptureBuffer::draw_contrast_selection(
+            &mut buffer,
+            100,
+            100,
+            &rect,
+            [246, 130, 59, 255],
+            96,
+        );
 
         // Corner handle should be filled with white [255, 255, 255, 255]
         let offset = (10 * 100 + 10) * 4;
         assert_eq!(&buffer[offset..offset + 4], &[255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn contrast_selection_grips_scale_with_dpi() {
+        let mut buffer = vec![0u8; 200 * 200 * 4];
+        let rect = Rect::new(30, 30, 90, 90);
+        CaptureBuffer::draw_contrast_selection(
+            &mut buffer,
+            200,
+            200,
+            &rect,
+            [246, 130, 59, 255],
+            192,
+        );
+
+        // The top-left grip is centred on (30, 30); its top row is dark
+        // and spans 2 * (4 * 192 / 96) = 16 px.
+        let top_row = 22 * 200;
+        let dark: Vec<usize> = (0..45)
+            .filter(|&x| buffer[(top_row + x) * 4..][..4] == crate::theme::BRAND_INK_BGRA)
+            .collect();
+        assert_eq!(dark, (22..38).collect::<Vec<_>>());
+        assert_eq!(&buffer[(30 * 200 + 30) * 4..][..4], &[255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn contrast_selection_frame_scales_with_dpi() {
+        let accent = [246, 130, 59, 255];
+        // (dpi, outline px, frame px)
+        for (dpi, outline, frame) in [(96, 1, 2), (192, 2, 4)] {
+            let mut buffer = vec![0u8; 200 * 200 * 4];
+            let rect = Rect::new(30, 30, 90, 90);
+            CaptureBuffer::draw_contrast_selection(&mut buffer, 200, 200, &rect, accent, dpi);
+
+            // Row 45 crosses only the left edge, between the grips.
+            let pixel = |x: i32| buffer[(45 * 200 + x as usize) * 4..][..4].to_vec();
+            assert_eq!(pixel(30 - outline - 1), [0; 4], "dpi {dpi}");
+            for x in 30 - outline..30 {
+                assert_eq!(pixel(x), crate::theme::BRAND_INK_BGRA, "dpi {dpi} x {x}");
+            }
+            for x in 30..30 + frame {
+                assert_eq!(pixel(x), accent, "dpi {dpi} x {x}");
+            }
+            assert_eq!(pixel(30 + frame), [0; 4], "dpi {dpi}");
+        }
     }
 }

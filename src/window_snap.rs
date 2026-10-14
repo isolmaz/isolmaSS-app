@@ -5,8 +5,9 @@ use windows::Win32::Graphics::Dwm::{
     DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GWL_EXSTYLE, GetClassNameW, GetWindowLongW, GetWindowRect, GetWindowTextLengthW,
-    IsIconic, IsWindowVisible, WS_EX_TOOLWINDOW,
+    EnumWindows, GWL_EXSTYLE, GetClassNameW, GetLayeredWindowAttributes, GetWindowLongW,
+    GetWindowRect, GetWindowTextLengthW, IsIconic, IsWindowVisible,
+    LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 
 /// Information about an enumerated top-level window.
@@ -61,8 +62,20 @@ pub fn get_visible_windows(exclude_hwnd: Option<HWND>) -> Vec<WindowInfo> {
             return BOOL(1);
         }
 
-        // 4. Exclude tool windows without titles
+        // 4. Exclude click-through overlays, invisible layered windows and
+        // tool windows without titles
         let ex_style = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32;
+        let constant_alpha = || {
+            let mut alpha = 0u8;
+            let mut flags = LAYERED_WINDOW_ATTRIBUTES_FLAGS(0);
+            let queried = unsafe {
+                GetLayeredWindowAttributes(hwnd, None, Some(&mut alpha), Some(&mut flags))
+            };
+            (queried.is_ok() && flags.0 & LWA_ALPHA.0 != 0).then_some(alpha)
+        };
+        if is_invisible_to_input(ex_style, constant_alpha) {
+            return BOOL(1);
+        }
         let is_tool_window = (ex_style & WS_EX_TOOLWINDOW.0) != 0;
 
         // Only query titles for tool windows, and never copy user document titles.
@@ -129,6 +142,17 @@ pub fn get_visible_windows(exclude_hwnd: Option<HWND>) -> Vec<WindowInfo> {
     context.windows
 }
 
+/// True for windows that cannot be a snap target: click-through windows, and
+/// layered windows with a constant alpha of 0 (vendor in-game overlays span
+/// the whole monitor but show nothing). `constant_alpha` runs only for
+/// layered windows and yields `None` when no `LWA_ALPHA` value is set.
+fn is_invisible_to_input(ex_style: u32, constant_alpha: impl FnOnce() -> Option<u8>) -> bool {
+    if ex_style & WS_EX_TRANSPARENT.0 != 0 {
+        return true;
+    }
+    ex_style & WS_EX_LAYERED.0 != 0 && constant_alpha() == Some(0)
+}
+
 pub fn find_window_in_list(
     windows: &[WindowInfo],
     screen_point: (i32, i32),
@@ -145,4 +169,35 @@ pub fn find_window_at_point(
 ) -> Option<WindowInfo> {
     let windows = get_visible_windows(exclude_hwnd);
     find_window_in_list(&windows, screen_point).cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn click_through_windows_are_skipped() {
+        let style = WS_EX_TRANSPARENT.0;
+        assert!(is_invisible_to_input(style, || unreachable!()));
+        assert!(is_invisible_to_input(style | WS_EX_LAYERED.0, || Some(255)));
+    }
+
+    #[test]
+    fn layered_windows_are_skipped_only_at_zero_alpha() {
+        let style = WS_EX_LAYERED.0;
+        assert!(is_invisible_to_input(style, || Some(0)));
+        assert!(!is_invisible_to_input(style, || Some(1)));
+        assert!(!is_invisible_to_input(style, || Some(255)));
+        // Alpha not set via LWA_ALPHA (colour key or per-pixel alpha).
+        assert!(!is_invisible_to_input(style, || None));
+    }
+
+    #[test]
+    fn ordinary_windows_never_query_alpha() {
+        assert!(!is_invisible_to_input(0, || unreachable!()));
+        assert!(!is_invisible_to_input(
+            WS_EX_TOOLWINDOW.0,
+            || unreachable!()
+        ));
+    }
 }

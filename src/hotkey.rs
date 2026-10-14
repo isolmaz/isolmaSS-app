@@ -214,6 +214,7 @@ pub fn overlay_input_suspended() -> bool {
 static OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);
 static OVERLAY_HWND: AtomicIsize = AtomicIsize::new(0);
 static OVERLAY_TEXT_EDITING: AtomicBool = AtomicBool::new(false);
+static OVERLAY_IME_COMPOSING: AtomicBool = AtomicBool::new(false);
 static OVERLAY_LOCAL_HOOK: AtomicIsize = AtomicIsize::new(0);
 
 /// Registers the active overlay window handle and marks the overlay as active.
@@ -255,6 +256,7 @@ pub fn register_overlay(hwnd: HWND) -> windows::core::Result<()> {
 pub fn unregister_overlay() {
     OVERLAY_ACTIVE.store(false, Ordering::SeqCst);
     OVERLAY_TEXT_EDITING.store(false, Ordering::SeqCst);
+    OVERLAY_IME_COMPOSING.store(false, Ordering::SeqCst);
     OVERLAY_HWND.store(0, Ordering::SeqCst);
 
     let prev_hook = OVERLAY_LOCAL_HOOK.swap(0, Ordering::SeqCst);
@@ -268,6 +270,12 @@ pub fn unregister_overlay() {
 /// Updates the overlay text editing state.
 pub fn set_overlay_text_editing(editing: bool) {
     OVERLAY_TEXT_EDITING.store(editing, Ordering::SeqCst);
+}
+
+/// Marks an IME composition in the overlay. While it runs the hook leaves every
+/// key alone, so Enter, Backspace, arrows and Esc reach the IME instead of the editor.
+pub fn set_overlay_ime_composing(composing: bool) {
+    OVERLAY_IME_COMPOSING.store(composing, Ordering::SeqCst);
 }
 
 /// Returns whether the overlay is currently active.
@@ -310,6 +318,7 @@ pub fn get_current_modifiers() -> u32 {
 ///
 /// When overlay is open (is_overlay_active):
 /// - Routes Esc, text editing input, and shortcuts to the overlay window, consuming them with LRESULT(1).
+/// - During an IME composition (`set_overlay_ime_composing`) none of that applies; the keys go to the IME.
 pub unsafe fn process_keyboard_hook(
     ncode: i32,
     wparam: WPARAM,
@@ -341,7 +350,10 @@ pub unsafe fn process_keyboard_hook(
     // -------------------------------------------------------------------------
     // Overlay Active Routing
     // -------------------------------------------------------------------------
-    if is_overlay_active() && !overlay_input_suspended() {
+    if is_overlay_active()
+        && !overlay_input_suspended()
+        && !OVERLAY_IME_COMPOSING.load(Ordering::SeqCst)
+    {
         let raw_hwnd = OVERLAY_HWND.load(Ordering::SeqCst);
         let overlay_hwnd = HWND(raw_hwnd as *mut _);
         let text_editing = is_overlay_text_editing();
@@ -776,6 +788,38 @@ mod tests {
             LRESULT(1),
             "Shortcut Ctrl+C should be consumed when overlay active"
         );
+
+        // 5. IME composition: editor keys must reach the IME, not be swallowed
+        set_overlay_text_editing(true);
+        set_overlay_ime_composing(true);
+        // Esc, Enter, Backspace, Left, Delete, End
+        for vk in [VK_ESCAPE.0 as u32, 0x0D, 0x08, 0x25, 0x2E, 0x23] {
+            let kb = create_test_kbdllhookstruct(vk);
+            let lparam = LPARAM(&kb as *const _ as isize);
+            let res = unsafe { process_keyboard_hook(0, wparam_down, lparam, 0) };
+            assert_ne!(res, LRESULT(1), "vk {vk:#x} must pass to the IME");
+        }
+        let kb_ctrl_z = create_test_kbdllhookstruct(0x5A);
+        let lparam_ctrl_z = LPARAM(&kb_ctrl_z as *const _ as isize);
+        let res_ctrl_z =
+            unsafe { process_keyboard_hook(0, wparam_down, lparam_ctrl_z, MOD_CONTROL.0) };
+        assert_ne!(res_ctrl_z, LRESULT(1), "Ctrl+Z must pass to the IME");
+
+        // 6. Composition over: the same keys are swallowed for the editor again
+        set_overlay_ime_composing(false);
+        let kb_enter = create_test_kbdllhookstruct(0x0D);
+        let lparam_enter = LPARAM(&kb_enter as *const _ as isize);
+        let res_enter = unsafe { process_keyboard_hook(0, wparam_down, lparam_enter, 0) };
+        assert_eq!(
+            res_enter,
+            LRESULT(1),
+            "Enter is an editor key outside composition"
+        );
+
+        // Leaving the overlay resets a composition that never reported its end
+        set_overlay_ime_composing(true);
+        unregister_overlay();
+        assert!(!OVERLAY_IME_COMPOSING.load(Ordering::SeqCst));
 
         // Cleanup
         OVERLAY_ACTIVE.store(false, Ordering::SeqCst);
