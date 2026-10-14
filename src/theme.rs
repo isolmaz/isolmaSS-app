@@ -384,7 +384,7 @@ pub fn ui_face() -> &'static str {
 pub(crate) fn pick_face(
     preferred: &'static str,
     fallback: &'static str,
-    installed: impl Fn(&str) -> bool,
+    installed: fn(&str) -> bool,
 ) -> &'static str {
     if installed(preferred) {
         preferred

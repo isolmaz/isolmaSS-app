@@ -46,6 +46,12 @@ fn current(hdc: HDC, kind: OBJ_TYPE) -> HGDIOBJ {
     unsafe { GetCurrentObject(hdc, kind) }
 }
 
+/// The brush selected while `with_brush` runs for `color`. One call site for
+/// every caller, so the same helper sees both cache misses and hits.
+fn brush_in_use(hdc: HDC, color: COLORREF) -> HGDIOBJ {
+    with_brush(hdc, color, || current(hdc, OBJ_BRUSH))
+}
+
 fn stock(object: GET_STOCK_OBJECT_FLAGS) -> HGDIOBJ {
     unsafe { GetStockObject(object) }
 }
@@ -187,11 +193,16 @@ fn cached_objects_are_selected_for_the_action_and_restored_afterwards() {
             )
         };
         let before = selection();
-        let inside = with_brush(hdc, RED, || {
-            with_pen(hdc, PS_SOLID, 3, BLUE, || {
-                with_font(hdc, -20, 700, selection)
+        let nested = || {
+            with_brush(hdc, RED, || {
+                with_pen(hdc, PS_SOLID, 3, BLUE, || {
+                    with_font(hdc, -20, 700, selection)
+                })
             })
-        });
+        };
+        // The first pass creates the three objects, the second one reuses them.
+        let inside = nested();
+        assert_eq!(nested(), inside, "cached objects are handed out again");
         assert_ne!(inside.0, before.0);
         assert_ne!(inside.1, before.1);
         assert_ne!(inside.2, before.2);
@@ -210,7 +221,9 @@ fn cached_objects_are_selected_for_the_action_and_restored_afterwards() {
         assert_eq!(font.lfQuality, CLEARTYPE_QUALITY);
 
         // The same request reuses the same objects, which outlive the draw.
-        let again = with_brush(hdc, RED, || current(hdc, OBJ_BRUSH));
+        let fresh = brush_in_use(hdc, COLORREF(0x0030_6090));
+        assert_ne!(fresh, inside.0);
+        let again = brush_in_use(hdc, RED);
         assert_eq!(again, inside.0);
         assert!(alive(again));
         let thicker = with_pen(hdc, PS_SOLID, 4, BLUE, || current(hdc, OBJ_PEN));
@@ -244,42 +257,47 @@ fn a_failed_creation_selects_a_stock_object_and_is_logged_once_per_key() {
         let canvas = Canvas::new(4, 4, COLORREF(0));
         let hdc = canvas.hdc;
         let failing = HGDIOBJ::default;
-        with_brush(hdc, RED, || {
-            with_pen(hdc, PS_SOLID, 2, BLUE, || {
-                with_font(hdc, -12, 400, || {
-                    let own = (
-                        current(hdc, OBJ_BRUSH),
-                        current(hdc, OBJ_PEN),
-                        current(hdc, OBJ_FONT),
-                    );
-                    assert_ne!(own.0, stock(WHITE_BRUSH));
-                    assert_ne!(own.1, stock(BLACK_PEN));
-                    assert_ne!(own.2, stock(SYSTEM_FONT));
-                    let stand_ins = (
-                        with_object(hdc, Key::Brush(1), failing, || current(hdc, OBJ_BRUSH)),
-                        with_object(hdc, Key::Pen(PS_SOLID.0, 1, 2), failing, || {
-                            current(hdc, OBJ_PEN)
-                        }),
-                        with_object(hdc, Key::Font("No Such Face", 12, 400), failing, || {
-                            current(hdc, OBJ_FONT)
-                        }),
-                    );
-                    assert_eq!(
-                        stand_ins,
-                        (stock(WHITE_BRUSH), stock(BLACK_PEN), stock(SYSTEM_FONT))
-                    );
-                    // Each stand-in gives the caller's own selection back.
-                    assert_eq!(
-                        (
+        // Run twice: the second pass finds the own objects in the cache.
+        let nested = || {
+            with_brush(hdc, RED, || {
+                with_pen(hdc, PS_SOLID, 2, BLUE, || {
+                    with_font(hdc, -12, 400, || {
+                        let own = (
                             current(hdc, OBJ_BRUSH),
                             current(hdc, OBJ_PEN),
-                            current(hdc, OBJ_FONT)
-                        ),
-                        own
-                    );
+                            current(hdc, OBJ_FONT),
+                        );
+                        assert_ne!(own.0, stock(WHITE_BRUSH));
+                        assert_ne!(own.1, stock(BLACK_PEN));
+                        assert_ne!(own.2, stock(SYSTEM_FONT));
+                        let stand_ins = (
+                            with_object(hdc, Key::Brush(1), failing, || current(hdc, OBJ_BRUSH)),
+                            with_object(hdc, Key::Pen(PS_SOLID.0, 1, 2), failing, || {
+                                current(hdc, OBJ_PEN)
+                            }),
+                            with_object(hdc, Key::Font("No Such Face", 12, 400), failing, || {
+                                current(hdc, OBJ_FONT)
+                            }),
+                        );
+                        assert_eq!(
+                            stand_ins,
+                            (stock(WHITE_BRUSH), stock(BLACK_PEN), stock(SYSTEM_FONT))
+                        );
+                        // Each stand-in gives the caller's own selection back.
+                        assert_eq!(
+                            (
+                                current(hdc, OBJ_BRUSH),
+                                current(hdc, OBJ_PEN),
+                                current(hdc, OBJ_FONT)
+                            ),
+                            own
+                        );
+                    })
                 })
             })
-        });
+        };
+        nested();
+        nested();
         assert_eq!(logged_failures(), 3);
         with_object(hdc, Key::Brush(1), failing, || ());
         assert_eq!(logged_failures(), 3, "a key already reported stays quiet");
@@ -300,27 +318,32 @@ fn a_full_cache_hands_out_temporary_objects_that_are_deleted_after_use() {
             with_brush(hdc, COLORREF(color), || ());
         }
         assert_eq!(cached_objects(), 48);
-        let temporary = with_brush(hdc, RED, || current(hdc, OBJ_BRUSH));
+        let temporary = brush_in_use(hdc, RED);
         assert!(!alive(temporary), "deleted once the draw is over");
         assert_eq!(cached_objects(), 48, "the cache stays bounded");
-        let kept = with_brush(hdc, COLORREF(5), || current(hdc, OBJ_BRUSH));
+        let kept = brush_in_use(hdc, COLORREF(5));
         assert!(alive(kept), "cached brushes are not deleted");
     });
 }
 
 #[test]
 fn cached_objects_are_deleted_when_their_thread_ends() {
-    let handle = std::thread::spawn(|| {
+    let handles = std::thread::spawn(|| {
         let canvas = Canvas::new(4, 4, COLORREF(0));
-        let brush = with_brush(canvas.hdc, COLORREF(0x00AB_CDE1), || {
-            current(canvas.hdc, OBJ_BRUSH)
-        });
-        assert!(alive(brush));
-        brush.0 as usize
+        let (first, second) = (COLORREF(0x00AB_CDE1), COLORREF(0x0012_3456));
+        // Two distinct colours (two creations) and a repeat (one cache hit).
+        let brushes = [first, second, first]
+            .map(|color| with_brush(canvas.hdc, color, || current(canvas.hdc, OBJ_BRUSH)));
+        assert_eq!(brushes[0], brushes[2], "the repeat reuses the cached brush");
+        assert_ne!(brushes[0], brushes[1]);
+        assert!(brushes.iter().all(|brush| alive(*brush)));
+        [brushes[0].0 as usize, brushes[1].0 as usize]
     })
     .join()
     .expect("the test thread panicked");
-    assert!(!alive(HGDIOBJ(handle as *mut c_void)));
+    for handle in handles {
+        assert!(!alive(HGDIOBJ(handle as *mut c_void)));
+    }
 }
 
 #[test]
@@ -427,6 +450,11 @@ fn text_draws_bold_from_its_origin_in_the_given_colour() {
     );
     assert!(right > left + 35 && bottom > top + 20, "{right},{bottom}");
     assert_eq!(canvas.closest(left, top, right, bottom, rgb(RED)), 0);
+
+    // The second draw reuses the cached font and lands on the same pixels.
+    let repeat = Canvas::new(240, 100, WHITE);
+    let bounds = drawn(&repeat, |hdc| text(hdc, (30, 20), "HH", 48, RED));
+    assert_eq!(bounds, (left, top, right, bottom));
 }
 
 #[test]
@@ -674,22 +702,25 @@ fn stroke_frame_draws_a_ring_inside_the_frame() {
 
 #[test]
 fn stroke_frame_falls_back_to_gdi_when_the_frame_is_too_thin_for_the_stroke() {
-    let canvas = Canvas::new(20, 20, WHITE);
     let frame = RECT {
         left: 6,
         top: 6,
         right: 12,
         bottom: 12,
     };
-    stroke_frame(canvas.hdc, frame, 0, 3, RED);
-    for y in 6..12 {
-        for x in 6..12 {
-            assert_eq!(canvas.pixel(x, y), rgb(RED), "({x}, {y})");
+    // The second pass reuses the cached pen of the first one.
+    for _ in 0..2 {
+        let canvas = Canvas::new(20, 20, WHITE);
+        stroke_frame(canvas.hdc, frame, 0, 3, RED);
+        for y in 6..12 {
+            for x in 6..12 {
+                assert_eq!(canvas.pixel(x, y), rgb(RED), "({x}, {y})");
+            }
         }
+        assert_eq!(canvas.pixel(5, 8), rgb(WHITE));
+        assert_eq!(canvas.pixel(12, 8), rgb(WHITE));
+        assert_eq!(canvas.pixel(8, 12), rgb(WHITE));
     }
-    assert_eq!(canvas.pixel(5, 8), rgb(WHITE));
-    assert_eq!(canvas.pixel(12, 8), rgb(WHITE));
-    assert_eq!(canvas.pixel(8, 12), rgb(WHITE));
 }
 
 #[test]
