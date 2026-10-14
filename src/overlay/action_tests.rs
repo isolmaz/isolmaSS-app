@@ -461,7 +461,11 @@ fn the_command_menu_lists_every_tool_even_when_the_strip_is_collapsed() {
             .any(|b| b.item == ToolbarItem::Tool(ToolKind::Text))
     );
     let menu = state.command_menu_buttons().expect("a toolbar is laid out");
-    assert_eq!(menu.len(), shown.len() + MORE_TOOLS.len() + 1, "the hidden tools and Pin");
+    assert_eq!(
+        menu.len(),
+        shown.len() + MORE_TOOLS.len() + 1,
+        "the hidden tools and Pin"
+    );
     let items: Vec<ToolbarItem> = menu.iter().map(|b| b.item).collect();
     let undo = items
         .iter()

@@ -113,8 +113,10 @@ pub fn is_editor_shortcut(vk: u32, modifiers: u32, editing: bool) -> bool {
         return false;
     }
     if modifiers & MOD_CONTROL.0 != 0 {
-        matches!(vk, 0x41 | 0x43 | 0x53 | 0x54 | 0x55 | 0x5a | 0x59 | 0xbc | 37..=40)
-            || editing && matches!(vk, 0x56 | 0x58 | 8 | 46)
+        matches!(
+            vk,
+            0x41 | 0x43 | 0x53 | 0x54 | 0x55 | 0x5a | 0x59 | 0xbc | 37..=40
+        ) || editing && matches!(vk, 0x56 | 0x58 | 8 | 46)
     } else {
         matches!(vk, 8 | 13 | 27 | 35..=40 | 46) || !editing && tool_for_key(vk).is_some()
     }
