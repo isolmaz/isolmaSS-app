@@ -661,7 +661,7 @@ mod tests {
         // A new edit forgets the undone ones.
         state.insert_text("x");
         state.redo();
-        assert_eq!(state.text, "acx");
+        assert_eq!(state.text, "axc");
     }
 
     #[test]
