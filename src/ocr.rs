@@ -232,7 +232,7 @@ impl Intent {
         }
     }
 
-    /// The command's name; it also titles the notice about its outcome.
+    /// The command's name; it also titles the messages about its outcome.
     pub fn title(self) -> &'static str {
         match self {
             Self::CopyText => crate::i18n::t("Copy text"),
@@ -248,36 +248,42 @@ pub enum Resolution {
     Copy { text: String, message: &'static str },
     /// Cover each rectangle (capture pixels) with an opaque redaction, then say `message`.
     Redact { rects: Vec<Rect>, message: String },
-    /// Only tell the user.
-    Notice {
+    /// A brief word to the user, nothing else changes.
+    Notice(String),
+    /// Something the user has to act on or know about: an error dialog titled `title`.
+    Error {
         title: &'static str,
         message: String,
     },
-    /// Something broke; the editor reports it as an error.
-    Error(String),
 }
 
 /// Decides what the outcome of recognizing the pixels of `area` (capture pixels) means for
 /// the command `intent`.
 pub fn resolve(intent: Intent, recognized: Recognized, area: Rect) -> Resolution {
-    let notice = |message: &str| Resolution::Notice {
-        title: intent.title(),
-        message: message.to_owned(),
-    };
     let lines = match recognized {
         Ok(lines) => lines,
         Err(OcrFailure::NoLanguage) => {
-            return notice(crate::i18n::t(
-                "Windows has no text recognition language installed. Add a language under Settings › Time & language › Language & region.",
-            ));
+            // A notice vanishes after a moment, and without a language nothing works at all.
+            return Resolution::Error {
+                title: intent.title(),
+                message: crate::i18n::t(
+                    "Windows has no text recognition language installed. Add a language under Settings › Time & language › Language & region.",
+                )
+                .to_owned(),
+            };
         }
-        Err(OcrFailure::Failed(message)) => return Resolution::Error(message),
+        Err(OcrFailure::Failed(message)) => {
+            return Resolution::Error {
+                title: crate::i18n::t("Text recognition failed"),
+                message,
+            };
+        }
     };
     match intent {
         Intent::CopyText => {
             let text = clipboard_text(&lines);
             if text.trim().is_empty() {
-                notice(crate::i18n::t("No text found in the selection"))
+                Resolution::Notice(crate::i18n::t("No text found in the selection").to_owned())
             } else {
                 Resolution::Copy {
                     text,
@@ -289,7 +295,9 @@ pub fn resolve(intent: Intent, recognized: Recognized, area: Rect) -> Resolution
             let rects = redaction_rects(&lines, area);
             let message = match rects.len() {
                 0 => {
-                    return notice(crate::i18n::t("No email addresses or phone numbers found"));
+                    return Resolution::Notice(
+                        crate::i18n::t("No email addresses or phone numbers found").to_owned(),
+                    );
                 }
                 1 => crate::i18n::t("Redacted 1 item").to_owned(),
                 count => crate::i18n::tf("Redacted {} items", &[&count]),

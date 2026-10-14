@@ -59,6 +59,7 @@ const ID_COST_NOTE: i32 = 1108;
 const ID_IMAGES_EMPTY: i32 = 1109;
 const ID_STEP_CONSENT: i32 = 1110;
 const ID_CONSENT_NOTE: i32 = 1111;
+const ID_ACCOUNT_GUIDE: i32 = 1112;
 const ID_LIMIT_LABEL_FIRST: i32 = 1200;
 const ID_TAB_FIRST: i32 = 1300;
 const TAB_COUNT: usize = 3;
@@ -69,6 +70,21 @@ fn tab_names() -> [&'static str; TAB_COUNT] {
         crate::i18n::t("Limits"),
         crate::i18n::t("Images"),
     ]
+}
+
+/// What to do on Cloudflare's consent page, shown before the browser opens: with an
+/// existing Worker (`cloud_url`) the account that owns it, otherwise any one account.
+fn account_guidance(cloud_url: Option<&str>) -> String {
+    match cloud_url {
+        Some(url) => crate::i18n::tf(
+            "On the Cloudflare page, allow the account that owns {}.",
+            &[&url.trim_start_matches("https://").trim_end_matches('/')],
+        ),
+        None => crate::i18n::t(
+            "On the Cloudflare page, allow the account that should host your Worker. If you have several accounts, allow only that one.",
+        )
+        .to_owned(),
+    }
 }
 
 /// Worker setting and the factor between the stored value and the shown one.
@@ -527,7 +543,7 @@ fn fit_status(hwnd: HWND, dpi: u32, band_top: i32) {
 fn tab_of(id: i32) -> Option<usize> {
     match id {
         ID_INTRO | ID_STATS | ID_PASSWORD_LABEL | ID_PASSWORD | ID_SAVE_PASSWORD | ID_REFRESH
-        | ID_UPDATE_WORKER | ID_FORGET => Some(0),
+        | ID_UPDATE_WORKER | ID_ACCOUNT_GUIDE | ID_FORGET => Some(0),
         ID_MODE_LABEL | ID_MODE | ID_SAVE_LIMITS | ID_COST_NOTE => Some(1),
         _ if is_limit_edit(id)
             || (ID_LIMIT_LABEL_FIRST..ID_LIMIT_LABEL_FIRST + LIMITS.len() as i32).contains(&id) =>
@@ -548,7 +564,7 @@ fn show_tab(hwnd: HWND, state: &State) {
         if let (Some(tab), Some(child)) = (tab_of(id), control(hwnd, id)) {
             let visible = tab == state.tab
                 && match id {
-                    ID_UPDATE_WORKER => state.outdated,
+                    ID_UPDATE_WORKER | ID_ACCOUNT_GUIDE => state.outdated,
                     // Only once the list has loaded and turned out empty.
                     ID_IMAGES_EMPTY => state.loaded && state.images.is_empty(),
                     _ => true,
@@ -591,10 +607,18 @@ fn layout(hwnd: HWND, state: &State) -> i32 {
         let note_top = step + LABEL + 4;
         let note = measure(ID_CONSENT_NOTE, full);
         place(hwnd, ID_CONSENT_NOTE, (MARGIN, note_top, full, note), dpi);
+        let guide_top = note_top + note + 8;
+        let guide = measure(ID_ACCOUNT_GUIDE, full);
+        place(
+            hwnd,
+            ID_ACCOUNT_GUIDE,
+            (MARGIN, guide_top, full, guide),
+            dpi,
+        );
         let combo_top = step + LABEL + 8;
         place(hwnd, ID_ACCOUNT, (MARGIN, combo_top, full, 220), dpi);
         // Both steps put their button on the same row.
-        let action = (note_top + note + 10).max(combo_top + FIELD + 14);
+        let action = (guide_top + guide + 10).max(combo_top + FIELD + 14);
         place(hwnd, ID_CONNECT, (MARGIN, action, 230, ROW + 2), dpi);
         place(hwnd, ID_INSTALL, (MARGIN, action, 230, ROW + 2), dpi);
         let status = action + ROW + 2 + 14;
@@ -651,7 +675,20 @@ fn layout(hwnd: HWND, state: &State) -> i32 {
             dpi,
         );
         place(hwnd, ID_FORGET, (right - 170, actions, 170, ROW + 2), dpi);
-        let connection = actions + ROW + 2;
+        // Under the Update Worker button; it takes room only while that button shows.
+        let guide = measure(ID_ACCOUNT_GUIDE, full);
+        let guide_top = actions + ROW + 2 + 10;
+        place(
+            hwnd,
+            ID_ACCOUNT_GUIDE,
+            (MARGIN, guide_top, full, guide),
+            dpi,
+        );
+        let connection = if state.outdated {
+            guide_top + guide
+        } else {
+            actions + ROW + 2
+        };
         // Limits: two columns, each label above its field; the choice of what
         // happens at the limit takes the cell after the last field.
         let column = (full - GUTTER) / 2;
@@ -784,6 +821,7 @@ fn account_controls(hwnd: HWND, visible: bool) {
         ID_INSTALL,
         ID_STEP_CONSENT,
         ID_CONSENT_NOTE,
+        ID_ACCOUNT_GUIDE,
         ID_CONNECT,
     ] {
         if let Some(child) = control(hwnd, id) {
@@ -1901,6 +1939,7 @@ unsafe extern "system" fn wnd_proc(
                     match cloudflare_setup::save_credentials(&credentials) {
                         Ok(()) => {
                             state.outdated = false;
+                            relayout(hwnd, state);
                             show_tab(hwnd, state);
                             set_status(hwnd, crate::i18n::t("The Worker was updated."));
                             refresh(hwnd, state);
@@ -2121,6 +2160,11 @@ fn build_controls(hwnd: HWND, state: &State) -> Result<()> {
                 "The consent page opens in the browser. After granting permission, come back to this window; setup finishes here.",
             ),
         )?;
+        label(
+            hwnd,
+            ID_ACCOUNT_GUIDE,
+            &account_guidance(state.settings.cloud_url.as_deref()),
+        )?;
         default_button(hwnd, ID_CONNECT, crate::i18n::t("Continue with Cloudflare"))?;
         label(
             hwnd,
@@ -2178,6 +2222,11 @@ fn build_controls(hwnd: HWND, state: &State) -> Result<()> {
     button(hwnd, ID_SAVE_PASSWORD, crate::i18n::t("Save password"))?;
     button(hwnd, ID_REFRESH, crate::i18n::t("Refresh"))?;
     button(hwnd, ID_UPDATE_WORKER, crate::i18n::t("Update Worker"))?;
+    label(
+        hwnd,
+        ID_ACCOUNT_GUIDE,
+        &account_guidance(state.settings.cloud_url.as_deref()),
+    )?;
     button(hwnd, ID_FORGET, crate::i18n::t("Disconnect"))?;
     for (index, name) in limit_labels().iter().enumerate() {
         single_line_label(hwnd, ID_LIMIT_LABEL_FIRST + index as i32, name)?;
@@ -2478,6 +2527,42 @@ mod tests {
     /// A 1920×1080 display at 200 %: 984 px of work area (96 px taskbar)
     /// minus about 74 px of window frame, in design pixels.
     const CLIENT_BUDGET: i32 = (984 - 74) / 2;
+
+    #[test]
+    fn consent_guidance_names_the_worker_only_when_there_is_one() {
+        use crate::i18n::{LanguagePreference, set_preference};
+        let _lock = crate::settings::test_env::lock(&crate::i18n::TEST_LANGUAGE_LOCK);
+        let worker = Some("https://isolmass-ab12.demo.workers.dev/");
+
+        set_preference(LanguagePreference::English);
+        assert_eq!(
+            account_guidance(None),
+            "On the Cloudflare page, allow the account that should host your Worker. \
+             If you have several accounts, allow only that one."
+        );
+        assert_eq!(
+            account_guidance(worker),
+            "On the Cloudflare page, allow the account that owns isolmass-ab12.demo.workers.dev."
+        );
+
+        set_preference(LanguagePreference::Turkish);
+        assert_eq!(
+            account_guidance(None),
+            "Cloudflare sayfasında, Worker'ınızı barındıracak hesaba izin verin. \
+             Birden fazla hesabınız varsa yalnızca o hesaba izin verin."
+        );
+        assert_eq!(
+            account_guidance(worker),
+            "Cloudflare sayfasında, isolmass-ab12.demo.workers.dev adresine sahip olan hesaba izin verin."
+        );
+        set_preference(LanguagePreference::System);
+    }
+
+    #[test]
+    fn the_guidance_belongs_to_the_connection_tab() {
+        assert_eq!(tab_of(ID_ACCOUNT_GUIDE), tab_of(ID_UPDATE_WORKER));
+        assert_eq!(tab_of(ID_ACCOUNT_GUIDE), Some(0));
+    }
 
     #[test]
     fn limits_tab_fits_a_1080p_work_area_at_200_percent() {

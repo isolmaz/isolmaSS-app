@@ -413,20 +413,17 @@ fn a_selection_without_text_says_so() {
     for lines in [vec![], vec![line(&[" "])]] {
         assert_eq!(
             resolve(Intent::CopyText, Ok(lines), AREA),
-            Resolution::Notice {
-                title: t("Copy text"),
-                message: t("No text found in the selection").into(),
-            }
+            Resolution::Notice(t("No text found in the selection").into())
         );
     }
 }
 
 #[test]
-fn a_missing_language_is_explained_for_either_command() {
+fn a_missing_language_is_an_error_dialog_for_either_command() {
     for intent in [Intent::CopyText, Intent::RedactSensitive] {
         assert_eq!(
             resolve(intent, Err(OcrFailure::NoLanguage), AREA),
-            Resolution::Notice {
+            Resolution::Error {
                 title: intent.title(),
                 message: t(
                     "Windows has no text recognition language installed. Add a language under Settings › Time & language › Language & region."
@@ -445,7 +442,10 @@ fn an_engine_failure_is_an_error() {
             Err(OcrFailure::Failed("boom".into())),
             AREA
         ),
-        Resolution::Error("boom".into())
+        Resolution::Error {
+            title: t("Text recognition failed"),
+            message: "boom".into(),
+        }
     );
 }
 
@@ -483,9 +483,6 @@ fn nothing_to_redact_says_so() {
     let lines = vec![line(&["Just", "words", "2024"])];
     assert_eq!(
         resolve(Intent::RedactSensitive, Ok(lines), AREA),
-        Resolution::Notice {
-            title: t("Redact emails and phone numbers"),
-            message: t("No email addresses or phone numbers found").into(),
-        }
+        Resolution::Notice(t("No email addresses or phone numbers found").into())
     );
 }

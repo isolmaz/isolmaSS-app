@@ -52,7 +52,7 @@ describe('setup', () => {
     expect(response.headers.get('Content-Type')).toBe(JSON_TYPE);
     expect(response.headers.get('Cache-Control')).toBe('no-store, max-age=0');
     // The app compares this number with the one it ships to offer a Worker update.
-    expect(await response.json()).toEqual({ status: 'ready', origin: ORIGIN, version: 4 });
+    expect(await response.json()).toEqual({ status: 'ready', origin: ORIGIN, version: 5 });
   });
 
   it('reports the same version as the statistics', async () => {

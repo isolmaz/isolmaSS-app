@@ -1,5 +1,6 @@
 //! System-owned tray menu: Windows supplies its theme, focus, keyboard navigation and placement.
 use super::TrayCommand;
+use crate::capture::Rect;
 use std::path::PathBuf;
 use std::time::Instant;
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
@@ -15,6 +16,7 @@ const SETTINGS: usize = 101;
 const OPEN_FOLDER: usize = 102;
 const CHECK_UPDATES: usize = 103;
 const RECENT_FIRST: usize = 104;
+const CAPTURE_LAST_REGION: usize = 109;
 const EXIT: usize = 200;
 
 struct PopupMenu(HMENU);
@@ -24,6 +26,15 @@ impl Drop for PopupMenu {
         unsafe {
             let _ = DestroyMenu(self.0);
         }
+    }
+}
+
+/// "Capture last region" is grayed out until an export has left a region behind.
+fn last_region_flags(region: Option<Rect>) -> MENU_ITEM_FLAGS {
+    if region.is_some() {
+        MF_STRING
+    } else {
+        MF_STRING | MF_GRAYED
     }
 }
 
@@ -48,6 +59,12 @@ pub(super) fn show(
     append(menu.0, CAPTURE, &capture, MF_STRING)?;
     // Left-clicking the icon captures, so the menu marks that item as default (bold).
     unsafe { SetMenuDefaultItem(menu.0, CAPTURE as u32, 0)? };
+    append(
+        menu.0,
+        CAPTURE_LAST_REGION,
+        crate::i18n::t("Capture &last region"),
+        last_region_flags(crate::capture::last_region()),
+    )?;
     append(menu.0, SETTINGS, crate::i18n::t("&Settings"), MF_STRING)?;
     append(
         menu.0,
@@ -112,6 +129,7 @@ pub(super) fn show(
     unsafe { PostMessageW(owner, WM_NULL, WPARAM(0), LPARAM(0))? };
     Ok(match selected {
         CAPTURE => Some(TrayCommand::Capture(Instant::now())),
+        CAPTURE_LAST_REGION => Some(TrayCommand::CaptureLastRegion(Instant::now())),
         SETTINGS => Some(TrayCommand::Settings),
         OPEN_FOLDER => Some(TrayCommand::OpenFolder),
         CHECK_UPDATES => Some(TrayCommand::CheckUpdates),
@@ -122,4 +140,15 @@ pub(super) fn show(
             .map(TrayCommand::OpenRecent),
         _ => None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_last_region_is_grayed_out_until_a_region_exists() {
+        assert_eq!(last_region_flags(None), MF_STRING | MF_GRAYED);
+        assert_eq!(last_region_flags(Some(Rect::new(0, 0, 10, 10))), MF_STRING);
+    }
 }

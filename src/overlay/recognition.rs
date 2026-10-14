@@ -130,27 +130,25 @@ impl OverlayState {
         match resolution {
             Resolution::Copy { text, message } => self.copy_recognized_text(hwnd, &text, message),
             Resolution::Redact { rects, message } => {
-                self.redact_recognized(hwnd, area, rects, &message)
+                self.redact_recognized(hwnd, area, rects, message)
             }
-            Resolution::Notice { title, message } => {
-                crate::tray::show_notification(title, &message)
-            }
-            Resolution::Error(message) => {
-                Self::show_action_error(hwnd, crate::i18n::t("Text recognition failed"), &message)
-            }
+            Resolution::Notice(message) => self.show_notice(hwnd, message),
+            Resolution::Error { title, message } => Self::show_action_error(hwnd, title, &message),
         }
     }
 
-    /// Puts `text` on the clipboard and, like Copy, closes the editor when asked to.
+    /// Puts `text` on the clipboard and, like Copy, closes the editor when asked to. An
+    /// editor that stays open confirms in a notice; one that closes has no room for it, so
+    /// the confirmation goes to the notification area.
     fn copy_recognized_text(&mut self, hwnd: HWND, text: &str, message: &str) {
         match crate::clipboard::copy_text_to_clipboard(Some(hwnd), text) {
             Ok(()) => {
                 self.committed_result = true;
-                crate::tray::show_notification(Intent::CopyText.title(), message);
                 if self.settings.close_after_action {
+                    crate::tray::show_notification(Intent::CopyText.title(), message);
                     let _ = unsafe { DestroyWindow(hwnd) };
                 } else {
-                    self.redraw(hwnd);
+                    self.show_notice(hwnd, message.to_owned());
                 }
             }
             Err(error) => {
@@ -162,7 +160,7 @@ impl OverlayState {
     /// Adds one opaque redaction per rectangle as a single undo step. The rectangles belong
     /// to the selection that was read; once it has moved or gone they would cover the wrong
     /// pixels, so they are dropped.
-    fn redact_recognized(&mut self, hwnd: HWND, area: Rect, rects: Vec<Rect>, message: &str) {
+    fn redact_recognized(&mut self, hwnd: HWND, area: Rect, rects: Vec<Rect>, message: String) {
         if self.committed_selection != Some(area) {
             return;
         }
@@ -178,6 +176,6 @@ impl OverlayState {
         self.objects.extend(objects);
         self.selected_id = None;
         self.redraw(hwnd);
-        crate::tray::show_notification(Intent::RedactSensitive.title(), message);
+        self.show_notice(hwnd, message);
     }
 }

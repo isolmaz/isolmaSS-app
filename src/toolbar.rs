@@ -1,4 +1,4 @@
-use crate::annotation::{ToolKind, bgra_to_colorref};
+use crate::annotation::{AnnotationKind, AnnotationObject, ToolKind, bgra_to_colorref};
 use crate::capture::Rect;
 use windows::Win32::Foundation::COLORREF;
 use windows::Win32::Graphics::Gdi::HDC;
@@ -22,6 +22,22 @@ pub enum ToolbarAction {
     RedactSensitive,
     Settings,
     Cancel,
+}
+
+/// The tools behind the "more tools" chevron, in rail order. A collapsed rail leaves them out.
+pub const MORE_TOOLS: [ToolKind; 8] = [
+    ToolKind::Ellipse,
+    ToolKind::Line,
+    ToolKind::Highlight,
+    ToolKind::Text,
+    ToolKind::Step,
+    ToolKind::Blur,
+    ToolKind::Redact,
+    ToolKind::ColorPicker,
+];
+
+fn is_more_tool(item: ToolbarItem) -> bool {
+    matches!(item, ToolbarItem::Tool(tool) if MORE_TOOLS.contains(&tool))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,27 +124,19 @@ impl Toolbar {
             (ToolbarItem::Tool(ToolKind::Arrow), true),
             (ToolbarItem::Tool(ToolKind::Pen), true),
             (ToolbarItem::MoreTools, true),
+            (ToolbarItem::Tool(ToolKind::Ellipse), true),
+            (ToolbarItem::Tool(ToolKind::Line), true),
             (ToolbarItem::Tool(ToolKind::Highlight), true),
             (ToolbarItem::Tool(ToolKind::Text), true),
             (ToolbarItem::Tool(ToolKind::Step), true),
             (ToolbarItem::Tool(ToolKind::Blur), true),
             (ToolbarItem::Tool(ToolKind::Redact), true),
+            (ToolbarItem::Tool(ToolKind::ColorPicker), true),
             (ToolbarItem::Action(ToolbarAction::Undo), can_undo),
             (ToolbarItem::Action(ToolbarAction::Redo), can_redo),
         ];
-        let secondary = |item: ToolbarItem| {
-            matches!(
-                item,
-                ToolbarItem::Tool(
-                    ToolKind::Highlight
-                        | ToolKind::Text
-                        | ToolKind::Step
-                        | ToolKind::Blur
-                        | ToolKind::Redact
-                )
-            )
-        };
-        let visible_count = tool_items.len() as i32 - if expanded { 0 } else { 5 };
+        let hidden = if expanded { 0 } else { MORE_TOOLS.len() as i32 };
+        let visible_count = tool_items.len() as i32 - hidden;
         let tool_width = tool_button + pad * 2;
         let tool_height =
             pad * 2 + visible_count * tool_button + (visible_count - 1) * scale(2) + scale(12);
@@ -279,11 +287,11 @@ impl Toolbar {
         let mut y = tool_bounds.bottom - pad - tool_button;
         for (item, enabled) in tool_items
             .into_iter()
-            .filter(|(item, _)| expanded || !secondary(*item))
+            .filter(|(item, _)| expanded || !is_more_tool(*item))
         {
             let is_checked = matches!(item, ToolbarItem::Tool(tool) if tool == active_tool)
                 || matches!(item, ToolbarItem::MoreTools)
-                    && (expanded || secondary(ToolbarItem::Tool(active_tool)));
+                    && (expanded || is_more_tool(ToolbarItem::Tool(active_tool)));
             buttons.push(ToolbarButton {
                 item,
                 rect: Rect::new(
@@ -667,12 +675,15 @@ impl Toolbar {
                 ToolbarItem::Tool(ToolKind::Select) => crate::i18n::t("Select and move"),
                 ToolbarItem::Tool(ToolKind::Rectangle) => crate::i18n::t("Frame"),
                 ToolbarItem::Tool(ToolKind::Arrow) => crate::i18n::t("Arrow"),
+                ToolbarItem::Tool(ToolKind::Ellipse) => crate::i18n::t("Ellipse"),
+                ToolbarItem::Tool(ToolKind::Line) => crate::i18n::t("Line"),
                 ToolbarItem::Tool(ToolKind::Pen) => crate::i18n::t("Pen"),
                 ToolbarItem::Tool(ToolKind::Highlight) => crate::i18n::t("Highlighter"),
                 ToolbarItem::Tool(ToolKind::Step) => crate::i18n::t("Numbered steps"),
                 ToolbarItem::Tool(ToolKind::Text) => crate::i18n::t("Text"),
                 ToolbarItem::Tool(ToolKind::Blur) => crate::i18n::t("Blur"),
                 ToolbarItem::Tool(ToolKind::Redact) => crate::i18n::t("Redact"),
+                ToolbarItem::Tool(ToolKind::ColorPicker) => crate::i18n::t("Pick color"),
                 ToolbarItem::MoreTools if self.expanded => crate::i18n::t("Hide more tools"),
                 ToolbarItem::MoreTools => crate::i18n::t("More tools"),
                 ToolbarItem::Action(ToolbarAction::Undo) => crate::i18n::t("Undo"),
@@ -784,12 +795,15 @@ fn shortcut(item: ToolbarItem) -> Option<&'static str> {
         ToolbarItem::Tool(ToolKind::Select) => "V",
         ToolbarItem::Tool(ToolKind::Rectangle) => "R",
         ToolbarItem::Tool(ToolKind::Arrow) => "A",
+        ToolbarItem::Tool(ToolKind::Ellipse) => "E",
+        ToolbarItem::Tool(ToolKind::Line) => "L",
         ToolbarItem::Tool(ToolKind::Pen) => "P",
         ToolbarItem::Tool(ToolKind::Highlight) => "H",
         ToolbarItem::Tool(ToolKind::Text) => "T",
         ToolbarItem::Tool(ToolKind::Step) => "N",
         ToolbarItem::Tool(ToolKind::Blur) => "B",
         ToolbarItem::Tool(ToolKind::Redact) => "M",
+        ToolbarItem::Tool(ToolKind::ColorPicker) => "I",
         ToolbarItem::Action(ToolbarAction::Undo) => "Ctrl+Z",
         ToolbarItem::Action(ToolbarAction::Redo) => "Ctrl+Y",
         ToolbarItem::Action(ToolbarAction::Save) => "Ctrl+S",
@@ -833,6 +847,28 @@ fn draw_tool_icon(
             label(hdc, rect, "1", unit(11), surface, true);
             return;
         }
+        // An outline is a sample of the tool's own stroke, drawn by the annotation renderer.
+        ToolKind::Ellipse | ToolKind::Line => {
+            let (cx, cy) = ((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2);
+            let color = [(ink.0 >> 16) as u8, (ink.0 >> 8) as u8, ink.0 as u8, 255];
+            let thickness = unit(1);
+            let kind = if tool == ToolKind::Ellipse {
+                AnnotationKind::Ellipse {
+                    rect: Rect::new(cx - unit(7), cy - unit(5), cx + unit(7), cy + unit(5)),
+                    color,
+                    thickness,
+                }
+            } else {
+                AnnotationKind::Line {
+                    start: (cx - unit(6), cy + unit(6)),
+                    end: (cx + unit(6), cy - unit(6)),
+                    color,
+                    thickness,
+                }
+            };
+            AnnotationObject::new(0, kind).render_gdi(hdc);
+            return;
+        }
         ToolKind::Select => 0xe8b0,
         ToolKind::Rectangle => 0xe739,
         ToolKind::Arrow => 0xe8ad,
@@ -841,6 +877,7 @@ fn draw_tool_icon(
         ToolKind::Text => 0xe8d2,
         ToolKind::Blur => 0xe727,
         ToolKind::Redact => 0xe73b,
+        ToolKind::ColorPicker => 0xef3c,
     };
     icon(hdc, rect, glyph, unit(16), ink, true);
 }
@@ -888,13 +925,7 @@ fn build_command_menu(buttons: &[ToolbarButton]) -> windows::core::Result<Option
     }
     fn group(item: ToolbarItem) -> &'static str {
         match item {
-            ToolbarItem::Tool(
-                ToolKind::Highlight
-                | ToolKind::Text
-                | ToolKind::Step
-                | ToolKind::Blur
-                | ToolKind::Redact,
-            ) => crate::i18n::t("More tools"),
+            _ if is_more_tool(item) => crate::i18n::t("More tools"),
             ToolbarItem::Tool(_) | ToolbarItem::MoreTools => crate::i18n::t("Tools"),
             ToolbarItem::Action(ToolbarAction::Undo | ToolbarAction::Redo) => {
                 crate::i18n::t("History")
@@ -911,6 +942,8 @@ fn build_command_menu(buttons: &[ToolbarButton]) -> windows::core::Result<Option
             ToolbarItem::Tool(ToolKind::Select) => crate::i18n::t("Select/move").to_owned(),
             ToolbarItem::Tool(ToolKind::Rectangle) => crate::i18n::t("Frame").to_owned(),
             ToolbarItem::Tool(ToolKind::Arrow) => crate::i18n::t("Arrow").to_owned(),
+            ToolbarItem::Tool(ToolKind::Ellipse) => crate::i18n::t("Ellipse").to_owned(),
+            ToolbarItem::Tool(ToolKind::Line) => crate::i18n::t("Line").to_owned(),
             ToolbarItem::Tool(ToolKind::Pen) => crate::i18n::t("Pen").to_owned(),
             ToolbarItem::Tool(ToolKind::Highlight) => crate::i18n::t("Highlighter").to_owned(),
             ToolbarItem::Tool(ToolKind::Step) => crate::i18n::t("Numbered step").to_owned(),
@@ -919,6 +952,7 @@ fn build_command_menu(buttons: &[ToolbarButton]) -> windows::core::Result<Option
                 crate::i18n::t("Blur (not secure redaction)").to_owned()
             }
             ToolbarItem::Tool(ToolKind::Redact) => crate::i18n::t("Redact (opaque)").to_owned(),
+            ToolbarItem::Tool(ToolKind::ColorPicker) => crate::i18n::t("Pick color").to_owned(),
             ToolbarItem::MoreTools => crate::i18n::t("Show or hide extra tools").to_owned(),
             ToolbarItem::Action(ToolbarAction::Undo) => crate::i18n::t("Undo").to_owned(),
             ToolbarItem::Action(ToolbarAction::Redo) => crate::i18n::t("Redo").to_owned(),
@@ -1264,17 +1298,93 @@ mod tests {
     }
 
     #[test]
+    fn ellipse_and_line_sit_behind_the_chevron_next_to_the_other_shapes() {
+        let selection = Rect::new(200, 100, 800, 600);
+        let viewport = Rect::new(0, 0, 1920, 1040);
+        let build = |active: ToolKind, expanded: bool| {
+            Toolbar::layout(
+                &selection,
+                viewport,
+                active,
+                PRESET_COLORS[0],
+                3,
+                expanded,
+                true,
+                true,
+                false,
+                true,
+                true,
+                96,
+            )
+        };
+        let button = |toolbar: &Toolbar, tool: ToolKind| {
+            toolbar
+                .buttons
+                .iter()
+                .find(|button| button.item == ToolbarItem::Tool(tool))
+                .cloned()
+        };
+        let collapsed = build(ToolKind::Rectangle, false);
+        let expanded = build(ToolKind::Rectangle, true);
+        for tool in [ToolKind::Ellipse, ToolKind::Line] {
+            assert!(button(&collapsed, tool).is_none(), "{tool:?}");
+            let shown = button(&expanded, tool).expect("shown when expanded");
+            assert_eq!(
+                expanded.hit_test((
+                    (shown.rect.left + shown.rect.right) / 2,
+                    (shown.rect.top + shown.rect.bottom) / 2
+                )),
+                Some(ToolbarItem::Tool(tool))
+            );
+        }
+        // The collapsed rail is as wide as ever; the shapes follow "more" upwards.
+        assert_eq!(collapsed.tool_bounds.width(), expanded.tool_bounds.width());
+        let top_of = |tool: ToolKind| button(&expanded, tool).unwrap().rect.top;
+        let more = expanded
+            .buttons
+            .iter()
+            .find(|button| button.item == ToolbarItem::MoreTools)
+            .unwrap()
+            .rect
+            .top;
+        assert!(more > top_of(ToolKind::Ellipse));
+        assert!(top_of(ToolKind::Ellipse) > top_of(ToolKind::Line));
+        assert!(top_of(ToolKind::Line) > top_of(ToolKind::Highlight));
+
+        // An active hidden shape lights the chevron; once shown it is checked itself.
+        let lit = |toolbar: &Toolbar| {
+            toolbar
+                .buttons
+                .iter()
+                .find(|button| button.item == ToolbarItem::MoreTools)
+                .unwrap()
+                .is_checked
+        };
+        assert!(lit(&build(ToolKind::Line, false)));
+        assert!(!lit(&collapsed));
+        assert!(
+            button(&build(ToolKind::Ellipse, true), ToolKind::Ellipse)
+                .unwrap()
+                .is_checked
+        );
+        assert!(!button(&expanded, ToolKind::Ellipse).unwrap().is_checked);
+    }
+
+    #[test]
     fn tool_shortcuts_match_the_editor_key_bindings() {
         for tool in [
             ToolKind::Select,
             ToolKind::Rectangle,
             ToolKind::Arrow,
+            ToolKind::Ellipse,
+            ToolKind::Line,
             ToolKind::Pen,
             ToolKind::Highlight,
             ToolKind::Text,
             ToolKind::Step,
             ToolKind::Blur,
             ToolKind::Redact,
+            ToolKind::ColorPicker,
         ] {
             let key = shortcut(ToolbarItem::Tool(tool)).expect("every tool has a key");
             assert_eq!(key.len(), 1, "{tool:?}");
@@ -1286,6 +1396,86 @@ mod tests {
         }
         assert_eq!(shortcut(ToolbarItem::Color), None);
         assert_eq!(shortcut(ToolbarItem::MoreTools), None);
+    }
+
+    #[test]
+    fn the_colour_picker_sits_behind_the_chevron_and_leaves_the_main_row_alone() {
+        let viewport = Rect::new(0, 0, 1920, 1040);
+        let selection = Rect::new(200, 100, 800, 600);
+        let build = |expanded: bool, tool: ToolKind| {
+            Toolbar::layout(
+                &selection,
+                viewport,
+                tool,
+                PRESET_COLORS[0],
+                3,
+                expanded,
+                true,
+                true,
+                false,
+                true,
+                true,
+                96,
+            )
+        };
+        let picker = ToolbarItem::Tool(ToolKind::ColorPicker);
+        let collapsed = build(false, ToolKind::Rectangle);
+        let expanded = build(true, ToolKind::Rectangle);
+        assert!(!collapsed.buttons.iter().any(|button| button.item == picker));
+        let shown = expanded
+            .buttons
+            .iter()
+            .find(|button| button.item == picker)
+            .expect("the expanded rail lists the picker");
+        assert!(shown.is_enabled && !shown.is_checked);
+
+        // Every overflow tool, the picker included, adds a rail button and none an action
+        // bar button.
+        let more = MORE_TOOLS.len() as i32;
+        assert_eq!(
+            expanded.buttons.len(),
+            collapsed.buttons.len() + MORE_TOOLS.len()
+        );
+        assert_eq!(
+            expanded.tool_bounds.height() - collapsed.tool_bounds.height(),
+            more * (Toolbar::TOOL_BUTTON + 2)
+        );
+        assert_eq!(
+            expanded.action_bounds.width(),
+            collapsed.action_bounds.width()
+        );
+        for button in &expanded.buttons {
+            if matches!(
+                button.item,
+                ToolbarItem::Tool(_)
+                    | ToolbarItem::MoreTools
+                    | ToolbarItem::Action(ToolbarAction::Undo | ToolbarAction::Redo)
+            ) {
+                assert!(
+                    button.rect.top >= expanded.tool_bounds.top
+                        && button.rect.bottom <= expanded.tool_bounds.bottom,
+                    "{:?} leaves the rail",
+                    button.item
+                );
+            }
+        }
+
+        // An active picker is hidden behind the chevron, which then shows as lit.
+        let hidden = build(false, ToolKind::ColorPicker);
+        assert!(!hidden.buttons.iter().any(|button| button.item == picker));
+        let more = hidden
+            .buttons
+            .iter()
+            .find(|button| button.item == ToolbarItem::MoreTools)
+            .unwrap();
+        assert!(more.is_checked);
+        let active = build(true, ToolKind::ColorPicker);
+        assert!(
+            active
+                .buttons
+                .iter()
+                .any(|button| button.item == picker && button.is_checked)
+        );
     }
 
     #[test]

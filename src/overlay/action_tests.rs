@@ -461,8 +461,8 @@ fn the_command_menu_lists_every_tool_even_when_the_strip_is_collapsed() {
             .any(|b| b.item == ToolbarItem::Tool(ToolKind::Text))
     );
     let menu = state.command_menu_buttons().expect("a toolbar is laid out");
-    // Five hidden tools and the two text recognition commands.
-    assert_eq!(menu.len(), shown.len() + 5 + 2);
+    // The hidden tools and the two text recognition commands.
+    assert_eq!(menu.len(), shown.len() + MORE_TOOLS.len() + 2);
     let items: Vec<ToolbarItem> = menu.iter().map(|b| b.item).collect();
     let undo = items
         .iter()
@@ -470,13 +470,16 @@ fn the_command_menu_lists_every_tool_even_when_the_strip_is_collapsed() {
         .unwrap();
     // The hidden tools sit together just before Undo, in toolbar order.
     assert_eq!(
-        &items[undo - 5..undo],
+        &items[undo - MORE_TOOLS.len()..undo],
         &[
+            ToolbarItem::Tool(ToolKind::Ellipse),
+            ToolbarItem::Tool(ToolKind::Line),
             ToolbarItem::Tool(ToolKind::Highlight),
             ToolbarItem::Tool(ToolKind::Text),
             ToolbarItem::Tool(ToolKind::Step),
             ToolbarItem::Tool(ToolKind::Blur),
             ToolbarItem::Tool(ToolKind::Redact),
+            ToolbarItem::Tool(ToolKind::ColorPicker),
         ]
     );
     let text = menu
@@ -621,4 +624,199 @@ fn a_command_menu_failure_is_reported() {
     let (title, message) = take_action_error().expect("the failure is reported");
     assert_eq!(title, crate::i18n::t("Command menu failed"));
     assert!(message.contains("menu broke"));
+}
+
+// ---- colour picker and notices ------------------------------------------------------
+
+/// A 100x100 capture whose pixel (10, 20) is #FEAB10, with the picker active over a
+/// selection that holds one rectangle.
+fn picker_state() -> OverlayState {
+    let mut pixels = vec![0u8; 100 * 100 * 4];
+    let offset = (20 * 100 + 10) * 4;
+    pixels[offset..offset + 4].copy_from_slice(&[0x10, 0xab, 0xfe, 0xff]);
+    let capture = CaptureBuffer::from_original(100, 100, pixels);
+    let mut state = OverlayState::create_test_state(Rc::new(capture));
+    state.set_selection_active(Rect::new(5, 5, 60, 60));
+    state.add_test_rectangle(Rect::new(10, 10, 30, 30));
+    state.select_tool(ToolKind::ColorPicker);
+    state
+}
+
+#[test]
+fn the_picker_button_starts_the_picker_and_remembers_the_tool_before_it() {
+    let window = TestWindow::new();
+    let mut state = state_with_rectangle();
+    activate(
+        &mut state,
+        &window,
+        ToolbarItem::Tool(ToolKind::ColorPicker),
+    );
+    assert_eq!(state.active_tool, ToolKind::ColorPicker);
+    assert_eq!(state.tool_before_pick, Some(ToolKind::Rectangle));
+    assert_eq!(state.settings.last_tool, ToolKind::Rectangle);
+    state.apply_command_menu_choice(window.0, &[], Ok(Some(ToolbarItem::Tool(ToolKind::Blur))));
+    assert_eq!(state.active_tool, ToolKind::Blur);
+    assert_eq!(state.tool_before_pick, None);
+    state.apply_command_menu_choice(
+        window.0,
+        &[],
+        Ok(Some(ToolbarItem::Tool(ToolKind::ColorPicker))),
+    );
+    assert_eq!(state.tool_before_pick, Some(ToolKind::Blur));
+    assert_eq!(state.settings.last_tool, ToolKind::Blur);
+}
+
+#[test]
+fn a_click_with_the_picker_copies_the_original_pixel_and_returns_to_the_tool() {
+    let window = TestWindow::new();
+    let mut state = picker_state();
+    let selection = state.committed_selection();
+    state.pick_color(window.0, (10, 20));
+    assert_eq!(clipboard_text().as_deref(), Some("#FEAB10"));
+    let notice = state.notice.clone().expect("a notice confirms the copy");
+    assert!(notice.contains("#FEAB10"), "{notice}");
+    assert_eq!(state.active_tool, ToolKind::Rectangle);
+    assert_eq!(state.tool_before_pick, None);
+    assert_eq!(state.committed_selection(), selection);
+    assert_eq!(state.object_count(), 1);
+    assert!(state.scene_dirty);
+    // The only history entry is still the rectangle: picking recorded nothing.
+    assert!(state.history.undo(&mut state.objects));
+    assert_eq!(state.object_count(), 0);
+    assert!(!state.history.can_undo());
+}
+
+#[test]
+fn a_failed_copy_keeps_the_picker_and_reports_the_error() {
+    let window = TestWindow::new();
+    let mut state = picker_state();
+    let _hold = ClipboardHold::new();
+    state.pick_color(window.0, (10, 20));
+    let (title, _) = take_action_error().expect("the failure is reported");
+    assert_eq!(title, crate::i18n::t("Copy failed"));
+    assert_eq!(state.active_tool, ToolKind::ColorPicker);
+    assert!(state.notice.is_none());
+}
+
+#[test]
+fn a_click_outside_the_capture_picks_nothing() {
+    let window = TestWindow::new();
+    let mut state = picker_state();
+    for point in [(-1, 5), (5, -1), (100, 5), (5, 100)] {
+        state.pick_color(window.0, point);
+    }
+    assert_eq!(state.active_tool, ToolKind::ColorPicker);
+    assert!(state.notice.is_none());
+}
+
+#[test]
+fn a_notice_goes_away_by_itself_and_a_newer_one_replaces_it() {
+    let window = TestWindow::new();
+    let mut state = plain_state();
+    state.show_notice(window.0, "first".to_string());
+    state.show_notice(window.0, "second".to_string());
+    assert_eq!(state.notice.as_deref(), Some("second"));
+    assert!(state.scene_dirty);
+    assert!(window.wait_for_timer(
+        NOTICE_TIMER,
+        std::time::Duration::from_millis(u64::from(NOTICE_MS) + 2000)
+    ));
+    state.scene_dirty = false;
+    state.clear_notice(window.0);
+    assert_eq!(state.notice, None);
+    assert!(state.scene_dirty, "the frame without the notice is drawn");
+    state.scene_dirty = false;
+    state.clear_notice(window.0);
+    assert!(!state.scene_dirty, "nothing was showing");
+}
+
+#[test]
+fn escape_cancels_the_picker_before_anything_else() {
+    let mut state = picker_state();
+    assert_eq!(state.handle_escape_action(), EscapeAction::CancelledGesture);
+    assert_eq!(state.active_tool, ToolKind::Rectangle);
+    assert_eq!(state.mode(), OverlayMode::SelectionActive);
+    assert_eq!(state.object_count(), 1);
+}
+
+#[test]
+fn the_picker_keeps_the_plain_arrow_cursor_even_over_the_grips() {
+    let mut state = picker_state();
+    for point in [(5, 5), (30, 30), (80, 80)] {
+        assert_eq!(state.editor_cursor(point), IDC_ARROW, "{point:?}");
+    }
+    state.select_tool(ToolKind::Rectangle);
+    assert_eq!(state.editor_cursor((30, 30)), IDC_CROSS);
+}
+
+#[test]
+fn the_picker_is_never_the_tool_a_new_editor_opens_with() {
+    assert_eq!(initial_tool(ToolKind::ColorPicker), ToolKind::default());
+    assert_eq!(initial_tool(ToolKind::Pen), ToolKind::Pen);
+}
+
+// ---- last region and preselection ---------------------------------------------------
+
+#[test]
+fn every_export_remembers_its_region_in_screen_coordinates() {
+    let window = TestWindow::new();
+    let folder = TempDir::new("last-region");
+    for export in 0..3 {
+        crate::capture::forget_last_region();
+        let mut state = export_state(&folder);
+        Rc::get_mut(&mut state.capture).expect("unshared capture").x = 40;
+        let outcome = match export {
+            0 => state.copy_selection_to_clipboard(window.0),
+            1 => state.save_selection_to_file().map(|_| ()),
+            _ => state.finish_upload(window.0),
+        };
+        assert_eq!(outcome, Ok(()), "export {export}");
+        assert_eq!(
+            crate::capture::last_region(),
+            Some(Rect::new(140, 100, 540, 400)),
+            "export {export}"
+        );
+        assert!(state.committed_result);
+    }
+}
+
+#[test]
+fn marking_an_export_uses_the_capture_origin_and_needs_a_selection() {
+    crate::capture::forget_last_region();
+    let mut state = plain_state();
+    state.mark_exported();
+    assert!(state.committed_result);
+    assert_eq!(crate::capture::last_region(), None);
+    Rc::get_mut(&mut state.capture).expect("unshared capture").x = -20;
+    Rc::get_mut(&mut state.capture).expect("unshared capture").y = 30;
+    state.set_selection_active(Rect::new(100, 100, 500, 400));
+    state.mark_exported();
+    assert_eq!(
+        crate::capture::last_region(),
+        Some(Rect::new(80, 130, 480, 430))
+    );
+}
+
+#[test]
+fn a_failed_export_leaves_the_last_region_alone() {
+    let window = TestWindow::new();
+    let folder = TempDir::new("last-region-failed");
+    crate::capture::forget_last_region();
+    let mut state = export_state(&folder);
+    state.committed_selection = Some(Rect::new(1000, 1000, 1100, 1100));
+    assert!(state.copy_selection_to_clipboard(window.0).is_err());
+    assert_eq!(crate::capture::last_region(), None);
+    assert!(!state.committed_result);
+}
+
+#[test]
+fn a_preselected_region_opens_as_an_active_selection_for_the_first_paint() {
+    let mut state = plain_state();
+    state.preselect(Rect::new(10, 20, 110, 220));
+    assert_eq!(state.mode(), OverlayMode::SelectionActive);
+    assert_eq!(
+        state.committed_selection(),
+        Some(Rect::new(10, 20, 110, 220))
+    );
+    assert!(state.scene_dirty);
 }

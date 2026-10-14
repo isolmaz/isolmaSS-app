@@ -26,6 +26,8 @@ const NIN_KEYSELECT_EVENT: u32 = NIN_SELECT + 1;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrayCommand {
     Capture(Instant),
+    /// A capture that opens the editor on the region of the last export.
+    CaptureLastRegion(Instant),
     CancelCapture,
     Settings,
     CheckUpdates,
@@ -46,15 +48,17 @@ pub fn set_active_hotkey(description: &str) {
 }
 
 /// Temporary status text (update check/download) that replaces the base tooltip.
-static UPDATE_ACTIVITY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+static UPDATE_ACTIVITY: std::sync::Mutex<Option<&'static str>> = std::sync::Mutex::new(None);
 
+/// The one tooltip text of the icon: the update activity while there is one,
+/// otherwise the capture shortcut. Translated on every call, so it follows the
+/// interface language.
 fn current_tooltip() -> String {
-    if let Some(activity) = UPDATE_ACTIVITY
+    if let Some(activity) = *UPDATE_ACTIVITY
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .clone()
     {
-        return activity;
+        return crate::i18n::t(crate::i18n::english_of(activity)).to_owned();
     }
     let hotkey = ACTIVE_HOTKEY
         .lock()
@@ -68,7 +72,7 @@ fn current_tooltip() -> String {
 }
 
 /// Pushes the current tooltip text to the shell icon, if the icon exists.
-fn apply_tooltip() {
+pub fn apply_tooltip() {
     let raw = TRAY_HWND.load(Ordering::SeqCst);
     if raw == 0 {
         return;
@@ -90,6 +94,7 @@ pub fn refresh_preferences(settings: &Settings) {
         .lock()
         .unwrap_or_else(|error| error.into_inner()) = Some(settings.clone());
     crate::save::recent::refresh(&settings.save_directory);
+    apply_tooltip();
 }
 
 static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -236,6 +241,15 @@ pub fn capture_is_stale(triggered: Instant) -> bool {
 }
 
 pub fn queue_capture(triggered: Instant) {
+    queue_capture_command(triggered, TrayCommand::Capture(triggered));
+}
+
+/// Queues a capture that opens the editor on the region of the last export.
+pub fn queue_last_region_capture(triggered: Instant) {
+    queue_capture_command(triggered, TrayCommand::CaptureLastRegion(triggered));
+}
+
+fn queue_capture_command(triggered: Instant, command: TrayCommand) {
     if capture_is_stale(triggered) {
         return;
     }
@@ -245,7 +259,7 @@ pub fn queue_capture(triggered: Instant) {
     {
         return;
     }
-    if !push_pending(TrayCommand::Capture(triggered)) {
+    if !push_pending(command) {
         capture_finished();
     }
     notify_tray_wakeup();
@@ -416,6 +430,7 @@ fn show_context_menu(hwnd: HWND, anchor: Option<POINT>) {
         .unwrap_or(preferences.hotkey.description);
     match menu::show(hwnd, point, crate::save::recent::list(), &active_hotkey) {
         Ok(Some(TrayCommand::Capture(triggered))) => queue_capture(triggered),
+        Ok(Some(TrayCommand::CaptureLastRegion(triggered))) => queue_last_region_capture(triggered),
         Ok(Some(TrayCommand::Settings)) => request_settings(),
         Ok(Some(command)) => queue_command(command),
         Ok(None) => {}
@@ -499,10 +514,10 @@ impl Drop for TrayManager {
     }
 }
 
-pub fn set_update_activity(message: Option<&str>) {
+pub fn set_update_activity(message: Option<&'static str>) {
     *UPDATE_ACTIVITY
         .lock()
-        .unwrap_or_else(|error| error.into_inner()) = message.map(str::to_owned);
+        .unwrap_or_else(|error| error.into_inner()) = message;
     apply_tooltip();
 }
 
@@ -590,6 +605,54 @@ mod tests {
         }
         assert_eq!(tray_event_action(NIN_SELECT, TRAY_ICON_ID + 1), None);
         assert_eq!(tray_event_action(WM_CLOSE, TRAY_ICON_ID), None);
+    }
+
+    #[test]
+    fn last_region_captures_queue_their_own_command() {
+        take_commands();
+        capture_finished();
+        let triggered = Instant::now();
+        queue_last_region_capture(triggered);
+        assert_eq!(take_commands(), [TrayCommand::CaptureLastRegion(triggered)]);
+        assert!(capture_pending());
+        queue_last_region_capture(Instant::now());
+        assert!(take_commands().is_empty(), "one capture waits at a time");
+        capture_finished();
+    }
+
+    #[test]
+    fn the_tooltip_is_one_text_in_the_current_language() {
+        use crate::i18n::{LanguagePreference, set_preference};
+        use crate::settings::test_env::lock;
+        let _lock = lock(&crate::i18n::TEST_LANGUAGE_LOCK);
+        let hotkey = |description: Option<&str>| {
+            *lock(&ACTIVE_HOTKEY) = description.map(str::to_owned);
+        };
+
+        set_preference(LanguagePreference::English);
+        hotkey(Some("PrintScreen"));
+        assert_eq!(current_tooltip(), "isolmaSS — PrintScreen to capture");
+        hotkey(Some(""));
+        assert_eq!(current_tooltip(), "isolmaSS — click to capture");
+
+        set_preference(LanguagePreference::Turkish);
+        hotkey(Some("PrintScreen"));
+        assert_eq!(
+            current_tooltip(),
+            "isolmaSS — PrintScreen ile ekran görüntüsü alın"
+        );
+
+        // An update status replaces the shortcut text and is translated again
+        // when the language changes.
+        let checking = crate::i18n::t("isolmaSS · Checking for updates…");
+        *lock(&UPDATE_ACTIVITY) = Some(checking);
+        assert_eq!(current_tooltip(), "isolmaSS · Güncellemeler denetleniyor…");
+        set_preference(LanguagePreference::English);
+        assert_eq!(current_tooltip(), "isolmaSS · Checking for updates…");
+
+        *lock(&UPDATE_ACTIVITY) = None;
+        hotkey(None);
+        set_preference(LanguagePreference::System);
     }
 
     #[test]

@@ -258,10 +258,15 @@ fn apply_settings(
     tray::refresh_preferences(settings);
 }
 
-fn capture(triggered: Instant) {
-    match CaptureBuffer::capture_virtual_screen()
-        .and_then(|capture| show_overlay_session(Rc::new(capture), triggered))
-    {
+/// Captures the screen and opens the editor; `last_region` preselects the region of the
+/// last export when it is still on a monitor.
+fn capture(triggered: Instant, last_region: bool) {
+    match CaptureBuffer::capture_virtual_screen().and_then(|capture| {
+        let preselected = last_region
+            .then(|| capture.last_region_selection())
+            .flatten();
+        show_overlay_session(Rc::new(capture), triggered, preselected)
+    }) {
         Ok(_) => {}
         Err(error) => tray::show_notification(crate::i18n::t("Capture failed"), &error.to_string()),
     }
@@ -368,7 +373,7 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
         tray::queue_command(TrayCommand::Settings);
     }
     const CAPTURE_TIMER: usize = 41;
-    let mut scheduled: Option<Instant> = None;
+    let mut scheduled: Option<(Instant, bool)> = None;
     let mut msg = MSG::default();
     let mut running = true;
     // Quit asked while an upload is in flight; the loop ends once the upload card is done.
@@ -390,25 +395,29 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
             unsafe {
                 let _ = KillTimer(tray::window_handle(), CAPTURE_TIMER);
             }
-            if let Some(triggered) = scheduled.take() {
-                capture(triggered);
+            if let Some((triggered, last_region)) = scheduled.take() {
+                capture(triggered, last_region);
                 reload = true;
             }
         }
         for command in tray::take_commands() {
+            let last_region = matches!(command, TrayCommand::CaptureLastRegion(_));
             if exit_requested {
-                if matches!(command, TrayCommand::Capture(_)) {
+                if matches!(
+                    command,
+                    TrayCommand::Capture(_) | TrayCommand::CaptureLastRegion(_)
+                ) {
                     tray::capture_finished();
                 }
                 continue;
             }
             match command {
-                TrayCommand::Capture(triggered) => {
+                TrayCommand::Capture(triggered) | TrayCommand::CaptureLastRegion(triggered) => {
                     if tray::capture_is_stale(triggered) {
                         continue;
                     }
                     if settings.capture_delay_ms > 0 {
-                        scheduled = Some(triggered);
+                        scheduled = Some((triggered, last_region));
                         if unsafe {
                             SetTimer(
                                 tray::window_handle(),
@@ -434,7 +443,7 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
                             );
                         }
                     } else {
-                        capture(triggered);
+                        capture(triggered, last_region);
                         reload = true;
                     }
                 }
@@ -552,7 +561,7 @@ fn run_capture_once() -> Result<(), Box<dyn std::error::Error>> {
         capture.timings.dim.as_micros(),
     );
     let capture_rc = Rc::new(capture);
-    match show_overlay_session(capture_rc, triggered)? {
+    match show_overlay_session(capture_rc, triggered, None)? {
         Some(selection) => {
             println!(
                 "[isolmaSS] Capture committed: [({}, {}) to ({}, {})] ({}x{} pixels).",

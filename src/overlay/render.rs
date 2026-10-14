@@ -92,6 +92,62 @@ impl OverlayState {
         });
     }
 
+    /// Places the notice of this frame beside the action bar, clear of the tool rail, the
+    /// width wheel and the readout. Without a notice or a toolbar there is nothing to place.
+    fn place_notice(&mut self) {
+        self.notice_rect =
+            self.notice
+                .as_deref()
+                .zip(self.toolbar.as_ref())
+                .map(|(text, toolbar)| {
+                    let scale = |value: i32| (value * self.dpi as i32 / 96).max(1);
+                    let width = crate::drawing::measure_text(text, -scale(13)).0 + scale(12) * 2;
+                    let selection = self.committed_selection.unwrap_or_default();
+                    place_notice(
+                        (width, scale(30)),
+                        toolbar.action_bounds,
+                        selection,
+                        selection_work_viewport(&self.capture, selection),
+                        &[
+                            toolbar.tool_bounds,
+                            toolbar.wheel_bounds.unwrap_or_default(),
+                            self.hud_rect.unwrap_or_default(),
+                        ],
+                        scale(8),
+                    )
+                });
+    }
+
+    /// The notice is an amber card with ink text, the look of a primary button.
+    fn render_notice(&self) {
+        let (Some(text), Some(bounds)) = (self.notice.as_deref(), self.notice_rect) else {
+            return;
+        };
+        let scale = |value: i32| (value * self.dpi as i32 / 96).max(1);
+        let tokens = crate::theme::tokens();
+        crate::drawing::elevation(
+            self.mem_dc,
+            bounds,
+            scale(crate::theme::RADIUS_OVERLAY),
+            self.dpi,
+        );
+        crate::drawing::rounded(
+            self.mem_dc,
+            bounds,
+            crate::drawing::corner_diameter(crate::theme::RADIUS_OVERLAY, self.dpi),
+            tokens.accent,
+            tokens.accent,
+        );
+        crate::drawing::label(
+            self.mem_dc,
+            bounds,
+            text,
+            scale(13),
+            tokens.accent_text,
+            true,
+        );
+    }
+
     /// Runs GDI drawing clipped to `clip`.
     fn with_clip(&self, clip: Rect, draw: impl FnOnce()) {
         unsafe {
@@ -180,10 +236,33 @@ impl OverlayState {
                     )
                     .render_gdi(self.mem_dc);
                 }
+                Some(InProgressDrawing::Ellipse { start, current }) => {
+                    AnnotationObject::new(
+                        0,
+                        AnnotationKind::Ellipse {
+                            rect: Rect::normalized(*start, *current),
+                            color: self.active_color,
+                            thickness: self.active_thickness,
+                        },
+                    )
+                    .render_gdi(self.mem_dc);
+                }
                 Some(InProgressDrawing::Arrow { start, current }) => {
                     AnnotationObject::new(
                         0,
                         AnnotationKind::Arrow {
+                            start: *start,
+                            end: *current,
+                            color: self.active_color,
+                            thickness: self.active_thickness,
+                        },
+                    )
+                    .render_gdi(self.mem_dc);
+                }
+                Some(InProgressDrawing::Line { start, current }) => {
+                    AnnotationObject::new(
+                        0,
+                        AnnotationKind::Line {
                             start: *start,
                             end: *current,
                             color: self.active_color,
@@ -465,7 +544,9 @@ impl OverlayState {
                         } else {
                             match self.active_tool {
                                 ToolKind::Rectangle
+                                | ToolKind::Ellipse
                                 | ToolKind::Arrow
+                                | ToolKind::Line
                                 | ToolKind::Pen
                                 | ToolKind::Highlight => {
                                     (self.active_color, self.active_thickness, true, true)
@@ -473,7 +554,10 @@ impl OverlayState {
                                 ToolKind::Text | ToolKind::Step => {
                                     (self.active_color, self.active_thickness, true, false)
                                 }
-                                ToolKind::Blur | ToolKind::Redact | ToolKind::Select => {
+                                ToolKind::Blur
+                                | ToolKind::Redact
+                                | ToolKind::Select
+                                | ToolKind::ColorPicker => {
                                     (self.active_color, self.active_thickness, false, false)
                                 }
                             }
@@ -510,6 +594,8 @@ impl OverlayState {
         if policy.toolbar_and_tooltip {
             self.place_capture_hud();
             self.render_capture_hud();
+            self.place_notice();
+            self.render_notice();
         }
         // Make the fully rebuilt backbuffer visible to the subsequent WM_PAINT copy.
         unsafe {
@@ -906,7 +992,15 @@ mod tests {
                 start: (120, 90),
                 current: (240, 170),
             },
+            InProgressDrawing::Ellipse {
+                start: (120, 90),
+                current: (240, 170),
+            },
             InProgressDrawing::Arrow {
+                start: (110, 100),
+                current: (250, 170),
+            },
+            InProgressDrawing::Line {
                 start: (110, 100),
                 current: (250, 170),
             },
@@ -925,6 +1019,29 @@ mod tests {
             export.drawing_shape = Some(shape);
             export.composite_scene_with(CompositionPolicy::EXPORT);
             assert_eq!(red(&export), 0);
+        }
+    }
+
+    #[test]
+    fn finished_ellipses_and_lines_are_part_of_the_export() {
+        let red = |state: &OverlayState| count_color(state, SEL, RED);
+        for kind in [
+            AnnotationKind::Ellipse {
+                rect: Rect::new(120, 90, 240, 170),
+                color: RED,
+                thickness: 4,
+            },
+            AnnotationKind::Line {
+                start: (110, 100),
+                end: (250, 170),
+                color: RED,
+                thickness: 4,
+            },
+        ] {
+            let mut export = scene();
+            export.objects.push(AnnotationObject::new(1, kind.clone()));
+            export.composite_scene_with(CompositionPolicy::EXPORT);
+            assert!(red(&export) > 20, "{kind:?}");
         }
     }
 
@@ -1277,5 +1394,41 @@ mod tests {
             ),
             0
         );
+    }
+
+    #[test]
+    fn a_notice_is_an_amber_card_beside_the_toolbar_and_never_part_of_an_export() {
+        let mut state = scene();
+        state.composite_scene();
+        assert_eq!(state.notice_rect, None);
+        state.notice = Some("Copied #FEAB10".to_string());
+        state.composite_scene();
+        let notice = state.notice_rect.expect("the notice is placed");
+        let toolbar = state.toolbar.as_ref().unwrap();
+        assert!(!rects_intersect(&notice, &toolbar.tool_bounds));
+        assert!(!rects_intersect(&notice, &toolbar.action_bounds));
+        let accent = bgr(crate::theme::tokens().accent);
+        let probe = (notice.left + 6, (notice.top + notice.bottom) / 2);
+        assert_eq!(rgb_at(&state, probe.0, probe.1), accent);
+        let inner = notice.inflate(-12, -8);
+        let text_pixels = (inner.top..inner.bottom)
+            .flat_map(|y| (inner.left..inner.right).map(move |x| (x, y)))
+            .filter(|&(x, y)| rgb_at(&state, x, y) != accent)
+            .count();
+        assert!(text_pixels > 0, "the text is drawn on the card");
+
+        let mut export = scene();
+        export.notice = Some("Copied #FEAB10".to_string());
+        export.composite_scene_with(CompositionPolicy::EXPORT);
+        assert_ne!(rgb_at(&export, probe.0, probe.1), accent);
+    }
+
+    #[test]
+    fn a_notice_needs_a_toolbar_to_sit_beside() {
+        let mut state = scene();
+        state.notice = Some("Copied #FEAB10".to_string());
+        state.notice_rect = Some(Rect::new(1, 1, 2, 2));
+        state.place_notice();
+        assert_eq!(state.notice_rect, None);
     }
 }

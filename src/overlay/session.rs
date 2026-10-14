@@ -83,11 +83,14 @@ fn client_area_animation_enabled() -> bool {
     queried.is_err() || enabled.as_bool()
 }
 
+/// Opens the editor over `capture`. `preselected`, a region in capture coordinates, starts
+/// as the active selection.
 pub fn show_overlay_session(
     capture: Rc<CaptureBuffer>,
     triggered: Instant,
+    preselected: Option<Rect>,
 ) -> Result<Option<Rect>> {
-    run_session(capture, triggered, false).map(|(selection, _)| selection)
+    run_session(capture, triggered, false, preselected).map(|(selection, _)| selection)
 }
 
 /// Diagnostic calibration uses the same capture/window/presentation path, then closes its own window.
@@ -95,13 +98,14 @@ pub fn measure_overlay(
     capture: Rc<CaptureBuffer>,
     triggered: Instant,
 ) -> Result<std::time::Duration> {
-    run_session(capture, triggered, true).map(|(_, duration)| duration)
+    run_session(capture, triggered, true, None).map(|(_, duration)| duration)
 }
 
 fn run_session(
     capture: Rc<CaptureBuffer>,
     triggered: Instant,
     measure: bool,
+    preselected: Option<Rect>,
 ) -> Result<(Option<Rect>, std::time::Duration)> {
     let overlay_start = Instant::now();
     register_overlay_class()?;
@@ -167,7 +171,7 @@ fn run_session(
     crate::i18n::set_preference(settings.language);
     let active_color = settings.default_color;
     let active_thickness = settings.default_thickness;
-    let active_tool = settings.last_tool;
+    let active_tool = initial_tool(settings.last_tool);
 
     let mut state = Box::new(OverlayState {
         capture,
@@ -204,6 +208,9 @@ fn run_session(
         toolbar: None,
         hud_rect: None,
         tools_expanded: false,
+        tool_before_pick: None,
+        notice: None,
+        notice_rect: None,
 
         mem_dc,
         dib,
@@ -219,6 +226,9 @@ fn run_session(
         preferences_dirty: false,
         recognition: RecognitionState::system(),
     });
+    if let Some(region) = preselected {
+        state.preselect(region);
+    }
     std::mem::forget(mem_guard);
     std::mem::forget(bitmap_guard);
 

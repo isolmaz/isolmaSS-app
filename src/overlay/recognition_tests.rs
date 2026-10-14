@@ -154,6 +154,11 @@ fn ctrl_shift_c_copies_the_text_of_the_selection() {
     assert!(state.committed_result);
     assert!(window.exists());
     assert!(state.scene_dirty);
+    assert_eq!(
+        state.notice.as_deref(),
+        Some(crate::i18n::t("Text copied")),
+        "the open editor confirms in its own notice"
+    );
 }
 
 #[test]
@@ -164,6 +169,7 @@ fn copying_text_closes_the_editor_when_asked_to() {
     press(&mut state, &window, 'c', CTRL | SHIFT);
     settle(&mut state, &window);
     assert!(!window.exists());
+    assert_eq!(state.notice, None, "a closing editor shows no notice");
 }
 
 #[test]
@@ -226,6 +232,10 @@ fn ctrl_shift_r_covers_addresses_and_numbers_in_one_undo_step() {
     assert_eq!(state.object_count(), 3);
     assert!(window.exists());
     assert!(state.scene_dirty);
+    assert_eq!(
+        state.notice,
+        Some(crate::i18n::tf("Redacted {} items", &[&2]))
+    );
 
     assert!(state.history.undo(&mut state.objects));
     assert_eq!(state.object_count(), 1, "one undo removes both redactions");
@@ -242,25 +252,42 @@ fn nothing_found_changes_nothing_and_keeps_the_editor_open() {
     press(&mut state, &window, 'r', CTRL | SHIFT);
     settle(&mut state, &window);
     assert_eq!(state.object_count(), 1);
+    assert_eq!(
+        state.notice.as_deref(),
+        Some(crate::i18n::t("No email addresses or phone numbers found"))
+    );
+    state.notice = None;
     state.recognition.engine = Arc::new(Canned {
         result: Ok(Vec::new()),
         seen: Mutex::new(Vec::new()),
     });
     press(&mut state, &window, 'c', CTRL | SHIFT);
     settle(&mut state, &window);
+    assert_eq!(
+        state.notice.as_deref(),
+        Some(crate::i18n::t("No text found in the selection"))
+    );
     assert!(!state.committed_result);
     assert!(window.exists());
     assert!(take_action_error().is_none());
 }
 
 #[test]
-fn a_missing_language_is_a_notice_and_an_engine_failure_an_error() {
+fn a_missing_language_opens_a_dialog_and_an_engine_failure_an_error() {
     let _ = take_action_error();
     let window = TestWindow::new();
     let (mut state, _) = state_with(Err(OcrFailure::NoLanguage));
     state.start_recognition(window.0, Intent::CopyText);
     settle(&mut state, &window);
-    assert!(take_action_error().is_none());
+    let (title, message) = take_action_error().expect("the missing language is reported");
+    assert_eq!(title, crate::i18n::t("Copy text"));
+    assert_eq!(
+        message,
+        crate::i18n::t(
+            "Windows has no text recognition language installed. Add a language under Settings › Time & language › Language & region."
+        )
+    );
+    assert_eq!(state.notice, None, "a notice would vanish unread");
     assert!(state.recognition.job.is_none());
 
     let (mut state, _) = state_with(Err(OcrFailure::Failed("boom".into())));
@@ -350,6 +377,7 @@ fn redactions_are_dropped_once_the_selection_has_moved() {
     settle(&mut state, &window);
     assert!(redact_rects(&state).is_empty());
     assert!(state.recognition.job.is_none());
+    assert_eq!(state.notice, None);
 }
 
 #[test]
@@ -407,17 +435,22 @@ fn the_toolbar_items_and_the_command_menu_start_the_commands() {
 #[test]
 fn a_text_box_is_committed_before_the_selection_is_read() {
     let window = TestWindow::new();
-    let (mut state, engine) = state_with(Ok(Vec::new()));
-    state.set_text_edit(Some(TextEditState::new(
-        (200, 200),
-        "Note".to_string(),
-        [0, 0, 0, 255],
-        22,
-        None,
-    )));
-    press(&mut state, &window, 'c', CTRL | SHIFT);
-    assert!(state.text_edit().is_none());
-    assert_eq!(state.object_count(), 2);
-    settle(&mut state, &window);
-    assert_eq!(engine.seen.lock().unwrap().len(), 1);
+    for (letter, intent) in [('c', Intent::CopyText), ('r', Intent::RedactSensitive)] {
+        let (mut state, engine) = state_with(Ok(Vec::new()));
+        state.set_text_edit(Some(TextEditState::new(
+            (200, 200),
+            "Note".to_string(),
+            [0, 0, 0, 255],
+            22,
+            None,
+        )));
+        set_overlay_text_editing(true);
+        press(&mut state, &window, letter, CTRL | SHIFT);
+        assert!(state.text_edit().is_none(), "{letter}");
+        assert!(!crate::hotkey::is_overlay_text_editing(), "{letter}");
+        assert_eq!(state.object_count(), 2, "the note is part of the image");
+        assert_eq!(job_intent(&state), Some(intent));
+        settle(&mut state, &window);
+        assert_eq!(engine.seen.lock().unwrap().len(), 1);
+    }
 }

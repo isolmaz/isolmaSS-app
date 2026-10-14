@@ -65,6 +65,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Cannot reach the Cloudflare server: {}",
         "Cloudflare sunucusuna ulaşılamıyor: {}",
     ),
+    ("Capture &last region", "&Son bölgeyi yakala"),
     ("Capture failed", "Yakalama başarısız"),
     ("Capture shortcut changed", "Yakalama kısayolu değişti"),
     ("Capture timer", "Yakalama sayacı"),
@@ -232,6 +233,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Connecting", "Bağlanıyor"),
     ("Connection", "Bağlantı"),
     ("Continue with Cloudflare", "Cloudflare ile devam et"),
+    ("Copied {}", "{} kopyalandı"),
     ("Copy", "Kopyala"),
     ("Copy failed", "Kopyalama başarısız"),
     ("Copy link", "Bağlantıyı kopyala"),
@@ -527,6 +529,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Downloading update", "Güncelleme indiriliyor"),
     ("Duplicate OAuth parameter.", "Yinelenen OAuth parametresi."),
     ("Editor", "Düzenleyici"),
+    ("Ellipse", "Elips"),
     (
         "Enter a positive whole number in every field.",
         "Her alana pozitif bir tam sayı girin.",
@@ -634,6 +637,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Light yellow", "Açık sarı"),
     ("Limits", "Sınırlar"),
     ("Limits saved.", "Sınırlar kaydedildi."),
+    ("Line", "Çizgi"),
     ("Line width", "Çizgi kalınlığı"),
     (
         "Link copied to the clipboard.",
@@ -713,6 +717,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Paste failed", "Metin yapıştırma başarısız"),
     ("Pen", "Kalem"),
     ("Permission granted", "İzin alındı"),
+    ("Pick color", "Renk seç"),
     ("Pink", "Pembe"),
     ("Press keys · Esc cancels", "Tuşlara basın · Esc iptal"),
     ("Purple", "Mor"),
@@ -1294,8 +1299,8 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     ("Windows language", "Windows dili"),
     (
-        "Applies after you save and reopen Settings.",
-        "Kaydedip Ayarlar'ı yeniden açınca uygulanır.",
+        "Applies at once. Cancel restores the previous language.",
+        "Hemen uygulanır. İptal önceki dili geri getirir.",
     ),
     (
         "{} is reserved. Choose another shortcut.",
@@ -1361,4 +1366,12 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Choose color…", "Renk seç…"),
     ("Line width…", "Çizgi kalınlığı…"),
     ("Cut failed", "Metin kesme başarısız"),
+    (
+        "On the Cloudflare page, allow the account that should host your Worker. If you have several accounts, allow only that one.",
+        "Cloudflare sayfasında, Worker'ınızı barındıracak hesaba izin verin. Birden fazla hesabınız varsa yalnızca o hesaba izin verin.",
+    ),
+    (
+        "On the Cloudflare page, allow the account that owns {}.",
+        "Cloudflare sayfasında, {} adresine sahip olan hesaba izin verin.",
+    ),
 ];
