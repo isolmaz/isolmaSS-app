@@ -10,7 +10,7 @@ use crate::hotkey::{
 };
 use crate::save::save_screenshot;
 use crate::settings::{Settings, show_settings_dialog};
-use crate::toolbar::{Toolbar, ToolbarAction, ToolbarItem};
+use crate::toolbar::{MORE_TOOLS, Toolbar, ToolbarAction, ToolbarItem};
 use crate::window_snap::{WindowInfo, find_window_in_list, get_visible_windows};
 use std::ffi::c_void;
 use std::rc::Rc;
@@ -80,6 +80,8 @@ pub fn tool_for_key(vk: u32) -> Option<ToolKind> {
         0x56 => Some(ToolKind::Select),
         0x52 => Some(ToolKind::Rectangle),
         0x41 => Some(ToolKind::Arrow),
+        0x45 => Some(ToolKind::Ellipse),
+        0x4c => Some(ToolKind::Line),
         0x50 => Some(ToolKind::Pen),
         0x54 => Some(ToolKind::Text),
         0x48 => Some(ToolKind::Highlight),
@@ -255,6 +257,61 @@ fn pixel_bounds(selection: Rect) -> Rect {
     )
 }
 
+/// Where a frame or ellipse drag from `start` ends for the pointer at `pt`: Shift makes
+/// the shape square, and the point stays inside `region`.
+fn frame_drag_end(start: (i32, i32), pt: (i32, i32), shift_down: bool, region: Rect) -> (i32, i32) {
+    clamp_point(
+        if shift_down {
+            snap_square(start, pt)
+        } else {
+            pt
+        },
+        region,
+    )
+}
+
+/// Where an arrow or line drag from `start` ends for the pointer at `pt`: Shift snaps it to
+/// the nearest 45 degrees, and the point stays on a pixel of `region`.
+fn segment_drag_end(
+    start: (i32, i32),
+    pt: (i32, i32),
+    shift_down: bool,
+    region: Rect,
+) -> (i32, i32) {
+    clamp_point(
+        if shift_down {
+            snap_angle_45(start, pt)
+        } else {
+            pt
+        },
+        pixel_bounds(region),
+    )
+}
+
+/// The rectangle a released frame or ellipse drag leaves; `None` when it is under 6 px on
+/// a side.
+fn dragged_frame(
+    start: (i32, i32),
+    current: (i32, i32),
+    shift_down: bool,
+    region: Rect,
+) -> Option<Rect> {
+    let frame = Rect::normalized(start, frame_drag_end(start, current, shift_down, region));
+    (frame.width() >= 6 && frame.height() >= 6).then_some(frame)
+}
+
+/// The ends a released arrow or line drag leaves; `None` when they are under 3 px apart on
+/// both axes.
+fn dragged_segment(
+    start: (i32, i32),
+    current: (i32, i32),
+    shift_down: bool,
+    region: Rect,
+) -> Option<((i32, i32), (i32, i32))> {
+    let end = segment_drag_end(start, current, shift_down, region);
+    ((end.0 - start.0).abs() >= 3 || (end.1 - start.1).abs() >= 3).then_some((start, end))
+}
+
 fn selection_screen_rect(capture: &CaptureBuffer, selection: Rect) -> WIN_RECT {
     WIN_RECT {
         left: selection.left + capture.x,
@@ -355,7 +412,15 @@ enum InProgressDrawing {
         start: (i32, i32),
         current: (i32, i32),
     },
+    Ellipse {
+        start: (i32, i32),
+        current: (i32, i32),
+    },
     Arrow {
+        start: (i32, i32),
+        current: (i32, i32),
+    },
+    Line {
         start: (i32, i32),
         current: (i32, i32),
     },
@@ -422,7 +487,9 @@ pub use text::TextEditState;
 #[derive(Debug, Clone, Copy)]
 enum DragObjectAction {
     Move,
-    Resize(AnnotationResizeHandle),
+    /// The grip being dragged and the pointer's offset from the geometry it moves at press
+    /// time ([`AnnotationObject::resize_grab`]).
+    Resize(AnnotationResizeHandle, (i32, i32)),
 }
 
 #[derive(Debug, Clone)]
@@ -1421,13 +1488,7 @@ impl OverlayState {
     /// collapsed tool strip hides. `None` until a frame has laid the toolbar out.
     fn command_menu_buttons(&self) -> Option<Vec<crate::toolbar::ToolbarButton>> {
         let mut buttons = self.toolbar.as_ref()?.buttons.clone();
-        for tool in [
-            ToolKind::Highlight,
-            ToolKind::Text,
-            ToolKind::Step,
-            ToolKind::Blur,
-            ToolKind::Redact,
-        ] {
+        for tool in MORE_TOOLS {
             let item = ToolbarItem::Tool(tool);
             if !buttons.iter().any(|button| button.item == item) {
                 let at = buttons
@@ -1760,9 +1821,7 @@ impl OverlayState {
                     AnnotationResizeHandle::TopRight | AnnotationResizeHandle::BottomLeft => {
                         IDC_SIZENESW
                     }
-                    AnnotationResizeHandle::ArrowStart | AnnotationResizeHandle::ArrowEnd => {
-                        IDC_SIZEALL
-                    }
+                    AnnotationResizeHandle::Start | AnnotationResizeHandle::End => IDC_SIZEALL,
                 };
             }
             if object.geometry_bounds().inflate(4, 4).contains(pt.0, pt.1) {
@@ -1993,6 +2052,80 @@ mod tests {
         assert_eq!(clamp_point((50, 400), selection), (100, 200));
         assert_eq!(clamp_point((50, 400), pixel_bounds(selection)), (100, 199));
         assert_eq!(clamp_point((150, 150), selection), (150, 150));
+    }
+
+    #[test]
+    fn frame_and_ellipse_drags_turn_square_with_shift_and_stay_in_the_region() {
+        let region = Rect::new(100, 100, 300, 200);
+        assert_eq!(
+            frame_drag_end((150, 150), (250, 170), false, region),
+            (250, 170)
+        );
+        assert_eq!(
+            frame_drag_end((150, 150), (250, 170), true, region),
+            (250, 200)
+        );
+        assert_eq!(
+            frame_drag_end((250, 150), (200, 100), true, region),
+            (200, 100)
+        );
+        assert_eq!(
+            frame_drag_end((150, 150), (350, 50), false, region),
+            (300, 100)
+        );
+    }
+
+    #[test]
+    fn arrow_and_line_drags_snap_to_45_degrees_with_shift_and_stay_on_a_pixel_of_the_region() {
+        let region = Rect::new(100, 100, 300, 200);
+        assert_eq!(
+            segment_drag_end((150, 150), (200, 160), false, region),
+            (200, 160)
+        );
+        assert_eq!(
+            segment_drag_end((150, 150), (200, 160), true, region),
+            (201, 150)
+        );
+        assert_eq!(
+            segment_drag_end((150, 120), (200, 180), true, region),
+            (205, 175)
+        );
+        assert_eq!(
+            segment_drag_end((150, 150), (500, 150), false, region),
+            (299, 150)
+        );
+        assert_eq!(
+            segment_drag_end((150, 150), (150, 400), false, region),
+            (150, 199)
+        );
+    }
+
+    #[test]
+    fn released_frames_need_six_pixels_and_released_segments_three() {
+        let region = Rect::new(100, 100, 300, 200);
+        assert_eq!(dragged_frame((150, 150), (155, 300), false, region), None);
+        assert_eq!(
+            dragged_frame((150, 150), (160, 160), false, region),
+            Some(Rect::new(150, 150, 160, 160))
+        );
+        assert_eq!(
+            dragged_frame((150, 150), (250, 160), true, region),
+            Some(Rect::new(150, 150, 250, 200))
+        );
+        assert_eq!(
+            dragged_frame((250, 190), (240, 120), false, region),
+            Some(Rect::new(240, 120, 250, 190))
+        );
+
+        assert_eq!(dragged_segment((150, 150), (152, 152), false, region), None);
+        assert_eq!(
+            dragged_segment((150, 150), (153, 150), false, region),
+            Some(((150, 150), (153, 150)))
+        );
+        assert_eq!(
+            dragged_segment((150, 150), (250, 160), true, region),
+            Some(((150, 150), (250, 150)))
+        );
     }
 
     #[test]

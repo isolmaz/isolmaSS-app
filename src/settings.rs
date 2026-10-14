@@ -156,6 +156,7 @@ impl Settings {
                         ),
                     )
                 })?;
+                remove_legacy_backups(&backup);
                 let defaults = Self::default();
                 defaults.save_to_path(&path).map_err(|save_error| {
                     std::io::Error::new(
@@ -369,6 +370,31 @@ impl Settings {
         }
         let path = Self::config_path();
         self.save_to_config_path(path.as_deref())
+    }
+}
+
+/// Deletes the timestamped `settings.corrupt-*` copies that older versions left next to
+/// the fixed `backup`, so only the newest preserved copy remains. A copy that cannot be
+/// deleted is logged and left alone.
+fn remove_legacy_backups(backup: &Path) {
+    let directory = backup.parent().unwrap_or(Path::new("."));
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("settings.corrupt-")
+        {
+            continue;
+        }
+        if let Err(error) = std::fs::remove_file(entry.path()) {
+            crate::diagnostics::record(
+                "settings recovery",
+                &format!("Could not delete an older backup: {error}"),
+            );
+        }
     }
 }
 
@@ -735,6 +761,56 @@ mod tests {
         write_stored(&sandbox, b"42");
         assert_eq!(Settings::load().unwrap(), Settings::default());
         assert_eq!(std::fs::read(&backup).unwrap(), b"42");
+    }
+
+    #[test]
+    fn recovery_deletes_the_older_timestamped_backups() {
+        let sandbox = Sandbox::new("settings_legacy_backups");
+        let path = write_stored(&sandbox, b"{ not json");
+        let directory = path.parent().unwrap();
+        std::fs::write(directory.join("settings.corrupt-1700000000.json"), b"old").unwrap();
+        std::fs::write(directory.join("settings.corrupt-1700000500.json"), b"older").unwrap();
+        std::fs::write(directory.join("settings.keep.json"), b"unrelated").unwrap();
+
+        Settings::load_with_warning().expect("recovered");
+
+        assert_eq!(
+            names(directory),
+            [
+                "settings.corrupt.json",
+                "settings.json",
+                "settings.keep.json"
+            ],
+            "only the newest backup and unrelated files remain"
+        );
+        assert_eq!(
+            std::fs::read(directory.join("settings.corrupt.json")).unwrap(),
+            b"{ not json"
+        );
+    }
+
+    #[test]
+    fn an_older_backup_that_cannot_be_deleted_is_left_and_the_rest_still_go() {
+        let sandbox = Sandbox::new("settings_legacy_stuck");
+        let directory = sandbox.settings_file().parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(directory.join("settings.corrupt-1.json")).unwrap();
+        std::fs::write(directory.join("settings.corrupt-2.json"), b"old").unwrap();
+
+        remove_legacy_backups(&directory.join("settings.corrupt.json"));
+
+        assert_eq!(
+            names(&directory),
+            ["settings.corrupt-1.json"],
+            "the undeletable entry stays, the deletable copy is gone"
+        );
+    }
+
+    #[test]
+    fn cleaning_backups_in_a_missing_folder_does_nothing() {
+        let sandbox = Sandbox::new("settings_legacy_missing");
+        let missing = sandbox.settings_file().parent().unwrap().join("absent");
+        remove_legacy_backups(&missing.join("settings.corrupt.json"));
+        assert!(!missing.exists());
     }
 
     #[test]

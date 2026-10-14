@@ -20,7 +20,7 @@ const CALLBACK_PORT: u16 = 38481;
 const MAX_ACCOUNTS: usize = 200;
 const WORKER_SOURCE: &str = include_str!("../cloudflare/worker.mjs");
 /// Must equal `WORKER_VERSION` in `cloudflare/worker.mjs` (checked by a test).
-pub const WORKER_VERSION: u64 = 4;
+pub const WORKER_VERSION: u64 = 5;
 /// Per-account rate-limit namespace for share-link views (60 per IP per minute).
 const VIEW_LIMITER: &str = "4917";
 

@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{COLORREF, POINT};
 use windows::Win32::Graphics::Gdi::{
-    GET_STOCK_OBJECT_FLAGS, GetStockObject, HDC, NULL_BRUSH, NULL_PEN, PS_DOT, PS_SOLID, Polygon,
-    Polyline, Rectangle as GdiRectangle, SelectObject, WHITE_BRUSH,
+    Ellipse as GdiEllipse, GET_STOCK_OBJECT_FLAGS, GetStockObject, HDC, NULL_BRUSH, NULL_PEN,
+    PS_DOT, PS_SOLID, Polygon, Polyline, Rectangle as GdiRectangle, SelectObject, WHITE_BRUSH,
 };
 
 mod smooth;
@@ -18,6 +18,8 @@ pub enum ToolKind {
     #[default]
     Rectangle,
     Arrow,
+    Ellipse,
+    Line,
     Pen,
     Highlight,
     Step,
@@ -70,6 +72,19 @@ pub enum AnnotationKind {
         thickness: i32,
     },
     Arrow {
+        start: (i32, i32),
+        end: (i32, i32),
+        color: [u8; 4],
+        thickness: i32,
+    },
+    /// Hollow ellipse inscribed in `rect`.
+    Ellipse {
+        rect: Rect,
+        color: [u8; 4],
+        thickness: i32,
+    },
+    /// Straight segment with round caps.
+    Line {
         start: (i32, i32),
         end: (i32, i32),
         color: [u8; 4],
@@ -191,8 +206,9 @@ pub enum AnnotationResizeHandle {
     TopRight,
     BottomLeft,
     BottomRight,
-    ArrowStart,
-    ArrowEnd,
+    /// The first and last point of an arrow or a line.
+    Start,
+    End,
 }
 
 type ResizeHandlePoints = ([(AnnotationResizeHandle, (i32, i32)); 4], usize);
@@ -235,16 +251,27 @@ fn arrow_geometry(start: (i32, i32), end: (i32, i32), thickness: i32) -> Option<
     })
 }
 
+/// Pixels a `thickness` px stroke reaches beyond the path it follows.
+fn stroke_reach(thickness: i32) -> i32 {
+    (thickness.max(1) + 1) / 2
+}
+
+/// The pixels a round-capped stroke from `a` to `b` covers, plus one pixel of
+/// anti-aliasing on every side.
+fn segment_extent(a: (i32, i32), b: (i32, i32), thickness: i32) -> Rect {
+    let reach = stroke_reach(thickness) + 1;
+    Rect::normalized(a, b).inflate(reach, reach)
+}
+
 /// The pixels an arrow covers: the round-capped shaft and the head triangle, plus one pixel
 /// of anti-aliasing on every side.
 fn arrow_extent(start: (i32, i32), end: (i32, i32), thickness: i32) -> Rect {
-    let reach = (thickness + 1) / 2 + 1;
     let Some(arrow) = arrow_geometry(start, end, thickness) else {
-        return Rect::normalized(start, end).inflate(reach, reach);
+        return segment_extent(start, end, thickness);
     };
     // The shaft stops at the head's base; the tip is a point of the triangle.
     let base = (arrow.base.0.round() as i32, arrow.base.1.round() as i32);
-    let mut extent = Rect::normalized(start, base).inflate(reach, reach);
+    let mut extent = segment_extent(start, base, thickness);
     for (x, y) in arrow.head {
         let corner = Rect::new(
             x.floor() as i32 - 1,
@@ -262,6 +289,16 @@ fn plain_frame(hdc: HDC, rect: Rect, color: [u8; 4], thickness: i32) {
     crate::drawing::with_pen(hdc, PS_SOLID, thickness, bgra_to_colorref(color), || {
         with_stock_object(hdc, NULL_BRUSH, || unsafe {
             let _ = GdiRectangle(hdc, rect.left, rect.top, rect.right, rect.bottom);
+        })
+    });
+}
+
+/// Hollow ellipse with plain GDI: the ellipse inscribed in `rect`, outlined by a
+/// `thickness` px pen.
+fn plain_ellipse(hdc: HDC, rect: Rect, color: [u8; 4], thickness: i32) {
+    crate::drawing::with_pen(hdc, PS_SOLID, thickness, bgra_to_colorref(color), || {
+        with_stock_object(hdc, NULL_BRUSH, || unsafe {
+            let _ = GdiEllipse(hdc, rect.left, rect.top, rect.right, rect.bottom);
         })
     });
 }
@@ -365,6 +402,9 @@ impl AnnotationObject {
         match &self.kind {
             AnnotationKind::Rectangle {
                 rect, thickness, ..
+            }
+            | AnnotationKind::Ellipse {
+                rect, thickness, ..
             } => rect.inflate(*thickness, *thickness),
             AnnotationKind::Arrow {
                 start,
@@ -372,6 +412,12 @@ impl AnnotationObject {
                 thickness,
                 ..
             } => arrow_extent(*start, *end, *thickness),
+            AnnotationKind::Line {
+                start,
+                end,
+                thickness,
+                ..
+            } => segment_extent(*start, *end, *thickness),
             AnnotationKind::Pen {
                 points, thickness, ..
             }
@@ -415,8 +461,8 @@ impl AnnotationObject {
         }
     }
 
-    /// Tests if point `pt` hits this annotation object. A hollow frame counts
-    /// as hit across its whole interior; `hit_test_stroke` is the frame band only.
+    /// Tests if point `pt` hits this annotation object. A hollow frame or ellipse counts
+    /// as hit across its whole interior; `hit_test_stroke` is the outline band only.
     pub fn hit_test(&self, pt: (i32, i32)) -> bool {
         match &self.kind {
             AnnotationKind::Rectangle {
@@ -425,7 +471,16 @@ impl AnnotationObject {
                 let tol = (*thickness).max(6);
                 rect.inflate(tol, tol).contains(pt.0, pt.1)
             }
+            AnnotationKind::Ellipse {
+                rect, thickness, ..
+            } => within_ellipse(*rect, (*thickness).max(6), pt),
             AnnotationKind::Arrow {
+                start,
+                end,
+                thickness,
+                ..
+            }
+            | AnnotationKind::Line {
                 start,
                 end,
                 thickness,
@@ -473,8 +528,8 @@ impl AnnotationObject {
         }
     }
 
-    /// Like `hit_test`, but a hollow frame only hits on its border band, so
-    /// objects drawn inside a frame stay selectable.
+    /// Like `hit_test`, but a hollow frame or ellipse only hits on its outline band, so
+    /// objects drawn inside it stay selectable.
     pub fn hit_test_stroke(&self, pt: (i32, i32)) -> bool {
         match &self.kind {
             AnnotationKind::Rectangle {
@@ -484,6 +539,12 @@ impl AnnotationObject {
                 rect.inflate(tol, tol).contains(pt.0, pt.1)
                     && !rect.inflate(-tol, -tol).contains(pt.0, pt.1)
             }
+            AnnotationKind::Ellipse {
+                rect, thickness, ..
+            } => {
+                let tol = (*thickness).max(6);
+                within_ellipse(*rect, tol, pt) && !within_ellipse(*rect, -tol, pt)
+            }
             _ => self.hit_test(pt),
         }
     }
@@ -491,13 +552,13 @@ impl AnnotationObject {
     /// Translates this annotation object by `(dx, dy)`.
     pub fn translate(&mut self, dx: i32, dy: i32) {
         match &mut self.kind {
-            AnnotationKind::Rectangle { rect, .. } => {
+            AnnotationKind::Rectangle { rect, .. } | AnnotationKind::Ellipse { rect, .. } => {
                 rect.left += dx;
                 rect.right += dx;
                 rect.top += dy;
                 rect.bottom += dy;
             }
-            AnnotationKind::Arrow { start, end, .. } => {
+            AnnotationKind::Arrow { start, end, .. } | AnnotationKind::Line { start, end, .. } => {
                 start.0 += dx;
                 start.1 += dy;
                 end.0 += dx;
@@ -525,9 +586,12 @@ impl AnnotationObject {
     pub fn geometry_bounds(&self) -> Rect {
         match &self.kind {
             AnnotationKind::Rectangle { rect, .. }
+            | AnnotationKind::Ellipse { rect, .. }
             | AnnotationKind::Blur { rect, .. }
             | AnnotationKind::Redact { rect } => *rect,
-            AnnotationKind::Arrow { start, end, .. } => Rect::normalized(*start, *end),
+            AnnotationKind::Arrow { start, end, .. } | AnnotationKind::Line { start, end, .. } => {
+                Rect::normalized(*start, *end)
+            }
             AnnotationKind::Pen { points, .. } | AnnotationKind::Highlight { points, .. } => {
                 let Some(first) = points.first() else {
                     return Rect::default();
@@ -546,14 +610,40 @@ impl AnnotationObject {
         }
     }
 
+    /// The dashed box around the object, just outside what is drawn: the geometry grown by
+    /// the stroke's reach and the gap. An arrow's or line's box is its drawn extent, so it
+    /// holds the head and the round caps.
+    fn selection_box(&self, dpi: u32) -> Rect {
+        let (extent, reach) = match &self.kind {
+            AnnotationKind::Arrow { .. } | AnnotationKind::Line { .. } => (self.bounds(), 0),
+            AnnotationKind::Rectangle { thickness, .. }
+            | AnnotationKind::Ellipse { thickness, .. }
+            | AnnotationKind::Pen { thickness, .. } => {
+                (self.geometry_bounds(), stroke_reach(*thickness))
+            }
+            // The marker radius `bounds` and `render_highlight` use.
+            AnnotationKind::Highlight { thickness, .. } => {
+                (self.geometry_bounds(), thickness.saturating_mul(2))
+            }
+            AnnotationKind::Step { .. }
+            | AnnotationKind::Text { .. }
+            | AnnotationKind::Blur { .. }
+            | AnnotationKind::Redact { .. } => (self.geometry_bounds(), 0),
+        };
+        let margin = reach + grip_half(dpi);
+        extent.inflate(margin, margin)
+    }
+
     fn resize_handle_points(&self, dpi: u32) -> ResizeHandlePoints {
-        if let AnnotationKind::Arrow { start, end, .. } = &self.kind {
+        if let AnnotationKind::Arrow { start, end, .. } | AnnotationKind::Line { start, end, .. } =
+            &self.kind
+        {
             return (
                 [
-                    (AnnotationResizeHandle::ArrowStart, *start),
-                    (AnnotationResizeHandle::ArrowEnd, *end),
-                    (AnnotationResizeHandle::ArrowEnd, *end),
-                    (AnnotationResizeHandle::ArrowEnd, *end),
+                    (AnnotationResizeHandle::Start, *start),
+                    (AnnotationResizeHandle::End, *end),
+                    (AnnotationResizeHandle::End, *end),
+                    (AnnotationResizeHandle::End, *end),
                 ],
                 2,
             );
@@ -562,10 +652,9 @@ impl AnnotationObject {
             let empty = (AnnotationResizeHandle::TopLeft, (0, 0));
             return ([empty; 4], 0);
         }
-        // Same rect as render_selection_indicator so handles sit on the visible
-        // dashed box; hit-testing follows these points automatically.
-        let gap = grip_half(dpi);
-        let b = self.geometry_bounds().inflate(gap, gap);
+        // The dashed box itself, so handles sit on what the user sees; hit-testing
+        // follows these points automatically.
+        let b = self.selection_box(dpi);
         (
             [
                 (AnnotationResizeHandle::TopLeft, (b.left, b.top)),
@@ -588,6 +677,31 @@ impl AnnotationObject {
             .iter()
             .find(|(_, (x, y))| (pt.0 - *x).abs() <= radius && (pt.1 - *y).abs() <= radius)
             .map(|(handle, _)| *handle)
+    }
+
+    /// How far the pointer is from the geometry the grip `handle` drags when it presses
+    /// the grip at `press`: a corner of the geometry (the grip itself sits outside it, past
+    /// the stroke and the gap) or an end of an arrow or line. A resize keeps this offset,
+    /// so the grabbed point follows the pointer without jumping.
+    pub fn resize_grab(&self, handle: AnnotationResizeHandle, press: (i32, i32)) -> (i32, i32) {
+        let bounds = self.geometry_bounds();
+        let anchor = match (&self.kind, handle) {
+            (
+                AnnotationKind::Arrow { start, .. } | AnnotationKind::Line { start, .. },
+                AnnotationResizeHandle::Start,
+            ) => *start,
+            (
+                AnnotationKind::Arrow { end, .. } | AnnotationKind::Line { end, .. },
+                AnnotationResizeHandle::End,
+            ) => *end,
+            (_, AnnotationResizeHandle::TopLeft) => (bounds.left, bounds.top),
+            (_, AnnotationResizeHandle::TopRight) => (bounds.right, bounds.top),
+            (_, AnnotationResizeHandle::BottomLeft) => (bounds.left, bounds.bottom),
+            (_, AnnotationResizeHandle::BottomRight) => (bounds.right, bounds.bottom),
+            // Only arrows and lines have end grips, and they are matched above.
+            (_, AnnotationResizeHandle::Start | AnnotationResizeHandle::End) => press,
+        };
+        (press.0 - anchor.0, press.1 - anchor.1)
     }
 
     fn resized_rect(
@@ -634,7 +748,29 @@ impl AnnotationObject {
             AnnotationResizeHandle::BottomRight => {
                 Rect::new(fixed_left, fixed_top, moving_right, moving_bottom)
             }
-            AnnotationResizeHandle::ArrowStart | AnnotationResizeHandle::ArrowEnd => source,
+            AnnotationResizeHandle::Start | AnnotationResizeHandle::End => source,
+        }
+    }
+
+    /// The ends of a segment after the grip `handle` was dragged to `cursor`; unchanged when
+    /// that would leave the ends within 3 px of each other on both axes.
+    fn resized_segment(
+        start: (i32, i32),
+        end: (i32, i32),
+        handle: AnnotationResizeHandle,
+        cursor: (i32, i32),
+    ) -> ((i32, i32), (i32, i32)) {
+        let (candidate_start, candidate_end) = match handle {
+            AnnotationResizeHandle::Start => (cursor, end),
+            AnnotationResizeHandle::End => (start, cursor),
+            _ => (start, end),
+        };
+        let long_enough = (candidate_end.0 - candidate_start.0).abs() >= 4
+            || (candidate_end.1 - candidate_start.1).abs() >= 4;
+        if long_enough {
+            (candidate_start, candidate_end)
+        } else {
+            (start, end)
         }
     }
 
@@ -659,6 +795,15 @@ impl AnnotationObject {
                 color: *color,
                 thickness: *thickness,
             },
+            AnnotationKind::Ellipse {
+                rect,
+                color,
+                thickness,
+            } => AnnotationKind::Ellipse {
+                rect: Self::resized_rect(*rect, handle, cursor, limit, 6),
+                color: *color,
+                thickness: *thickness,
+            },
             AnnotationKind::Redact { rect } => AnnotationKind::Redact {
                 rect: Self::resized_rect(*rect, handle, cursor, limit, 1),
             },
@@ -672,21 +817,24 @@ impl AnnotationObject {
                 color,
                 thickness,
             } => {
-                let (candidate_start, candidate_end) = match handle {
-                    AnnotationResizeHandle::ArrowStart => (cursor, *end),
-                    AnnotationResizeHandle::ArrowEnd => (*start, cursor),
-                    _ => (*start, *end),
-                };
-                let long_enough = (candidate_end.0 - candidate_start.0).abs() >= 4
-                    || (candidate_end.1 - candidate_start.1).abs() >= 4;
-                let (new_start, new_end) = if long_enough {
-                    (candidate_start, candidate_end)
-                } else {
-                    (*start, *end)
-                };
+                let (start, end) = Self::resized_segment(*start, *end, handle, cursor);
                 AnnotationKind::Arrow {
-                    start: new_start,
-                    end: new_end,
+                    start,
+                    end,
+                    color: *color,
+                    thickness: *thickness,
+                }
+            }
+            AnnotationKind::Line {
+                start,
+                end,
+                color,
+                thickness,
+            } => {
+                let (start, end) = Self::resized_segment(*start, *end, handle, cursor);
+                AnnotationKind::Line {
+                    start,
+                    end,
                     color: *color,
                     thickness: *thickness,
                 }
@@ -803,8 +951,10 @@ impl AnnotationObject {
     /// Updates the color of this annotation if applicable.
     pub fn set_color(&mut self, new_color: [u8; 4]) {
         match &mut self.kind {
-            AnnotationKind::Rectangle { color, .. } => *color = new_color,
-            AnnotationKind::Arrow { color, .. } => *color = new_color,
+            AnnotationKind::Rectangle { color, .. }
+            | AnnotationKind::Ellipse { color, .. }
+            | AnnotationKind::Arrow { color, .. }
+            | AnnotationKind::Line { color, .. } => *color = new_color,
             AnnotationKind::Pen { color, .. }
             | AnnotationKind::Highlight { color, .. }
             | AnnotationKind::Step { color, .. }
@@ -816,11 +966,12 @@ impl AnnotationObject {
     /// Updates the stroke thickness of this annotation if applicable.
     pub fn set_thickness(&mut self, new_thickness: i32) {
         match &mut self.kind {
-            AnnotationKind::Rectangle { thickness, .. } => *thickness = new_thickness,
-            AnnotationKind::Arrow { thickness, .. } => *thickness = new_thickness,
-            AnnotationKind::Pen { thickness, .. } | AnnotationKind::Highlight { thickness, .. } => {
-                *thickness = new_thickness
-            }
+            AnnotationKind::Rectangle { thickness, .. }
+            | AnnotationKind::Ellipse { thickness, .. }
+            | AnnotationKind::Arrow { thickness, .. }
+            | AnnotationKind::Line { thickness, .. }
+            | AnnotationKind::Pen { thickness, .. }
+            | AnnotationKind::Highlight { thickness, .. } => *thickness = new_thickness,
             AnnotationKind::Text { .. }
             | AnnotationKind::Step { .. }
             | AnnotationKind::Blur { .. }
@@ -832,7 +983,9 @@ impl AnnotationObject {
     pub fn get_color(&self) -> Option<[u8; 4]> {
         match &self.kind {
             AnnotationKind::Rectangle { color, .. }
+            | AnnotationKind::Ellipse { color, .. }
             | AnnotationKind::Arrow { color, .. }
+            | AnnotationKind::Line { color, .. }
             | AnnotationKind::Pen { color, .. }
             | AnnotationKind::Highlight { color, .. }
             | AnnotationKind::Step { color, .. }
@@ -845,7 +998,9 @@ impl AnnotationObject {
     pub fn get_thickness(&self) -> Option<i32> {
         match &self.kind {
             AnnotationKind::Rectangle { thickness, .. }
+            | AnnotationKind::Ellipse { thickness, .. }
             | AnnotationKind::Arrow { thickness, .. }
+            | AnnotationKind::Line { thickness, .. }
             | AnnotationKind::Pen { thickness, .. }
             | AnnotationKind::Highlight { thickness, .. } => Some(*thickness),
             AnnotationKind::Text { .. }
@@ -870,8 +1025,9 @@ impl AnnotationObject {
         }
     }
 
-    /// Renders vector shapes (Rectangle, Arrow, Pen, Text) onto `hdc`. Strokes are
-    /// anti-aliased through GDI+ when it is available and drawn with plain GDI otherwise.
+    /// Renders vector shapes (Rectangle, Ellipse, Arrow, Line, Pen, Text) onto `hdc`.
+    /// Strokes are anti-aliased through GDI+ when it is available and drawn with plain GDI
+    /// otherwise.
     pub fn render_gdi(&self, hdc: HDC) {
         self.render_gdi_with(hdc, true);
     }
@@ -889,6 +1045,16 @@ impl AnnotationObject {
                 }
                 plain_frame(hdc, *rect, *color, *thickness);
             }
+            AnnotationKind::Ellipse {
+                rect,
+                color,
+                thickness,
+            } => {
+                if anti_aliased && smooth::ellipse(hdc, *rect, *color, *thickness) {
+                    return;
+                }
+                plain_ellipse(hdc, *rect, *color, *thickness);
+            }
             AnnotationKind::Arrow {
                 start,
                 end,
@@ -903,6 +1069,12 @@ impl AnnotationObject {
                 }
                 plain_arrow(hdc, *start, *end, &arrow, *color, *thickness);
             }
+            AnnotationKind::Line {
+                start,
+                end,
+                color,
+                thickness,
+            } => draw_polyline(hdc, &[*start, *end], *color, *thickness, anti_aliased),
             AnnotationKind::Pen {
                 points,
                 color,
@@ -974,13 +1146,8 @@ impl AnnotationObject {
 
     /// Renders selection bounding indicators (dashed rectangle + corner handles) around this object.
     pub fn render_selection_indicator(&self, hdc: HDC, dpi: u32) {
-        // Same rect as resize_handle_points so handles sit on the dashed box the
-        // user sees; an arrow's box is its drawn extent, so it holds the head.
         let half = grip_half(dpi);
-        let b = match &self.kind {
-            AnnotationKind::Arrow { .. } => self.bounds().inflate(half, half),
-            _ => self.geometry_bounds().inflate(half, half),
-        };
+        let b = self.selection_box(dpi);
         crate::drawing::with_pen(hdc, PS_DOT, 1, crate::theme::BRAND_AMBER, || {
             with_stock_object(hdc, NULL_BRUSH, || unsafe {
                 let _ = GdiRectangle(hdc, b.left, b.top, b.right, b.bottom);
@@ -1176,6 +1343,19 @@ fn dist_to_segment(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
     let t = (((p.0 - a.0) * (b.0 - a.0) + (p.1 - a.1) * (b.1 - a.1)) / l2).clamp(0.0, 1.0);
     let proj = (a.0 + t * (b.0 - a.0), a.1 + t * (b.1 - a.1));
     ((p.0 - proj.0).powi(2) + (p.1 - proj.1).powi(2)).sqrt()
+}
+
+/// Whether `pt` lies inside the ellipse inscribed in `rect` once that is grown by `grow` px
+/// on every side (shrunk when negative). An ellipse shrunk to nothing holds no point.
+fn within_ellipse(rect: Rect, grow: i32, pt: (i32, i32)) -> bool {
+    let radius_x = (rect.right - rect.left) as f64 / 2.0 + grow as f64;
+    let radius_y = (rect.bottom - rect.top) as f64 / 2.0 + grow as f64;
+    if radius_x <= 0.0 || radius_y <= 0.0 {
+        return false;
+    }
+    let dx = pt.0 as f64 - (rect.left + rect.right) as f64 / 2.0;
+    let dy = pt.1 as f64 - (rect.top + rect.bottom) as f64 / 2.0;
+    (dx / radius_x).powi(2) + (dy / radius_y).powi(2) <= 1.0
 }
 
 /// Snaps a rectangle drag end point to form a 1:1 aspect ratio square.
@@ -1451,9 +1631,7 @@ impl HistoryManager {
 
 #[cfg(test)]
 mod tests {
-    use super::AnnotationResizeHandle::{
-        ArrowEnd, ArrowStart, BottomLeft, BottomRight, TopLeft, TopRight,
-    };
+    use super::AnnotationResizeHandle::{BottomLeft, BottomRight, End, Start, TopLeft, TopRight};
     use super::*;
 
     const COLOR: [u8; 4] = [49, 49, 224, 255];
@@ -1599,7 +1777,7 @@ mod tests {
             thickness: 2,
         };
         let mut object = AnnotationObject::new(1, arrow.clone());
-        object.resize_from(&arrow, AnnotationResizeHandle::ArrowEnd, (100, -5), limit);
+        object.resize_from(&arrow, AnnotationResizeHandle::End, (100, -5), limit);
         assert_eq!(object.kind, arrow_kind((5, 5), (20, 0), 2));
     }
 
@@ -2003,17 +2181,18 @@ mod tests {
             },
         );
         let top_left = |dpi| rectangle.resize_handle_points(dpi).0[0].1;
-        assert_eq!(top_left(96), (96, 96));
-        assert_eq!(top_left(192), (92, 92));
+        // The 1 px reach of the 2 px stroke plus the gap.
+        assert_eq!(top_left(96), (95, 95));
+        assert_eq!(top_left(192), (91, 91));
         // Never smaller than the 96-DPI size.
-        assert_eq!(top_left(48), (96, 96));
+        assert_eq!(top_left(48), (95, 95));
 
-        // Same pointer and radius: the grip sits at (92, 92) only at 192 DPI.
+        // Same pointer and radius: the grip sits at (91, 91) only at 192 DPI.
         assert_eq!(
-            rectangle.hit_resize_handle((92, 92), 3, 192),
+            rectangle.hit_resize_handle((91, 91), 3, 192),
             Some(AnnotationResizeHandle::TopLeft)
         );
-        assert_eq!(rectangle.hit_resize_handle((92, 92), 3, 96), None);
+        assert_eq!(rectangle.hit_resize_handle((91, 91), 3, 96), None);
     }
 
     #[test]
@@ -2398,23 +2577,38 @@ mod tests {
     #[test]
     fn each_kind_offers_its_own_resize_grips() {
         let rectangle = object(rectangle_kind(Rect::new(100, 100, 200, 200), 2));
-        // The grips sit on the corners of the bounds grown by the 4 px gap.
-        for (point, handle) in [
-            ((96, 96), TopLeft),
-            ((204, 96), TopRight),
-            ((96, 204), BottomLeft),
-            ((204, 204), BottomRight),
-        ] {
-            assert_eq!(rectangle.hit_resize_handle(point, 3, 96), Some(handle));
+        // The grips sit on the corners of the bounds grown by the 1 px reach of the 2 px
+        // stroke and the 4 px gap; an ellipse has the same four.
+        let ellipse = object(AnnotationKind::Ellipse {
+            rect: Rect::new(100, 100, 200, 200),
+            color: COLOR,
+            thickness: 2,
+        });
+        for shape in [&rectangle, &ellipse] {
+            for (point, handle) in [
+                ((95, 95), TopLeft),
+                ((205, 95), TopRight),
+                ((95, 205), BottomLeft),
+                ((205, 205), BottomRight),
+            ] {
+                assert_eq!(shape.hit_resize_handle(point, 3, 96), Some(handle));
+            }
+            assert_eq!(shape.hit_resize_handle((150, 150), 3, 96), None);
         }
-        assert_eq!(rectangle.hit_resize_handle((150, 150), 3, 96), None);
 
-        // An arrow is resized by its two ends only.
-        let arrow = object(arrow_kind((10, 10), (60, 40), 2));
-        assert_eq!(arrow.hit_resize_handle((11, 9), 3, 96), Some(ArrowStart));
-        assert_eq!(arrow.hit_resize_handle((62, 41), 3, 96), Some(ArrowEnd));
-        assert_eq!(arrow.hit_resize_handle((35, 25), 3, 96), None);
-        assert_eq!(arrow.hit_resize_handle((6, 6), 3, 96), None);
+        // An arrow or a line is resized by its two ends only.
+        let line = object(AnnotationKind::Line {
+            start: (10, 10),
+            end: (60, 40),
+            color: COLOR,
+            thickness: 2,
+        });
+        for segment in [object(arrow_kind((10, 10), (60, 40), 2)), line] {
+            assert_eq!(segment.hit_resize_handle((11, 9), 3, 96), Some(Start));
+            assert_eq!(segment.hit_resize_handle((62, 41), 3, 96), Some(End));
+            assert_eq!(segment.hit_resize_handle((35, 25), 3, 96), None);
+            assert_eq!(segment.hit_resize_handle((6, 6), 3, 96), None);
+        }
 
         // A step badge cannot be resized.
         let step = object(step_kind((50, 60), 14));
@@ -2435,8 +2629,8 @@ mod tests {
             // Dragged past the fixed corner: a redaction stays one pixel wide.
             (BottomRight, (0, 0), Rect::new(10, 10, 11, 11)),
             // Arrow ends do not apply to a rectangle.
-            (ArrowStart, (50, 50), source),
-            (ArrowEnd, (50, 50), source),
+            (Start, (50, 50), source),
+            (End, (50, 50), source),
         ] {
             let original = redact_kind(source);
             let mut redaction = object(original.clone());
@@ -2464,12 +2658,12 @@ mod tests {
         let limit = Rect::new(0, 0, 100, 100);
         let original = arrow_kind((5, 5), (50, 50), 2);
         for (handle, cursor, start, end) in [
-            (ArrowStart, (20, 10), (20, 10), (50, 50)),
+            (Start, (20, 10), (20, 10), (50, 50)),
             // Less than 4 px of length on both axes: the arrow stays as it was.
-            (ArrowEnd, (7, 7), (5, 5), (50, 50)),
+            (End, (7, 7), (5, 5), (50, 50)),
             // 4 px along either axis is long enough.
-            (ArrowEnd, (5, 9), (5, 5), (5, 9)),
-            (ArrowEnd, (9, 5), (5, 5), (9, 5)),
+            (End, (5, 9), (5, 5), (5, 9)),
+            (End, (9, 5), (5, 5), (9, 5)),
             // Corner grips do not apply to an arrow.
             (TopLeft, (60, 60), (5, 5), (50, 50)),
         ] {
@@ -2481,6 +2675,237 @@ mod tests {
                 "{handle:?} {cursor:?}"
             );
         }
+    }
+
+    fn ellipse_kind(rect: Rect, thickness: i32) -> AnnotationKind {
+        AnnotationKind::Ellipse {
+            rect,
+            color: COLOR,
+            thickness,
+        }
+    }
+
+    fn line_kind(start: (i32, i32), end: (i32, i32), thickness: i32) -> AnnotationKind {
+        AnnotationKind::Line {
+            start,
+            end,
+            color: COLOR,
+            thickness,
+        }
+    }
+
+    #[test]
+    fn line_resize_moves_one_end_clamps_and_ignores_collapsing_drags() {
+        let limit = Rect::new(0, 0, 100, 100);
+        let original = line_kind((5, 5), (50, 50), 2);
+        for (handle, cursor, start, end) in [
+            (Start, (20, 10), (20, 10), (50, 50)),
+            (End, (500, -5), (5, 5), (100, 0)),
+            (End, (7, 7), (5, 5), (50, 50)),
+            (End, (9, 5), (5, 5), (9, 5)),
+            (TopLeft, (60, 60), (5, 5), (50, 50)),
+        ] {
+            let mut line = object(original.clone());
+            line.resize_from(&original, handle, cursor, limit);
+            assert_eq!(line.kind, line_kind(start, end, 2), "{handle:?} {cursor:?}");
+        }
+    }
+
+    #[test]
+    fn ellipse_resize_moves_the_dragged_corner_and_keeps_six_pixels() {
+        let limit = Rect::new(0, 0, 100, 100);
+        let source = Rect::new(10, 10, 20, 20);
+        let original = ellipse_kind(source, 3);
+        for (handle, cursor, expected) in [
+            (TopLeft, (5, 5), Rect::new(5, 5, 20, 20)),
+            (TopRight, (40, 5), Rect::new(10, 5, 40, 20)),
+            (BottomLeft, (5, 40), Rect::new(5, 10, 20, 40)),
+            (BottomRight, (40, 50), Rect::new(10, 10, 40, 50)),
+            (BottomRight, (11, 11), Rect::new(10, 10, 16, 16)),
+            (Start, (50, 50), source),
+        ] {
+            let mut ellipse = object(original.clone());
+            ellipse.resize_from(&original, handle, cursor, limit);
+            assert_eq!(
+                ellipse.kind,
+                ellipse_kind(expected, 3),
+                "{handle:?} {cursor:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_resize_drag_keeps_the_pointer_offset_from_the_geometry_it_grabbed() {
+        let limit = Rect::new(0, 0, 400, 400);
+        for (kind, handle, grip) in [
+            (
+                rectangle_kind(Rect::new(100, 100, 200, 200), 12),
+                TopLeft,
+                (90, 90),
+            ),
+            (
+                ellipse_kind(Rect::new(100, 100, 200, 200), 12),
+                BottomRight,
+                (210, 210),
+            ),
+            (
+                pen_kind(&[(100, 100), (200, 200)], 7),
+                BottomLeft,
+                (92, 208),
+            ),
+        ] {
+            let mut dragged = object(kind.clone());
+            // Pressing 2 px inside the grip: the grab offset is relative to the corner.
+            let press = (grip.0 + 2, grip.1 - 2);
+            let grab = dragged.resize_grab(handle, press);
+            let corner = (press.0 - grab.0, press.1 - grab.1);
+            // Pointer moves by (+7, +5): the corner follows by exactly that much.
+            let pointer = (press.0 + 7, press.1 + 5);
+            dragged.resize_from(
+                &kind,
+                handle,
+                (pointer.0 - grab.0, pointer.1 - grab.1),
+                limit,
+            );
+            let before = object(kind.clone()).geometry_bounds();
+            let after = dragged.geometry_bounds();
+            let (moved, anchor) = match handle {
+                TopLeft => (
+                    (after.left - before.left, after.top - before.top),
+                    (before.left, before.top),
+                ),
+                BottomRight => (
+                    (after.right - before.right, after.bottom - before.bottom),
+                    (before.right, before.bottom),
+                ),
+                _ => (
+                    (after.left - before.left, after.bottom - before.bottom),
+                    (before.left, before.bottom),
+                ),
+            };
+            assert_eq!(moved, (7, 5), "{kind:?}");
+            assert_eq!(corner, anchor, "{kind:?}");
+        }
+        // Arrow and line grips grab the end point itself.
+        for kind in [
+            arrow_kind((10, 10), (60, 40), 2),
+            line_kind((10, 10), (60, 40), 2),
+        ] {
+            let segment = object(kind);
+            assert_eq!(segment.resize_grab(Start, (12, 9)), (2, -1));
+            assert_eq!(segment.resize_grab(End, (58, 43)), (-2, 3));
+        }
+        // A grip the kind does not have grabs nothing.
+        assert_eq!(
+            object(rectangle_kind(Rect::new(0, 0, 10, 10), 2)).resize_grab(Start, (5, 5)),
+            (0, 0)
+        );
+        assert_eq!(
+            object(rectangle_kind(Rect::new(0, 0, 10, 10), 2)).resize_grab(TopRight, (13, -4)),
+            (3, -4)
+        );
+    }
+
+    #[test]
+    fn the_selection_box_clears_the_stroke_of_every_kind_by_the_gap() {
+        let rect = Rect::new(100, 100, 200, 180);
+        // (kind, reach of the stroke beyond the geometry)
+        for (kind, reach) in [
+            (rectangle_kind(rect, 12), 6),
+            (rectangle_kind(rect, 5), 3),
+            (ellipse_kind(rect, 12), 6),
+            (pen_kind(&[(100, 100), (200, 180)], 9), 5),
+            (highlight_kind(&[(100, 100), (200, 180)], 6), 12),
+            (blur_kind(rect), 0),
+        ] {
+            let shape = object(kind.clone());
+            for (dpi, gap) in [(96, 4), (192, 8)] {
+                let expected = shape.geometry_bounds().inflate(reach + gap, reach + gap);
+                assert_eq!(shape.selection_box(dpi), expected, "{kind:?} dpi {dpi}");
+            }
+        }
+        // An arrow or line is boxed by its drawn extent.
+        for kind in [
+            arrow_kind((10, 10), (90, 40), 8),
+            line_kind((10, 10), (90, 40), 8),
+        ] {
+            let segment = object(kind);
+            assert_eq!(segment.selection_box(96), segment.bounds().inflate(4, 4));
+        }
+        let step = object(step_kind((50, 60), 14));
+        assert_eq!(step.selection_box(96), step.bounds().inflate(4, 4));
+    }
+
+    #[test]
+    fn ellipse_hits_follow_the_outline_and_the_interior_separately() {
+        let ellipse = object(ellipse_kind(Rect::new(100, 100, 300, 200), 2));
+        // Band: 6 px either side of the outline. Centre, left and top vertices:
+        assert!(ellipse.hit_test_stroke((100, 150)));
+        assert!(ellipse.hit_test_stroke((200, 100)));
+        assert!(ellipse.hit_test_stroke((200, 203)));
+        assert!(ellipse.hit_test_stroke((97, 150)));
+        // Inside the band's inner edge and outside its outer edge.
+        assert!(!ellipse.hit_test_stroke((200, 150)));
+        assert!(!ellipse.hit_test_stroke((250, 150)));
+        assert!(!ellipse.hit_test_stroke((90, 150)));
+        // The corner of the bounding box is not on the ellipse.
+        assert!(!ellipse.hit_test_stroke((102, 102)));
+        assert!(!ellipse.hit_test((102, 102)));
+        // `hit_test` counts the whole interior.
+        assert!(ellipse.hit_test((200, 150)));
+        assert!(ellipse.hit_test((100, 150)));
+        assert!(!ellipse.hit_test((50, 50)));
+        // An ellipse thinner than its band is all outline.
+        let sliver = object(ellipse_kind(Rect::new(10, 10, 14, 40), 2));
+        assert!(sliver.hit_test_stroke((12, 25)));
+        // A wide pen widens the band.
+        let thick = object(ellipse_kind(Rect::new(100, 100, 300, 200), 20));
+        assert!(thick.hit_test_stroke((100 - 18, 150)));
+        assert!(!thick.hit_test_stroke((200, 150)));
+    }
+
+    #[test]
+    fn lines_hit_by_distance_to_the_segment_and_bound_the_stroke() {
+        let line = object(line_kind((100, 100), (200, 100), 3));
+        // Tolerance is thickness + 6 px, at least 8.
+        assert!(line.hit_test((150, 100)));
+        assert!(line.hit_test((150, 109)));
+        assert!(!line.hit_test((150, 110)));
+        assert!(line.hit_test((92, 100)));
+        assert!(!line.hit_test((90, 100)));
+        assert_eq!(line.hit_test_stroke((150, 109)), line.hit_test((150, 109)));
+        // Box grown by half the stroke and a pixel of anti-aliasing.
+        assert_eq!(line.bounds(), Rect::new(97, 97, 203, 103));
+        assert_eq!(line.geometry_bounds(), Rect::new(100, 100, 200, 100));
+    }
+
+    #[test]
+    fn ellipses_and_lines_move_recolor_and_restyle_like_the_other_strokes() {
+        let new_color = [1, 2, 3, 255];
+        let mut ellipse = object(ellipse_kind(Rect::new(10, 20, 50, 60), 3));
+        ellipse.translate(5, -3);
+        ellipse.set_color(new_color);
+        ellipse.set_thickness(9);
+        assert_eq!(ellipse.get_color(), Some(new_color));
+        assert_eq!(ellipse.get_thickness(), Some(9));
+        assert_eq!(ellipse.geometry_bounds(), Rect::new(15, 17, 55, 57));
+        assert_eq!(ellipse.bounds(), Rect::new(6, 8, 64, 66));
+
+        let mut line = object(line_kind((10, 20), (50, 60), 3));
+        line.translate(5, -3);
+        line.set_color(new_color);
+        line.set_thickness(9);
+        assert_eq!(line.get_color(), Some(new_color));
+        assert_eq!(line.get_thickness(), Some(9));
+        assert_eq!(
+            line.kind,
+            AnnotationKind::Line {
+                start: (15, 17),
+                end: (55, 57),
+                color: new_color,
+                thickness: 9,
+            }
+        );
     }
 
     #[test]

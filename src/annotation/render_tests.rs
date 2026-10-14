@@ -524,8 +524,10 @@ fn a_rectangle_selection_gets_a_dashed_box_and_four_corner_grips() {
     let object = rectangle(Rect::new(30, 30, 90, 70), 2);
     for (dpi, half) in [(96, 4), (192, 8)] {
         let canvas = drawn(140, 120, |dc| object.render_selection_indicator(dc, dpi));
-        // The box is the geometry grown by the gap, which is also the grip radius.
-        let (left, top, right, bottom) = (30 - half, 30 - half, 90 + half, 70 + half);
+        // The box is the geometry grown by the 1 px reach of the 2 px stroke and the gap,
+        // which is also the grip radius.
+        let margin = half + 1;
+        let (left, top, right, bottom) = (30 - margin, 30 - margin, 90 + margin, 70 + margin);
         // Each grip: a white square (side 2 * half) with an amber outline.
         for ((cx, cy), outside) in [
             ((left, top), (left - half - 1, top)),
@@ -615,6 +617,11 @@ fn without_anti_aliasing_strokes_use_plain_gdi_only() {
     assert!(!stroke.changed().is_empty());
     assert_eq!(stroke.pixels(), primitive.pixels());
 
+    let outline = drawn(60, 50, |dc| ellipse(rect, 3).render_gdi_with(dc, false));
+    let primitive = drawn(60, 50, |dc| plain_ellipse(dc, rect, COLOR, 3));
+    assert!(!outline.changed().is_empty());
+    assert_eq!(outline.pixels(), primitive.pixels());
+
     // Too short to draw in either mode.
     let nothing = drawn(40, 40, |dc| {
         arrow((20, 20), (21, 21), 3).render_gdi_with(dc, false);
@@ -631,6 +638,280 @@ fn a_sliver_frame_falls_back_to_plain_gdi() {
     let plain = drawn(60, 50, |dc| plain_frame(dc, sliver, COLOR, 2));
     assert!(!rendered.changed().is_empty());
     assert_eq!(rendered.pixels(), plain.pixels());
+}
+
+fn ellipse(rect: Rect, thickness: i32) -> AnnotationObject {
+    AnnotationObject::new(
+        1,
+        AnnotationKind::Ellipse {
+            rect,
+            color: COLOR,
+            thickness,
+        },
+    )
+}
+
+fn line(start: (i32, i32), end: (i32, i32), thickness: i32) -> AnnotationObject {
+    AnnotationObject::new(
+        1,
+        AnnotationKind::Line {
+            start,
+            end,
+            color: COLOR,
+            thickness,
+        },
+    )
+}
+
+/// The smallest rectangle holding every pixel in `changed`.
+fn extent(changed: &[(i32, i32)]) -> Rect {
+    changed.iter().fold(
+        Rect::new(
+            changed[0].0,
+            changed[0].1,
+            changed[0].0 + 1,
+            changed[0].1 + 1,
+        ),
+        |extent, &(x, y)| extent.union(&Rect::new(x, y, x + 1, y + 1)),
+    )
+}
+
+fn holds(outer: Rect, inner: Rect) -> bool {
+    outer.left <= inner.left
+        && outer.top <= inner.top
+        && outer.right >= inner.right
+        && outer.bottom >= inner.bottom
+}
+
+#[test]
+fn ellipses_are_anti_aliased_outlines_inscribed_in_their_rectangle() {
+    let rect = Rect::new(10, 12, 50, 38);
+    let smooth = drawn(60, 50, |dc| {
+        assert!(smooth::ellipse(dc, rect, COLOR, 3));
+    });
+    let plain = drawn(60, 50, |dc| plain_ellipse(dc, rect, COLOR, 3));
+    let rendered = drawn(60, 50, |dc| ellipse(rect, 3).render_gdi(dc));
+    assert_eq!(rendered.pixels(), smooth.pixels());
+
+    for canvas in [&smooth, &plain] {
+        let changed = canvas.changed();
+        assert!(!changed.is_empty());
+        assert!(
+            holds(rect.inflate(2, 2), extent(&changed)),
+            "{:?}",
+            extent(&changed)
+        );
+        assert!(holds(ellipse(rect, 3).bounds(), extent(&changed)));
+        assert!(canvas.count(INK) > 0);
+        // Hollow: the centre and the corners of the rectangle stay untouched.
+        for point in [(30, 25), (12, 14), (48, 36)] {
+            assert_eq!(canvas.pixel(point.0, point.1), BACKGROUND, "{point:?}");
+        }
+    }
+    // The outline is solid at the vertices and blends on the curve.
+    assert_eq!(smooth.pixel(10, 25), INK);
+    assert_eq!(smooth.pixel(30, 12), INK);
+    assert!(
+        smooth
+            .changed()
+            .iter()
+            .any(|&(x, y)| smooth.pixel(x, y) != INK),
+        "the curve is anti-aliased"
+    );
+    // It is not the frame of the same rectangle.
+    let frame = drawn(60, 50, |dc| rectangle(rect, 3).render_gdi(dc));
+    assert_ne!(smooth.pixels(), frame.pixels());
+}
+
+#[test]
+fn ellipses_fall_back_to_plain_gdi_when_smoothing_is_off_or_declined() {
+    let rect = Rect::new(10, 12, 50, 38);
+    let plain = drawn(60, 50, |dc| plain_ellipse(dc, rect, COLOR, 3));
+    let rendered = drawn(60, 50, |dc| ellipse(rect, 3).render_gdi_with(dc, false));
+    assert!(!rendered.changed().is_empty());
+    assert_eq!(rendered.pixels(), plain.pixels());
+
+    let canvas = Canvas::new(60, 50);
+    assert!(!smooth::ellipse(
+        canvas.dc,
+        Rect::new(10, 10, 11, 30),
+        COLOR,
+        2
+    ));
+    assert!(!smooth::ellipse(
+        canvas.dc,
+        Rect::new(10, 10, 30, 11),
+        COLOR,
+        2
+    ));
+    assert!(!smooth::ellipse(bogus_dc(), rect, COLOR, 2));
+    assert!(canvas.changed().is_empty());
+    // A sliver is declined by GDI+ and still drawn by plain GDI.
+    let sliver = Rect::new(20, 10, 21, 30);
+    let rendered = drawn(60, 50, |dc| ellipse(sliver, 2).render_gdi(dc));
+    let plain = drawn(60, 50, |dc| plain_ellipse(dc, sliver, COLOR, 2));
+    assert_eq!(rendered.pixels(), plain.pixels());
+}
+
+#[test]
+fn lines_are_round_capped_strokes_in_both_renderers() {
+    let (start, end, thickness) = ((10, 30), (60, 30), 3);
+    let smooth = drawn(80, 60, |dc| line(start, end, thickness).render_gdi(dc));
+    let direct = drawn(80, 60, |dc| {
+        assert!(smooth::polyline(dc, &[start, end], COLOR, thickness));
+    });
+    assert_eq!(smooth.pixels(), direct.pixels());
+    let plain = drawn(80, 60, |dc| {
+        line(start, end, thickness).render_gdi_with(dc, false);
+    });
+    let primitive = drawn(80, 60, |dc| {
+        plain_polyline(dc, &[start, end], COLOR, thickness)
+    });
+    assert_eq!(plain.pixels(), primitive.pixels());
+
+    for canvas in [&smooth, &plain] {
+        // Three rows thick along the run, covered at both ends.
+        for point in [(35, 29), (35, 30), (35, 31), (10, 30), (60, 30)] {
+            assert_eq!(canvas.pixel(point.0, point.1), INK, "{point:?}");
+        }
+        for point in [(35, 28), (35, 32), (5, 30), (66, 30)] {
+            assert_eq!(canvas.pixel(point.0, point.1), BACKGROUND, "{point:?}");
+        }
+    }
+}
+
+#[test]
+fn a_diagonal_line_stays_inside_its_bounds_and_only_smooth_lines_blend() {
+    let object = line((10, 10), (50, 40), 3);
+    let smooth = drawn(70, 60, |dc| object.render_gdi(dc));
+    let plain = drawn(70, 60, |dc| object.render_gdi_with(dc, false));
+    for canvas in [&smooth, &plain] {
+        let changed = canvas.changed();
+        assert!(canvas.count(INK) > 0);
+        assert!(
+            holds(object.bounds(), extent(&changed)),
+            "{:?}",
+            extent(&changed)
+        );
+    }
+    assert!(
+        smooth
+            .changed()
+            .iter()
+            .any(|&(x, y)| smooth.pixel(x, y) != INK)
+    );
+    assert!(
+        plain
+            .changed()
+            .iter()
+            .all(|&(x, y)| plain.pixel(x, y) == INK)
+    );
+}
+
+#[test]
+fn the_selection_box_encloses_every_pixel_of_a_thick_stroke() {
+    let rect = Rect::new(40, 40, 120, 90);
+    let points = [(40, 40), (120, 90), (60, 85)];
+    let objects = [
+        rectangle(rect, 14),
+        rectangle(rect, 5),
+        ellipse(rect, 14),
+        ellipse(rect, 6),
+        pen(&points, 15),
+        pen(&points, 4),
+        line((40, 40), (120, 90), 13),
+    ];
+    for dpi in [96, 192] {
+        let gap = grip_half(dpi);
+        for object in &objects {
+            let canvas = drawn(200, 160, |dc| object.render_gdi(dc));
+            let stroke = extent(&canvas.changed());
+            let selection = object.selection_box(dpi);
+            // The dashed line, one pixel inside the box, clears the stroke by the gap.
+            assert!(
+                holds(selection, stroke.inflate(gap - 1, gap - 1)),
+                "dpi {dpi}: stroke {stroke:?} box {selection:?} {:?}",
+                object.kind
+            );
+            // ... and the box hugs the stroke instead of floating away from it.
+            assert!(
+                holds(stroke.inflate(gap + 3, gap + 3), selection),
+                "dpi {dpi}: stroke {stroke:?} box {selection:?} {:?}",
+                object.kind
+            );
+        }
+    }
+}
+
+#[test]
+fn the_selection_box_encloses_every_pixel_of_a_thick_highlight() {
+    let points = [(60, 60), (140, 100)];
+    for thickness in [3, 6] {
+        let mut pixels = [BACKGROUND[0], BACKGROUND[1], BACKGROUND[2], 255].repeat(200 * 160);
+        render_highlight(&mut pixels, 200, 160, &points, COLOR, thickness);
+        let changed: Vec<(i32, i32)> = (0..160)
+            .flat_map(|y| (0..200).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                let offset = (y * 200 + x) as usize * 4;
+                pixels[offset..offset + 3] != BACKGROUND
+            })
+            .collect();
+        let stroke = extent(&changed);
+        let marker = AnnotationObject::new(
+            1,
+            AnnotationKind::Highlight {
+                points: points.to_vec(),
+                color: COLOR,
+                thickness,
+            },
+        );
+        for dpi in [96, 192] {
+            let gap = grip_half(dpi);
+            let selection = marker.selection_box(dpi);
+            assert!(
+                holds(selection, stroke.inflate(gap - 1, gap - 1)),
+                "{thickness}"
+            );
+            assert!(
+                holds(stroke.inflate(gap + 3, gap + 3), selection),
+                "{thickness}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_grips_of_a_thick_stroke_sit_on_the_corners_of_its_dashed_box() {
+    let rect = Rect::new(60, 60, 140, 110);
+    for object in [
+        rectangle(rect, 14),
+        ellipse(rect, 14),
+        pen(&[(60, 60), (140, 110)], 11),
+    ] {
+        for dpi in [96, 192] {
+            let selection = object.selection_box(dpi);
+            let (grips, count) = object.resize_handle_points(dpi);
+            assert_eq!(count, 4);
+            assert_eq!(
+                grips.map(|(_, point)| point),
+                [
+                    (selection.left, selection.top),
+                    (selection.right, selection.top),
+                    (selection.left, selection.bottom),
+                    (selection.right, selection.bottom),
+                ]
+            );
+            let canvas = drawn(220, 190, |dc| object.render_selection_indicator(dc, dpi));
+            let half = grip_half(dpi);
+            for (x, y) in [
+                (selection.left, selection.top),
+                (selection.right, selection.bottom),
+            ] {
+                assert_eq!(canvas.pixel(x, y), WHITE, "dpi {dpi} ({x}, {y})");
+                assert_eq!(canvas.pixel(x - half, y), AMBER, "dpi {dpi} ({x}, {y})");
+            }
+        }
+    }
 }
 
 #[test]
