@@ -8,10 +8,11 @@ use std::cell::RefCell;
 use windows::Win32::Graphics::Gdi::HDC;
 use windows::Win32::Graphics::GdiPlus::{
     FillModeAlternate, GdipCreateFromHDC, GdipCreatePen1, GdipCreateSolidFill, GdipDeleteBrush,
-    GdipDeleteGraphics, GdipDeletePen, GdipDrawLines, GdipDrawRectangle, GdipFillPolygon,
-    GdipSetPenEndCap, GdipSetPenLineJoin, GdipSetPenStartCap, GdipSetPixelOffsetMode,
-    GdipSetSmoothingMode, GpGraphics, GpPen, GpSolidFill, LineCapRound, LineJoinRound,
-    Ok as StatusOk, PixelOffsetModeHalf, PointF, SmoothingModeAntiAlias8x8, Status, UnitPixel,
+    GdipDeleteGraphics, GdipDeletePen, GdipDrawEllipse, GdipDrawLines, GdipDrawRectangle,
+    GdipFillPolygon, GdipSetPenEndCap, GdipSetPenLineJoin, GdipSetPenStartCap,
+    GdipSetPixelOffsetMode, GdipSetSmoothingMode, GpGraphics, GpPen, GpSolidFill, LineCapRound,
+    LineJoinRound, Ok as StatusOk, PixelOffsetModeHalf, PointF, SmoothingModeAntiAlias8x8, Status,
+    UnitPixel,
 };
 
 /// `Some(())` when a GDI+ call succeeded, so a chain of calls stops at the first failure.
@@ -137,6 +138,22 @@ fn draw_frame(hdc: HDC, rect: Rect, color: [u8; 4], thickness: i32) -> Option<()
     let pen = Pen::new(color, thickness, false)?;
     let (x, y, width, height) = frame_outline(rect, thickness);
     ok(unsafe { GdipDrawRectangle(graphics.0, pen.0, x, y, width, height) })
+}
+
+/// Hollow ellipse inscribed in the path `frame` strokes for `rect`.
+pub(super) fn ellipse(hdc: HDC, rect: Rect, color: [u8; 4], thickness: i32) -> bool {
+    // Same gate as `frame`: GDI draws nothing for an empty rectangle.
+    if rect.width() < 2 || rect.height() < 2 {
+        return false;
+    }
+    draw_ellipse(hdc, rect, color, thickness).is_some()
+}
+
+fn draw_ellipse(hdc: HDC, rect: Rect, color: [u8; 4], thickness: i32) -> Option<()> {
+    let graphics = Graphics::new(hdc)?;
+    let pen = Pen::new(color, thickness, false)?;
+    let (x, y, width, height) = frame_outline(rect, thickness);
+    ok(unsafe { GdipDrawEllipse(graphics.0, pen.0, x, y, width, height) })
 }
 
 /// Freehand stroke through every input point, with round caps and joins.
