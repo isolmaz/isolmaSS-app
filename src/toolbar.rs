@@ -15,6 +15,13 @@ pub enum ToolbarAction {
     Save,
     Copy,
     Upload,
+    /// Listed in the command menu and bound to Ctrl+T only; the toolbar has no button for it.
+    Pin,
+    /// Copies the text of the selection. It and `RedactSensitive` have no toolbar button
+    /// either; the command menu lists them after Pin and Ctrl+Shift+C / Ctrl+Shift+R run them.
+    CopyText,
+    /// Covers the e-mail addresses and phone numbers of the selection.
+    RedactSensitive,
     Settings,
     Cancel,
 }
@@ -46,6 +53,8 @@ pub enum ToolbarItem {
     Thickness,
     /// One value row of the open line-width wheel.
     ThicknessOption(i32),
+    /// Toggles the filled box behind text.
+    TextBackground,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +115,7 @@ impl Toolbar {
         can_undo: bool,
         can_redo: bool,
         dpi: u32,
+        text_background: Option<bool>,
     ) -> Self {
         let scale = |value: i32| value * dpi as i32 / 96;
         let outer_pad = scale(Self::OUTER_PAD);
@@ -146,6 +156,10 @@ impl Toolbar {
             0
         } + if show_thickness {
             thickness_width + section_gap
+        } else {
+            0
+        } + if text_background.is_some() {
+            action_button + section_gap
         } else {
             0
         };
@@ -328,6 +342,15 @@ impl Toolbar {
                 is_checked: thickness_open,
             });
             x += thickness_width + section_gap;
+        }
+        if let Some(on) = text_background {
+            buttons.push(ToolbarButton {
+                item: ToolbarItem::TextBackground,
+                rect: Rect::new(x, item_y, x + action_button, item_y + action_button),
+                is_enabled: true,
+                is_checked: on,
+            });
+            x += action_button + section_gap;
         }
         for action in [
             ToolbarAction::Save,
@@ -536,6 +559,7 @@ impl Toolbar {
                         | ToolbarItem::MoreTools
                         | ToolbarItem::Thickness
                         | ToolbarItem::ThicknessOption(_)
+                        | ToolbarItem::TextBackground
                 );
             let primary = button.item == ToolbarItem::Action(ToolbarAction::Copy);
             // Hover and press stay neutral so they never read as a second selection;
@@ -634,6 +658,30 @@ impl Toolbar {
                         true,
                     );
                 }
+                ToolbarItem::TextBackground => {
+                    // A letter in a box: the box is filled, and the letter takes the
+                    // button's fill, while the background is on.
+                    let side = scale(18);
+                    let left = (button.rect.left + button.rect.right - side) / 2;
+                    let top = (button.rect.top + button.rect.bottom - side) / 2;
+                    let square = Rect::new(left, top, left + side, top + side);
+                    let on = button.is_checked;
+                    rounded(
+                        hdc,
+                        square,
+                        corner(RADIUS_CONTROL),
+                        if on { ink } else { fill },
+                        ink,
+                    );
+                    label(
+                        hdc,
+                        square,
+                        "A",
+                        scale(12),
+                        if on { fill } else { ink },
+                        true,
+                    );
+                }
                 ToolbarItem::Tool(tool) => {
                     draw_tool_icon(hdc, button.rect, tool, ink, card, self.dpi)
                 }
@@ -654,6 +702,9 @@ impl Toolbar {
                         ToolbarAction::Save => 0xe74e,
                         ToolbarAction::Copy => 0xe8c8,
                         ToolbarAction::Upload => 0xe753,
+                        ToolbarAction::Pin => 0xe718,
+                        ToolbarAction::CopyText => 0xe8d2,
+                        ToolbarAction::RedactSensitive => 0xe73b,
                         ToolbarAction::Settings => 0xe713,
                         ToolbarAction::Cancel => 0xe711,
                     };
@@ -684,10 +735,16 @@ impl Toolbar {
                 ToolbarItem::Action(ToolbarAction::Save) => crate::i18n::t("Save"),
                 ToolbarItem::Action(ToolbarAction::Copy) => crate::i18n::t("Copy"),
                 ToolbarItem::Action(ToolbarAction::Upload) => crate::i18n::t("Upload"),
+                ToolbarItem::Action(ToolbarAction::Pin) => crate::i18n::t("Pin to screen"),
+                ToolbarItem::Action(ToolbarAction::CopyText) => crate::i18n::t("Copy text"),
+                ToolbarItem::Action(ToolbarAction::RedactSensitive) => {
+                    crate::i18n::t("Redact emails and phone numbers")
+                }
                 ToolbarItem::Action(ToolbarAction::Settings) => crate::i18n::t("Settings"),
                 ToolbarItem::Action(ToolbarAction::Cancel) => crate::i18n::t("Cancel"),
                 ToolbarItem::Color => crate::i18n::t("Color"),
                 ToolbarItem::Thickness => crate::i18n::t("Line width"),
+                ToolbarItem::TextBackground => crate::i18n::t("Text background"),
                 // The wheel rows already show their value.
                 ToolbarItem::ThicknessOption(_) => return,
             };
@@ -798,8 +855,12 @@ fn shortcut(item: ToolbarItem) -> Option<&'static str> {
         ToolbarItem::Action(ToolbarAction::Save) => "Ctrl+S",
         ToolbarItem::Action(ToolbarAction::Copy) => "Ctrl+C",
         ToolbarItem::Action(ToolbarAction::Upload) => "Ctrl+U",
+        ToolbarItem::Action(ToolbarAction::Pin) => "Ctrl+T",
+        ToolbarItem::Action(ToolbarAction::CopyText) => "Ctrl+Shift+C",
+        ToolbarItem::Action(ToolbarAction::RedactSensitive) => "Ctrl+Shift+R",
         ToolbarItem::Action(ToolbarAction::Settings) => "Ctrl+,",
         ToolbarItem::Action(ToolbarAction::Cancel) => "Esc",
+        ToolbarItem::TextBackground => "Ctrl+B",
         ToolbarItem::MoreTools
         | ToolbarItem::Color
         | ToolbarItem::Thickness
@@ -918,6 +979,7 @@ fn build_command_menu(buttons: &[ToolbarButton]) -> windows::core::Result<Option
                 crate::i18n::t("History")
             }
             ToolbarItem::Color => crate::i18n::t("Color"),
+            ToolbarItem::TextBackground => crate::i18n::t("Text"),
             ToolbarItem::Thickness | ToolbarItem::ThicknessOption(_) => {
                 crate::i18n::t("Line width")
             }
@@ -952,10 +1014,16 @@ fn build_command_menu(buttons: &[ToolbarButton]) -> windows::core::Result<Option
             ToolbarItem::Action(ToolbarAction::Upload) => {
                 crate::i18n::t("Upload and copy link").to_owned()
             }
+            ToolbarItem::Action(ToolbarAction::Pin) => crate::i18n::t("Pin to screen").to_owned(),
+            ToolbarItem::Action(ToolbarAction::CopyText) => crate::i18n::t("Copy text").to_owned(),
+            ToolbarItem::Action(ToolbarAction::RedactSensitive) => {
+                crate::i18n::t("Redact emails and phone numbers").to_owned()
+            }
             ToolbarItem::Action(ToolbarAction::Settings) => crate::i18n::t("Settings").to_owned(),
             ToolbarItem::Action(ToolbarAction::Cancel) => crate::i18n::t("Cancel").to_owned(),
             ToolbarItem::Color => crate::i18n::t("Choose color…").to_owned(),
             ToolbarItem::Thickness => crate::i18n::t("Line width…").to_owned(),
+            ToolbarItem::TextBackground => crate::i18n::t("Text background").to_owned(),
             ToolbarItem::ThicknessOption(value) => format!("{value} px"),
         }
     }
@@ -1010,6 +1078,7 @@ mod tests {
             true,
             true,
             96,
+            None,
         )
     }
 
@@ -1298,6 +1367,7 @@ mod tests {
                 true,
                 true,
                 96,
+                None,
             )
         };
         let button = |toolbar: &Toolbar, tool: ToolKind| {
@@ -1399,6 +1469,7 @@ mod tests {
                 true,
                 true,
                 96,
+                None,
             )
         };
         let picker = ToolbarItem::Tool(ToolKind::ColorPicker);
@@ -1483,6 +1554,7 @@ mod tests {
                 true,
                 true,
                 dpi,
+                None,
             );
             assert_in_viewport(toolbar.tool_bounds, viewport);
             assert_in_viewport(toolbar.action_bounds, viewport);

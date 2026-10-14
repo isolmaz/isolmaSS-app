@@ -16,6 +16,7 @@ fn text_object(id: usize, pos: (i32, i32), text: &str) -> AnnotationObject {
             text: text.to_string(),
             color: INK,
             font_size: 22,
+            background: false,
         },
     )
 }
@@ -121,6 +122,7 @@ fn typed_text_becomes_an_object_with_the_next_id() {
             text: "Hello".to_string(),
             color: INK,
             font_size: 22,
+            background: false,
         }
     );
     assert_eq!(state.next_id, 3);
@@ -227,6 +229,25 @@ fn a_single_click_puts_the_caret_where_it_landed() {
     let boundary = 100 + crate::drawing::measure_text("He", 22).0;
     assert!(state.begin_text_reedit(window.0, (boundary, 108), true));
     assert_eq!(state.text_edit().unwrap().caret, 2);
+}
+
+#[test]
+fn reopening_a_boxed_text_keeps_its_box_and_committing_keeps_it_too() {
+    let window = TestWindow::new();
+    let mut state = state_with_text();
+    state.objects[0].set_text_background(true);
+    // The box reaches 5 px past the text: a click there still grabs it.
+    assert!(state.begin_text_reedit(window.0, (97, 97), false));
+    assert!(state.text_edit().unwrap().background);
+    state.commit_text(window.0);
+    assert_eq!(state.objects[0].text_background(), Some(true));
+    // Turning the box off while editing is part of the committed change and one undo.
+    assert!(state.begin_text_reedit(window.0, (104, 108), false));
+    state.text_edit.as_mut().unwrap().background = false;
+    state.commit_text(window.0);
+    assert_eq!(state.objects[0].text_background(), Some(false));
+    assert!(state.history.undo(&mut state.objects));
+    assert_eq!(state.objects[0].text_background(), Some(true));
 }
 
 #[test]
@@ -694,11 +715,17 @@ fn shortcut_keys_depend_on_modifiers_and_text_editing() {
     // Alt and Win combinations belong to Windows.
     assert!(!is_editor_shortcut(0x43, MOD_CONTROL.0 | MOD_ALT.0, false));
     assert!(!is_editor_shortcut(0x43, MOD_WIN.0, false));
-    // Ctrl+A, C, S, U, Z, Y, comma and the arrows always count.
-    for vk in [0x41, 0x43, 0x53, 0x55, 0x5a, 0x59, 0xbc, 37, 40] {
+    // Ctrl+A, B, C, S, T, U, Z, Y, comma and the arrows always count.
+    for vk in [0x41, 0x42, 0x43, 0x53, 0x54, 0x55, 0x5a, 0x59, 0xbc, 37, 40] {
         assert!(is_editor_shortcut(vk, MOD_CONTROL.0, false), "vk {vk:#x}");
     }
     assert!(!is_editor_shortcut(0x51, MOD_CONTROL.0, false));
+    // Ctrl+Shift+R redacts e-mail addresses and phone numbers; Ctrl+R alone is not ours.
+    let shift = windows::Win32::UI::Input::KeyboardAndMouse::MOD_SHIFT.0;
+    assert!(is_editor_shortcut(0x52, MOD_CONTROL.0 | shift, false));
+    assert!(is_editor_shortcut(0x52, MOD_CONTROL.0 | shift, true));
+    assert!(!is_editor_shortcut(0x52, MOD_CONTROL.0, false));
+    assert!(!is_editor_shortcut(0x52, shift, true));
     // Plain keys: editing keys always, tool letters only outside text boxes.
     for vk in [8, 13, 27, 35, 40, 46] {
         assert!(is_editor_shortcut(vk, 0, true), "vk {vk:#x}");

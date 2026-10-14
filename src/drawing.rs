@@ -27,6 +27,39 @@ thread_local! { static METRICS: RefCell<TextMetrics> = const { RefCell::new(Vec:
 thread_local! { static CACHE: RefCell<Cache> = const { RefCell::new(Cache(Vec::new())) }; }
 thread_local! { static LOGGED_FAILURES: RefCell<Vec<Key>> = const { RefCell::new(Vec::new()) }; }
 
+/// UTF-16 of the line being drawn or measured, and its per-unit extents while caret stops
+/// are measured. Kept between calls so drawing and measuring text do not allocate.
+#[derive(Default)]
+struct LineScratch {
+    wide: Vec<u16>,
+    partial: Vec<i32>,
+}
+impl LineScratch {
+    const EMPTY: Self = Self {
+        wide: Vec::new(),
+        partial: Vec::new(),
+    };
+
+    fn load(&mut self, line: &str) {
+        self.wide.clear();
+        self.wide.extend(line.encode_utf16());
+    }
+}
+thread_local! { static LINE: RefCell<LineScratch> = const { RefCell::new(LineScratch::EMPTY) }; }
+thread_local! { static STOPS: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) }; }
+
+/// Runs `action` on the buffer in `slot`. The buffer is moved out meanwhile, so a nested use
+/// of the same slot gets an empty buffer instead of aliasing this one.
+fn with_taken<V: Default, T>(
+    slot: &'static std::thread::LocalKey<RefCell<V>>,
+    action: impl FnOnce(&mut V) -> T,
+) -> T {
+    let mut value = slot.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
+    let result = action(&mut value);
+    slot.with(|cell| *cell.borrow_mut() = value);
+    result
+}
+
 /// Records a GDI creation failure once per object key so the paint loop cannot
 /// flood the bounded diagnostic log, while the failure stays observable.
 fn note_create_failure(key: Key) {
@@ -212,6 +245,8 @@ pub fn with_brush<T>(hdc: HDC, color: COLORREF, action: impl FnOnce() -> T) -> T
     )
 }
 
+/// Size of `text` in the annotation font: the width of its widest line and the height of
+/// all its lines. Lines are separated by `\n`; the empty text is one empty line.
 pub fn measure_text(text: &str, font_size: i32) -> (i32, i32) {
     if let Some(size) = METRICS.with(|cache| {
         cache
@@ -222,19 +257,33 @@ pub fn measure_text(text: &str, font_size: i32) -> (i32, i32) {
     }) {
         return size;
     }
+    let lines = text.split('\n').count() as i32;
     let dc = unsafe { CreateCompatibleDC(None) };
     if dc.is_invalid() {
-        return (font_size.max(1), font_size.max(1));
+        return (font_size.max(1), font_size.max(1).saturating_mul(lines));
     }
-    let wide: Vec<u16> = text.encode_utf16().collect();
+    // Widest line and tallest line; every line is drawn in the same font.
     let mut size = SIZE::default();
-    let measured_ok = with_font(dc, font_size, 700, || unsafe {
-        GetTextExtentPoint32W(dc, &wide, &mut size).as_bool()
+    let measured_ok = with_taken(&LINE, |scratch| {
+        with_font(dc, font_size, 700, || unsafe {
+            let mut measured = true;
+            for line in text.split('\n') {
+                scratch.load(line);
+                let mut extent = SIZE::default();
+                measured &= GetTextExtentPoint32W(dc, &scratch.wide, &mut extent).as_bool();
+                size.cx = size.cx.max(extent.cx);
+                size.cy = size.cy.max(extent.cy);
+            }
+            measured
+        })
     });
     unsafe {
         let _ = DeleteDC(dc);
     }
-    let measured = (size.cx.max(1), size.cy.max(font_size.max(1)));
+    let measured = (
+        size.cx.max(1),
+        size.cy.max(font_size.max(1)).saturating_mul(lines),
+    );
     // Bounded and session-local: never retain large user text or grow with every caret move.
     // Only a real measurement enters the cache; after a failed
     // GetTextExtentPoint32W a later successful measurement can still replace
@@ -270,13 +319,97 @@ pub fn measure_ui_text(text: &str) -> (i32, i32) {
     (size.cx, size.cy)
 }
 
+/// Distance between the tops of two consecutive lines of annotation text.
+pub fn line_height(font_size: i32) -> i32 {
+    measure_text("", font_size).1
+}
+
+/// Draws `text` left-aligned from `pos`, one line per `\n`.
 pub fn text(hdc: HDC, pos: (i32, i32), text: &str, font_size: i32, color: COLORREF) {
-    with_font(hdc, font_size, 700, || unsafe {
-        let _ = SetTextColor(hdc, color);
-        let _ = SetBkMode(hdc, TRANSPARENT);
-        let wide: Vec<u16> = text.encode_utf16().collect();
-        let _ = TextOutW(hdc, pos.0, pos.1, &wide);
+    let pitch = if text.contains('\n') {
+        line_height(font_size)
+    } else {
+        0
+    };
+    with_taken(&LINE, |scratch| {
+        with_font(hdc, font_size, 700, || unsafe {
+            let _ = SetTextColor(hdc, color);
+            let _ = SetBkMode(hdc, TRANSPARENT);
+            for (index, line) in text.split('\n').enumerate() {
+                scratch.load(line);
+                let _ = TextOutW(hdc, pos.0, pos.1 + index as i32 * pitch, &scratch.wide);
+            }
+        })
     });
+}
+
+/// Measures the horizontal position of every character boundary of `text` in one pass (one
+/// device context, one font selection, one GDI call per line) and hands them to `action`.
+/// `stops[n]` is the distance from the start of its line to the boundary before character
+/// `n` of `text`, line breaks counted as characters: it is 0 at the start of every line
+/// and, at the end of a line, the width of that line.
+pub fn with_caret_stops<T>(text: &str, font_size: i32, action: impl FnOnce(&[i32]) -> T) -> T {
+    with_taken(&STOPS, |stops| {
+        fill_caret_stops(text, font_size, stops);
+        action(stops.as_slice())
+    })
+}
+
+/// The stops of [`with_caret_stops`]. Not generic, so every caller shares one copy of it.
+fn fill_caret_stops(text: &str, font_size: i32, stops: &mut Vec<i32>) {
+    stops.clear();
+    if !measure_caret_stops(text, font_size, stops) {
+        // The fallback of `measure_text`: every non-empty prefix is one font size wide.
+        stops.clear();
+        for line in text.split('\n') {
+            stops.push(0);
+            stops.extend(std::iter::repeat_n(font_size.max(1), line.chars().count()));
+        }
+    }
+}
+
+/// Fills `stops` as [`with_caret_stops`] describes; false when GDI could not measure.
+fn measure_caret_stops(text: &str, font_size: i32, stops: &mut Vec<i32>) -> bool {
+    let dc = unsafe { CreateCompatibleDC(None) };
+    if dc.is_invalid() {
+        return false;
+    }
+    let measured = with_taken(&LINE, |scratch| {
+        with_font(dc, font_size, 700, || unsafe {
+            let mut measured = true;
+            for line in text.split('\n') {
+                stops.push(0);
+                scratch.load(line);
+                if scratch.wide.is_empty() {
+                    continue;
+                }
+                scratch.partial.clear();
+                scratch.partial.resize(scratch.wide.len(), 0);
+                let mut extent = SIZE::default();
+                measured &= GetTextExtentExPointW(
+                    dc,
+                    PCWSTR(scratch.wide.as_ptr()),
+                    scratch.wide.len() as i32,
+                    0,
+                    None,
+                    Some(scratch.partial.as_mut_ptr()),
+                    &mut extent,
+                )
+                .as_bool();
+                // `partial` is indexed by UTF-16 unit; a boundary sits after the whole character.
+                let mut units = 0;
+                for ch in line.chars() {
+                    units += ch.len_utf16();
+                    stops.push(scratch.partial[units - 1]);
+                }
+            }
+            measured
+        })
+    });
+    unsafe {
+        let _ = DeleteDC(dc);
+    }
+    measured
 }
 
 pub fn clear_text_metrics() {

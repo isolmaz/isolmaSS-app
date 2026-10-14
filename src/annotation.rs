@@ -110,10 +110,14 @@ pub enum AnnotationKind {
         radius: i32,
     },
     Text {
+        /// Top-left corner of the first line; a background box extends past it.
         pos: (i32, i32),
+        /// Lines separated by `\n`.
         text: String,
         color: [u8; 4],
         font_size: i32,
+        /// A rounded box in `color` behind the text, which is then drawn black or white.
+        background: bool,
     },
     Blur {
         rect: Rect,
@@ -122,6 +126,74 @@ pub enum AnnotationKind {
     Redact {
         rect: Rect,
     },
+}
+
+/// Black or white, whichever reads better on a `fill` colour.
+fn contrast_bgra(fill: [u8; 4]) -> [u8; 4] {
+    let brightness = (fill[2] as u32 * 299 + fill[1] as u32 * 587 + fill[0] as u32 * 114) / 1000;
+    if brightness > 140 {
+        [0, 0, 0, 255]
+    } else {
+        [255, 255, 255, 255]
+    }
+}
+
+/// Air between text and the edge of its background box; none without a box.
+pub(crate) fn text_padding(font_size: i32, background: bool) -> i32 {
+    if background {
+        (font_size / 4).max(2)
+    } else {
+        0
+    }
+}
+
+/// The area a text annotation covers: its lines, plus the padding of the background box.
+fn text_extent(pos: (i32, i32), text: &str, font_size: i32, background: bool) -> Rect {
+    let (width, height) = crate::drawing::measure_text(text, font_size);
+    let padding = text_padding(font_size, background);
+    Rect::new(
+        pos.0 - padding,
+        pos.1 - padding,
+        pos.0 + width + padding,
+        pos.1 + height + padding,
+    )
+}
+
+/// The colour text is drawn in: its own, or black/white over its background box.
+pub(crate) fn text_ink_bgra(color: [u8; 4], background: bool) -> [u8; 4] {
+    if background {
+        contrast_bgra(color)
+    } else {
+        color
+    }
+}
+
+/// [`text_ink_bgra`] as a GDI colour.
+pub(crate) fn text_ink(color: [u8; 4], background: bool) -> COLORREF {
+    bgra_to_colorref(text_ink_bgra(color, background))
+}
+
+/// Draws a text annotation: the background box first when there is one, then every line.
+pub(crate) fn render_text(
+    hdc: HDC,
+    pos: (i32, i32),
+    text: &str,
+    color: [u8; 4],
+    font_size: i32,
+    background: bool,
+) {
+    if background {
+        let fill = bgra_to_colorref(color);
+        // `rounded` takes the corner diameter: a radius of a fifth of the font, at least 4.
+        crate::drawing::rounded(
+            hdc,
+            text_extent(pos, text, font_size, true),
+            2 * (font_size / 5).max(4),
+            fill,
+            fill,
+        );
+    }
+    crate::drawing::text(hdc, pos, text, font_size, text_ink(color, background));
 }
 
 /// A standalone annotation object with an ID and geometry.
@@ -385,11 +457,9 @@ impl AnnotationObject {
                 pos,
                 text,
                 font_size,
+                background,
                 ..
-            } => {
-                let (width, height) = crate::drawing::measure_text(text, *font_size);
-                Rect::new(pos.0, pos.1, pos.0 + width, pos.1 + height)
-            }
+            } => text_extent(*pos, text, *font_size, *background),
             AnnotationKind::Blur { rect, .. } | AnnotationKind::Redact { rect } => *rect,
         }
     }
@@ -819,6 +889,7 @@ impl AnnotationObject {
                 text,
                 color,
                 font_size,
+                background,
             } => {
                 let source = AnnotationObject::new(0, original.clone()).geometry_bounds();
                 let anchor = match handle {
@@ -845,29 +916,35 @@ impl AnnotationObject {
                 // size (O(log n) measures) instead of a per-pixel decrement loop
                 // re-measuring on every mouse move.
                 let new_font = largest_fitting(requested_font, |size| {
-                    let (w, h) = crate::drawing::measure_text(text, size);
-                    w <= available_width && h <= available_height
+                    let extent = text_extent((0, 0), text, size, *background);
+                    extent.width() <= available_width && extent.height() <= available_height
                 })
                 .unwrap_or(1);
-                let (width, height) = crate::drawing::measure_text(text, new_font);
-                let new_pos = match handle {
+                let extent = text_extent((0, 0), text, new_font, *background);
+                let (width, height) = (extent.width(), extent.height());
+                // Top-left corner of the whole box, background padding included.
+                let corner = match handle {
                     AnnotationResizeHandle::TopLeft => (anchor.0 - width, anchor.1 - height),
                     AnnotationResizeHandle::TopRight => (anchor.0, anchor.1 - height),
                     AnnotationResizeHandle::BottomLeft => (anchor.0 - width, anchor.1),
                     _ => anchor,
                 };
+                let padding = text_padding(new_font, *background);
                 AnnotationKind::Text {
                     pos: (
-                        new_pos
+                        corner
                             .0
-                            .clamp(limit.left, (limit.right - width).max(limit.left)),
-                        new_pos
+                            .clamp(limit.left, (limit.right - width).max(limit.left))
+                            + padding,
+                        corner
                             .1
-                            .clamp(limit.top, (limit.bottom - height).max(limit.top)),
+                            .clamp(limit.top, (limit.bottom - height).max(limit.top))
+                            + padding,
                     ),
                     text: text.clone(),
                     color: *color,
                     font_size: new_font,
+                    background: *background,
                 }
             }
             AnnotationKind::Step { .. } => original.clone(),
@@ -936,6 +1013,21 @@ impl AnnotationObject {
         }
     }
 
+    /// Whether this text annotation has a background box; `None` for every other kind.
+    pub fn text_background(&self) -> Option<bool> {
+        match &self.kind {
+            AnnotationKind::Text { background, .. } => Some(*background),
+            _ => None,
+        }
+    }
+
+    /// Turns the background box of a text annotation on or off; other kinds are unchanged.
+    pub fn set_text_background(&mut self, on: bool) {
+        if let AnnotationKind::Text { background, .. } = &mut self.kind {
+            *background = on;
+        }
+    }
+
     /// Renders vector shapes (Rectangle, Ellipse, Arrow, Line, Pen, Text) onto `hdc`.
     /// Strokes are anti-aliased through GDI+ when it is available and drawn with plain GDI
     /// otherwise.
@@ -1000,18 +1092,12 @@ impl AnnotationObject {
                 let circle = self.bounds();
                 let ink = bgra_to_colorref(*color);
                 crate::drawing::rounded(hdc, circle, 2 * radius, ink, ink);
-                let brightness =
-                    (color[2] as u32 * 299 + color[1] as u32 * 587 + color[0] as u32 * 114) / 1000;
                 crate::drawing::label(
                     hdc,
                     circle,
                     &number.to_string(),
                     *radius,
-                    if brightness > 140 {
-                        COLORREF(0)
-                    } else {
-                        COLORREF(0x00ff_ffff)
-                    },
+                    bgra_to_colorref(contrast_bgra(*color)),
                     true,
                 );
             }
@@ -1020,9 +1106,8 @@ impl AnnotationObject {
                 text,
                 color,
                 font_size,
-            } => {
-                crate::drawing::text(hdc, *pos, text, *font_size, bgra_to_colorref(*color));
-            }
+                background,
+            } => render_text(hdc, *pos, text, *color, *font_size, *background),
             AnnotationKind::Highlight { .. }
             | AnnotationKind::Blur { .. }
             | AnnotationKind::Redact { .. } => {
@@ -1307,6 +1392,8 @@ pub fn snap_angle_45(start: (i32, i32), current: (i32, i32)) -> (i32, i32) {
 #[derive(Debug, Clone)]
 pub enum EditCommand {
     Add(AnnotationObject),
+    /// Several objects added together; one undo removes them all.
+    AddMany(Vec<AnnotationObject>),
     Delete {
         object: AnnotationObject,
         index: usize,
@@ -1453,6 +1540,13 @@ impl HistoryManager {
                     self.redo_stack.push(EditCommand::Add(removed));
                 }
             }
+            EditCommand::AddMany(added) => {
+                let (removed, kept): (Vec<_>, Vec<_>) = std::mem::take(objects)
+                    .into_iter()
+                    .partition(|object| added.iter().any(|item| item.id == object.id));
+                *objects = kept;
+                self.redo_stack.push(EditCommand::AddMany(removed));
+            }
             EditCommand::Delete { object, index } => {
                 objects.insert(index.min(objects.len()), object.clone());
                 self.redo_stack.push(EditCommand::Delete { object, index });
@@ -1503,6 +1597,10 @@ impl HistoryManager {
                 // of re-finding by id (unwrap breaks if ids ever collide).
                 self.undo_stack.push(EditCommand::Add(obj.clone()));
                 objects.push(obj);
+            }
+            EditCommand::AddMany(added) => {
+                self.undo_stack.push(EditCommand::AddMany(added.clone()));
+                objects.extend(added);
             }
             EditCommand::Delete { object, index } => {
                 if let Some(pos) = objects.iter().position(|o| o.id == object.id) {
@@ -1614,6 +1712,17 @@ mod tests {
             text: text.to_string(),
             color: COLOR,
             font_size,
+            background: false,
+        }
+    }
+
+    fn boxed_text_kind(pos: (i32, i32), text: &str, font_size: i32) -> AnnotationKind {
+        AnnotationKind::Text {
+            pos,
+            text: text.to_string(),
+            color: COLOR,
+            font_size,
+            background: true,
         }
     }
 
@@ -1708,12 +1817,7 @@ mod tests {
     #[test]
     fn text_resize_changes_font_proportionally_and_stays_bounded() {
         let limit = Rect::new(0, 0, 60, 40);
-        let text = AnnotationKind::Text {
-            pos: (10, 10),
-            text: "Hi".to_string(),
-            color: COLOR,
-            font_size: 20,
-        };
+        let text = text_kind((10, 10), "Hi", 20);
         let mut object = AnnotationObject::new(1, text.clone());
         object.resize_from(
             &text,
@@ -1816,15 +1920,7 @@ mod tests {
         let wide = crate::drawing::measure_text("WWWW", 22);
         assert!(wide.0 > narrow.0);
         let text = "A&B İıŞşĞğ🙂";
-        let object = AnnotationObject::new(
-            2,
-            AnnotationKind::Text {
-                pos: (4, 5),
-                text: text.into(),
-                color: COLOR,
-                font_size: 22,
-            },
-        );
+        let object = AnnotationObject::new(2, text_kind((4, 5), text, 22));
         assert_eq!(
             object.geometry_bounds().width(),
             crate::drawing::measure_text(text, 22).0
@@ -2333,6 +2429,165 @@ mod tests {
         assert_eq!(text.geometry_bounds(), text.bounds());
         let step = object(step_kind((50, 60), 14));
         assert_eq!(step.geometry_bounds(), step.bounds());
+    }
+
+    #[test]
+    fn text_bounds_cover_every_line() {
+        let content = "Hi\nA wider second line\nx";
+        let (width, height) = crate::drawing::measure_text(content, 20);
+        let line = crate::drawing::line_height(20);
+        assert_eq!(height, 3 * line);
+        assert_eq!(
+            width,
+            crate::drawing::measure_text("A wider second line", 20).0
+        );
+        assert_eq!(
+            object(text_kind((12, 15), content, 20)).bounds(),
+            Rect::new(12, 15, 12 + width, 15 + 3 * line)
+        );
+    }
+
+    #[test]
+    fn a_background_box_pads_the_text_by_a_quarter_of_the_font_size() {
+        for (font_size, boxed, expected) in
+            [(20, true, 5), (60, true, 15), (4, true, 2), (20, false, 0)]
+        {
+            assert_eq!(
+                text_padding(font_size, boxed),
+                expected,
+                "{font_size} {boxed}"
+            );
+        }
+        let content = "Hi\nthere";
+        let (width, height) = crate::drawing::measure_text(content, 20);
+        let boxed = object(boxed_text_kind((100, 80), content, 20));
+        assert_eq!(
+            boxed.bounds(),
+            Rect::new(95, 75, 100 + width + 5, 80 + height + 5)
+        );
+        assert_eq!(boxed.geometry_bounds(), boxed.bounds());
+        assert_eq!(
+            object(text_kind((100, 80), content, 20)).bounds(),
+            Rect::new(100, 80, 100 + width, 80 + height)
+        );
+    }
+
+    #[test]
+    fn text_over_a_background_box_is_black_on_light_fills_and_white_on_dark_ones() {
+        let white = [255, 255, 255, 255];
+        let black = [0, 0, 0, 255];
+        for (fill, ink) in [
+            ([0, 0, 0, 255], white),
+            ([49, 49, 224, 255], white),
+            ([140, 140, 140, 255], white),
+            ([141, 141, 141, 255], black),
+            ([0, 200, 255, 255], black),
+            ([255, 255, 255, 255], black),
+            // Green weighs far more than blue: full green is light, full blue is dark.
+            ([255, 0, 0, 255], white),
+            ([0, 255, 0, 255], black),
+        ] {
+            assert_eq!(text_ink_bgra(fill, true), ink, "{fill:?}");
+            assert_eq!(text_ink(fill, true), bgra_to_colorref(ink), "{fill:?}");
+            // Without a box the text keeps its own colour.
+            assert_eq!(text_ink_bgra(fill, false), fill, "{fill:?}");
+            assert_eq!(text_ink(fill, false), bgra_to_colorref(fill), "{fill:?}");
+        }
+    }
+
+    #[test]
+    fn a_background_box_is_grabbed_across_its_whole_area() {
+        let plain = object(text_kind((300, 300), "Hi", 20));
+        let boxed = object(boxed_text_kind((300, 300), "Hi", 20));
+        let (width, height) = crate::drawing::measure_text("Hi", 20);
+        // The box reaches 5 px past the text on every side; grabbing 4 px beyond either.
+        for (point, plain_hit, boxed_hit) in [
+            ((300, 300), true, true),
+            ((297, 297), true, true),
+            ((293, 300), false, true),
+            ((291, 300), false, true),
+            ((290, 300), false, false),
+            ((300, 293), false, true),
+            ((300, 291), false, true),
+            ((300, 290), false, false),
+            ((300 + width + 8, 300), false, true),
+            ((300 + width + 9, 300), false, false),
+            ((300, 300 + height + 8), false, true),
+            ((300, 300 + height + 9), false, false),
+        ] {
+            assert_eq!(plain.hit_test(point), plain_hit, "plain {point:?}");
+            assert_eq!(boxed.hit_test(point), boxed_hit, "boxed {point:?}");
+        }
+    }
+
+    #[test]
+    fn moving_a_boxed_text_moves_the_box_with_it() {
+        let mut moving = object(boxed_text_kind((50, 60), "Hi\nthere", 20));
+        let before = moving.bounds();
+        moving.translate(7, -4);
+        assert_eq!(
+            moving.bounds(),
+            Rect::new(
+                before.left + 7,
+                before.top - 4,
+                before.right + 7,
+                before.bottom - 4
+            )
+        );
+        assert_eq!(moving.text_background(), Some(true));
+    }
+
+    #[test]
+    fn the_background_box_is_a_text_only_attribute() {
+        let mut text = object(text_kind((5, 5), "A", 20));
+        assert_eq!(text.text_background(), Some(false));
+        text.set_text_background(true);
+        assert_eq!(text.text_background(), Some(true));
+        assert_eq!(text.kind, boxed_text_kind((5, 5), "A", 20));
+        text.set_text_background(false);
+        assert_eq!(text.kind, text_kind((5, 5), "A", 20));
+
+        let frame = rectangle_kind(Rect::new(0, 0, 10, 10), 2);
+        let mut other = object(frame.clone());
+        assert_eq!(other.text_background(), None);
+        other.set_text_background(true);
+        assert_eq!(other.kind, frame);
+    }
+
+    #[test]
+    fn a_boxed_text_resizes_with_its_box_around_the_fixed_corner() {
+        let limit = Rect::new(0, 0, 400, 300);
+        let original = boxed_text_kind((100, 100), "Hi\nthere", 20);
+        let source = object(original.clone()).geometry_bounds();
+        let (width, height) = (source.width(), source.height());
+        type Case = (
+            AnnotationResizeHandle,
+            (i32, i32),
+            (i32, i32),
+            fn(Rect) -> (i32, i32),
+        );
+        let cases: [Case; 2] = [
+            (
+                TopLeft,
+                (source.right - 2 * width, source.bottom - 2 * height),
+                (source.right, source.bottom),
+                |b| (b.right, b.bottom),
+            ),
+            (
+                BottomRight,
+                (source.left + 2 * width, source.top + 2 * height),
+                (source.left, source.top),
+                |b| (b.left, b.top),
+            ),
+        ];
+        for (handle, cursor, fixed, corner) in cases {
+            let mut resized = object(original.clone());
+            resized.resize_from(&original, handle, cursor, limit);
+            assert_eq!(corner(resized.geometry_bounds()), fixed, "{handle:?}");
+            assert!(font_size_of(&resized).unwrap() > 20, "{handle:?}");
+            assert_eq!(resized.text_background(), Some(true), "{handle:?}");
+            assert_within(resized.geometry_bounds(), limit);
+        }
     }
 
     #[test]
@@ -3000,6 +3255,26 @@ mod tests {
         assert!(history.can_undo());
         assert!(history.undo(&mut objects));
         assert!(objects.is_empty());
+    }
+
+    #[test]
+    fn several_objects_added_together_undo_and_redo_as_one_step() {
+        let kept = AnnotationObject::new(1, frame_at(0));
+        let added: Vec<_> = (2..=4)
+            .map(|id| AnnotationObject::new(id, frame_at(id as i32)))
+            .collect();
+        let mut objects = vec![kept.clone()];
+        objects.extend(added.clone());
+        let mut history = HistoryManager::default();
+        history.record(EditCommand::AddMany(added.clone()));
+
+        assert!(history.undo(&mut objects));
+        assert_eq!(objects, vec![kept.clone()]);
+        assert!(!history.can_undo());
+        assert!(history.redo(&mut objects));
+        assert_eq!(objects, [vec![kept.clone()], added].concat());
+        assert!(history.undo(&mut objects));
+        assert_eq!(objects, vec![kept]);
     }
 
     #[test]

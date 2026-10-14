@@ -1,6 +1,6 @@
 use crate::annotation::{
     AnnotationKind, AnnotationObject, AnnotationResizeHandle, EditCommand, HistoryManager,
-    MergeKey, ToolKind, bgra_to_colorref, render_pen_preview, snap_angle_45, snap_square,
+    MergeKey, ToolKind, render_pen_preview, snap_angle_45, snap_square,
 };
 use crate::capture::{CaptureBuffer, Rect, SelectionHitZone};
 use crate::clipboard::{copy_dib_to_clipboard, flatten_selection_to_dib};
@@ -8,6 +8,7 @@ use crate::hotkey::{
     WM_OVERLAY_CHAR, WM_OVERLAY_KEYDOWN, register_overlay, set_overlay_ime_composing,
     set_overlay_text_editing, unregister_overlay,
 };
+use crate::ocr::Intent;
 use crate::save::save_screenshot;
 use crate::settings::{Settings, show_settings_dialog};
 use crate::toolbar::{MORE_TOOLS, Toolbar, ToolbarAction, ToolbarItem};
@@ -42,9 +43,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{PCWSTR, Result, w};
 
+mod recognition;
 mod render;
 mod session;
 mod window;
+use recognition::RecognitionState;
 pub use session::{measure_overlay, show_overlay_session};
 
 #[cfg(test)]
@@ -53,6 +56,8 @@ mod action_tests;
 mod editor_tests;
 #[cfg(test)]
 mod key_tests;
+#[cfg(test)]
+mod recognition_tests;
 #[cfg(test)]
 mod test_support;
 
@@ -76,6 +81,9 @@ const WM_EDITOR_ERROR: u32 = 0x8000 + 302;
 const WM_EDITOR_SAVE_AS: u32 = 0x8000 + 303;
 const WM_EDITOR_PICK_COLOR: u32 = 0x8000 + 304;
 const WM_EDITOR_CLOUD_SETUP: u32 = 0x8000 + 305;
+const WM_EDITOR_PIN: u32 = 0x8000 + 330;
+/// Posted by the text recognition worker: `lParam` is the id of the finished job.
+const WM_EDITOR_RECOGNIZED: u32 = 0x8000 + 360;
 thread_local! { static ACTION_ERROR: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) }; }
 
 pub fn tool_for_key(vk: u32) -> Option<ToolKind> {
@@ -107,12 +115,15 @@ fn initial_tool(saved: ToolKind) -> ToolKind {
 }
 
 pub fn is_editor_shortcut(vk: u32, modifiers: u32, editing: bool) -> bool {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{MOD_ALT, MOD_WIN};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{MOD_ALT, MOD_SHIFT, MOD_WIN};
     if modifiers & (MOD_ALT.0 | MOD_WIN.0) != 0 {
         return false;
     }
     if modifiers & MOD_CONTROL.0 != 0 {
-        matches!(vk, 0x41 | 0x43 | 0x53 | 0x55 | 0x5a | 0x59 | 0xbc | 37..=40)
+        matches!(
+            vk,
+            0x41 | 0x42 | 0x43 | 0x53 | 0x54 | 0x55 | 0x5a | 0x59 | 0xbc | 37..=40
+        ) || modifiers & MOD_SHIFT.0 != 0 && vk == 0x52
             || editing && matches!(vk, 0x56 | 0x58 | 8 | 46)
     } else {
         matches!(vk, 8 | 13 | 27 | 35..=40 | 46) || !editing && tool_for_key(vk).is_some()
@@ -260,7 +271,7 @@ fn place_notice(
 }
 
 /// Pointer travel, in pixels, that turns a click into a drag (`SM_CXDRAG`/`SM_CYDRAG`).
-fn drag_threshold(dpi: u32) -> (i32, i32) {
+pub(crate) fn drag_threshold(dpi: u32) -> (i32, i32) {
     unsafe {
         (
             windows::Win32::UI::HiDpi::GetSystemMetricsForDpi(SM_CXDRAG, dpi).max(1),
@@ -269,7 +280,11 @@ fn drag_threshold(dpi: u32) -> (i32, i32) {
     }
 }
 
-fn exceeds_drag_threshold(origin: (i32, i32), pt: (i32, i32), threshold: (i32, i32)) -> bool {
+pub(crate) fn exceeds_drag_threshold(
+    origin: (i32, i32),
+    pt: (i32, i32),
+    threshold: (i32, i32),
+) -> bool {
     (pt.0 - origin.0).abs() > threshold.0 || (pt.1 - origin.1).abs() > threshold.1
 }
 
@@ -665,6 +680,7 @@ pub struct OverlayState {
     cache_requested: bool,
     pointer: (i32, i32),
     preferences_dirty: bool,
+    recognition: RecognitionState,
 }
 
 /// A press on the line-width wheel: dragging scrolls it, a plain click picks the row.
@@ -971,6 +987,7 @@ impl OverlayState {
             cache_requested: false,
             pointer: (0, 0),
             preferences_dirty: false,
+            recognition: RecognitionState::system(),
         }
     }
 
@@ -1070,6 +1087,7 @@ impl OverlayState {
                     text,
                     color: edit.color,
                     font_size: edit.font_size,
+                    background: edit.background,
                 };
                 let obj = AnnotationObject::new(obj_id, new_kind.clone());
 
@@ -1090,6 +1108,7 @@ impl OverlayState {
                             text: edit.original_text.clone(),
                             color: edit.color,
                             font_size: edit.font_size,
+                            background: edit.background,
                         };
                         self.objects.push(obj);
                         self.history.record(EditCommand::Modify {
@@ -1122,8 +1141,9 @@ impl OverlayState {
         {
             set_overlay_text_editing(false);
         }
-        // Picking a color recolors the text being typed instead of ending it.
-        if item != ToolbarItem::Color {
+        // Picking a color or the background box restyles the text being typed instead of
+        // ending it.
+        if !matches!(item, ToolbarItem::Color | ToolbarItem::TextBackground) {
             self.commit_text(hwnd);
         }
 
@@ -1187,6 +1207,13 @@ impl OverlayState {
                     Self::show_action_error(hwnd, crate::i18n::t("Upload failed"), &error);
                 }
             }
+            ToolbarItem::Action(ToolbarAction::Pin) => self.request_pin(hwnd),
+            ToolbarItem::Action(ToolbarAction::CopyText) => {
+                self.start_recognition(hwnd, Intent::CopyText)
+            }
+            ToolbarItem::Action(ToolbarAction::RedactSensitive) => {
+                self.start_recognition(hwnd, Intent::RedactSensitive)
+            }
             ToolbarItem::Action(ToolbarAction::Settings) => unsafe {
                 let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
                     hwnd,
@@ -1207,6 +1234,10 @@ impl OverlayState {
                     LPARAM(0),
                 );
             },
+            ToolbarItem::TextBackground => {
+                self.toggle_text_background();
+                self.redraw(hwnd);
+            }
             ToolbarItem::Thickness => {
                 let open = self.thickness_input.take().is_none();
                 if open {
@@ -1235,28 +1266,35 @@ impl OverlayState {
     /// Opens the Text object under `pt` for editing. `place_caret` puts the caret where
     /// it was clicked instead of after the last character.
     fn begin_text_reedit(&mut self, hwnd: HWND, pt: (i32, i32), place_caret: bool) -> bool {
-        let Some((id, pos, text, color, font_size)) =
-            self.objects
-                .iter()
-                .rev()
-                .find_map(|object| match &object.kind {
-                    AnnotationKind::Text {
-                        pos,
-                        text,
-                        color,
-                        font_size,
-                    } if object.hit_test(pt) => {
-                        Some((object.id, *pos, text.clone(), *color, *font_size))
-                    }
-                    _ => None,
-                })
+        let Some((id, pos, text, color, font_size, background)) = self
+            .objects
+            .iter()
+            .rev()
+            .find_map(|object| match &object.kind {
+                AnnotationKind::Text {
+                    pos,
+                    text,
+                    color,
+                    font_size,
+                    background,
+                } if object.hit_test(pt) => Some((
+                    object.id,
+                    *pos,
+                    text.clone(),
+                    *color,
+                    *font_size,
+                    *background,
+                )),
+                _ => None,
+            })
         else {
             return false;
         };
         self.dragging_object = None;
-        let mut edit = TextEditState::new(pos, text, color, font_size, Some(id));
+        let mut edit =
+            TextEditState::new(pos, text, color, font_size, Some(id)).with_background(background);
         if place_caret {
-            let at = edit.caret_at(pt.0);
+            let at = edit.caret_at(pt);
             edit.move_to(at, false);
         }
         self.text_edit = Some(edit);
@@ -1366,12 +1404,23 @@ impl OverlayState {
             return LRESULT(0);
         }
 
+        // Text recognition: Ctrl+Shift+C copies the selection's text, Ctrl+Shift+R covers its
+        // e-mail addresses and phone numbers. Both work while a text box is open.
+        if ctrl_down
+            && mods as u32 & windows::Win32::UI::Input::KeyboardAndMouse::MOD_SHIFT.0 != 0
+            && let Some(intent) = Intent::for_key(vk)
+        {
+            self.start_recognition(hwnd, intent);
+            return LRESULT(0);
+        }
+
         // 2. Text editing owns keys, except copy: commit first so the flattened
         // screenshot contains the final text and never includes editor affordances.
         if self.text_edit.is_some() {
-            if ctrl_down && matches!(vk as u8, b'C' | b'S' | b'U') {
+            let shift = mods as u32 & windows::Win32::UI::Input::KeyboardAndMouse::MOD_SHIFT.0 != 0;
+            if ctrl_down && matches!(vk as u8, b'C' | b'S' | b'T' | b'U') {
                 self.commit_text(hwnd);
-            } else if vk == VK_RETURN.0 as usize {
+            } else if vk == VK_RETURN.0 as usize && !shift {
                 self.commit_text(hwnd);
                 return LRESULT(0);
             } else {
@@ -1388,11 +1437,12 @@ impl OverlayState {
                             &error.to_string(),
                         ),
                     }
+                } else if ctrl_down && vk == 'B' as usize {
+                    self.toggle_text_background();
                 } else {
                     let edit = self.text_edit.as_mut().expect("a text box is open");
-                    let shift =
-                        mods as u32 & windows::Win32::UI::Input::KeyboardAndMouse::MOD_SHIFT.0 != 0;
                     match vk {
+                        13 => edit.insert_text("\n"),
                         8 if ctrl_down => {
                             edit.delete_word(false);
                         }
@@ -1409,14 +1459,16 @@ impl OverlayState {
                         37 => edit.step(false, shift),
                         39 if ctrl_down => edit.move_word(true, shift),
                         39 => edit.step(true, shift),
-                        36 => edit.move_to(0, shift),
-                        35 => edit.move_to(edit.text.chars().count(), shift),
+                        36 => edit.move_line_edge(false, shift),
+                        35 => edit.move_line_edge(true, shift),
+                        38 => edit.move_line(false, shift),
+                        40 => edit.move_line(true, shift),
                         0x41 if ctrl_down => edit.select_all(),
                         0x58 if ctrl_down => {
                             if let Some(selected) = edit.selected_text() {
                                 match crate::clipboard::copy_text_to_clipboard(
                                     Some(hwnd),
-                                    &selected,
+                                    &selected.replace('\n', "\r\n"),
                                 ) {
                                     Ok(()) => {
                                         edit.delete_selected();
@@ -1430,8 +1482,12 @@ impl OverlayState {
                             }
                         }
                         0x5a if ctrl_down => edit.undo(),
-                        0x59 if ctrl_down => edit.redo(),
-                        _ => {}
+                        // Ctrl+Y; every other key that reaches a text box is handled above.
+                        _ => {
+                            if ctrl_down && vk == 0x59 {
+                                edit.redo();
+                            }
+                        }
                     }
                     edit.caret_visible = true;
                 }
@@ -1439,6 +1495,12 @@ impl OverlayState {
                 self.redraw(hwnd);
                 return LRESULT(0);
             }
+        }
+
+        // Ctrl+B: the filled box behind text, with the Text tool or a text object selected.
+        if ctrl_down && vk == 'B' as usize && self.toggle_text_background() {
+            self.redraw(hwnd);
+            return LRESULT(0);
         }
 
         // Select the whole monitor under the pointer: Ctrl+A. While a text box is open the
@@ -1487,6 +1549,11 @@ impl OverlayState {
             if let Err(error) = self.upload_selection(hwnd) {
                 Self::show_action_error(hwnd, crate::i18n::t("Upload failed"), &error);
             }
+            return LRESULT(0);
+        }
+
+        if self.mode == OverlayMode::SelectionActive && ctrl_down && vk == 'T' as usize {
+            self.request_pin(hwnd);
             return LRESULT(0);
         }
 
@@ -1639,8 +1706,9 @@ impl OverlayState {
         LRESULT(0)
     }
 
-    /// Every toolbar command for the F10 menu: the buttons on screen plus the tools the
-    /// collapsed tool strip hides. `None` until a frame has laid the toolbar out.
+    /// Every command for the F10 menu: the buttons on screen, the tools the collapsed tool
+    /// strip hides, Pin to screen and the text recognition commands, which have no button.
+    /// `None` until a frame has laid the toolbar out.
     fn command_menu_buttons(&self) -> Option<Vec<crate::toolbar::ToolbarButton>> {
         let mut buttons = self.toolbar.as_ref()?.buttons.clone();
         for tool in MORE_TOOLS {
@@ -1661,6 +1729,30 @@ impl OverlayState {
                 );
             }
         }
+        // Pinning and the text recognition commands have no toolbar button; the menu and
+        // their shortcuts reach them. They follow Upload in this order.
+        let after_upload = buttons
+            .iter()
+            .position(|button| button.item == ToolbarItem::Action(ToolbarAction::Upload))
+            .map_or(buttons.len(), |index| index + 1);
+        for (offset, action) in [
+            ToolbarAction::Pin,
+            ToolbarAction::CopyText,
+            ToolbarAction::RedactSensitive,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            buttons.insert(
+                after_upload + offset,
+                crate::toolbar::ToolbarButton {
+                    item: ToolbarItem::Action(action),
+                    rect: Rect::default(),
+                    is_enabled: true,
+                    is_checked: false,
+                },
+            );
+        }
         Some(buttons)
     }
 
@@ -1678,8 +1770,9 @@ impl OverlayState {
         })
     }
 
-    /// Applies what the command menu returned. A tool takes effect directly; any other
-    /// command is replayed as a click on its toolbar button so behavior stays identical.
+    /// Applies what the command menu returned. A tool, Pin to screen and the text
+    /// recognition commands take effect directly; any other command is replayed as a click
+    /// on its toolbar button so behavior stays identical.
     fn apply_command_menu_choice(
         &mut self,
         hwnd: HWND,
@@ -1691,6 +1784,12 @@ impl OverlayState {
                 self.select_tool(tool);
                 self.redraw(hwnd);
             }
+            // No button to click: the menu is the only place that lists these.
+            Ok(Some(ToolbarItem::Action(ToolbarAction::Pin))) => self.request_pin(hwnd),
+            Ok(Some(
+                item
+                @ ToolbarItem::Action(ToolbarAction::CopyText | ToolbarAction::RedactSensitive),
+            )) => self.activate_toolbar_item(hwnd, item, self.pointer),
             Ok(Some(item)) => {
                 if let Some(rect) = buttons
                     .iter()
@@ -1924,6 +2023,50 @@ impl OverlayState {
         Ok(())
     }
 
+    /// Asks the window to pin the selection. The pin window is opened by the window
+    /// procedure, after the key or menu handler that asked has returned.
+    fn request_pin(&self, hwnd: HWND) {
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                hwnd,
+                WM_EDITOR_PIN,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        }
+    }
+
+    /// The selection as the export renders it, which is what Copy would put on the
+    /// clipboard, with the screen position it was selected at.
+    fn begin_pin(&mut self) -> std::result::Result<crate::pin::PinImage, String> {
+        let selection = self
+            .committed_selection
+            .ok_or_else(|| crate::i18n::t("Select a screen region first.").to_string())?;
+        self.composite_scene_with(CompositionPolicy::EXPORT);
+        let width = self.capture.width;
+        let height = self.capture.height;
+        let pixels = unsafe {
+            std::slice::from_raw_parts(self.bits_ptr, width as usize * height as usize * 4)
+        };
+        let extracted = crate::save::extract_selection(pixels, width, height, &selection);
+        self.composite_scene();
+        let (pixels, image_width, image_height) = extracted.map_err(|error| {
+            crate::i18n::tf(
+                "Could not prepare the screenshot for pinning: {}",
+                &[&error],
+            )
+        })?;
+        let placed = selection.clamp(width, height);
+        Ok(crate::pin::PinImage {
+            pixels,
+            width: image_width,
+            height: image_height,
+            origin: (self.capture.x + placed.left, self.capture.y + placed.top),
+            format: self.settings.save_format,
+            jpeg_quality: self.settings.jpeg_quality,
+        })
+    }
+
     fn editor_cursor(&self, pt: (i32, i32)) -> PCWSTR {
         if self.mode != OverlayMode::SelectionActive {
             return IDC_CROSS;
@@ -2026,6 +2169,39 @@ impl OverlayState {
             }
         }
         self.persist_editor_preferences();
+    }
+
+    /// Flips the filled box behind text: on the text box being edited, else on the selected
+    /// text object (one undo step), else on the choice kept for new text while the Text tool
+    /// is active. Whatever was chosen is remembered for new text. `false` when there is no
+    /// text to restyle.
+    fn toggle_text_background(&mut self) -> bool {
+        let on = if let Some(edit) = &mut self.text_edit {
+            edit.background = !edit.background;
+            edit.caret_visible = true;
+            edit.background
+        } else if let Some(object) = self.selected_id.and_then(|id| {
+            self.objects
+                .iter_mut()
+                .find(|object| object.id == id && object.text_background().is_some())
+        }) {
+            let before = object.kind.clone();
+            let on = object.text_background() != Some(true);
+            object.set_text_background(on);
+            self.history.record(EditCommand::Modify {
+                id: object.id,
+                old_kind: before,
+                new_kind: object.kind.clone(),
+            });
+            on
+        } else if self.active_tool == ToolKind::Text {
+            !self.settings.text_background
+        } else {
+            return false;
+        };
+        self.settings.text_background = on;
+        self.persist_editor_preferences();
+        true
     }
 
     fn change_thickness(&mut self, value: i32, record: bool) {
@@ -2390,6 +2566,7 @@ mod tests {
             true,
             false,
             96,
+            None,
         );
         toolbar.pressed_item = Some(ToolbarItem::Action(ToolbarAction::Cancel));
         state.toolbar = Some(toolbar);

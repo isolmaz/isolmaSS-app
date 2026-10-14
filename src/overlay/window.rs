@@ -22,6 +22,14 @@ impl OverlayState {
         crate::toast::show_upload(prepared, anchor);
         self.finish_upload(hwnd)
     }
+
+    /// Pins the selection to the screen and closes the editor, as an upload does once its
+    /// toast is up: the pin is its own window and outlives the editor.
+    pub(super) fn pin_selection(&mut self, hwnd: HWND) -> std::result::Result<(), String> {
+        let image = self.begin_pin()?;
+        crate::pin::show(image)?;
+        self.finish_upload(hwnd)
+    }
 }
 
 /// Hides the editor while another top-level flow needs the screen, and brings
@@ -260,6 +268,22 @@ pub(super) unsafe extern "system" fn overlay_wnd_proc(
                         &error.to_string(),
                     )
                 }
+            }
+            LRESULT(0)
+        }
+        WM_EDITOR_PIN => {
+            if state_ptr.is_null() {
+                return LRESULT(0);
+            }
+            let state = unsafe { &mut *state_ptr };
+            if let Err(error) = state.pin_selection(hwnd) {
+                OverlayState::show_action_error(hwnd, crate::i18n::t("Pin failed"), &error);
+            }
+            LRESULT(0)
+        }
+        WM_EDITOR_RECOGNIZED => {
+            if !state_ptr.is_null() {
+                unsafe { (*state_ptr).finish_recognition(hwnd, lparam.0 as u64) };
             }
             LRESULT(0)
         }
@@ -741,7 +765,7 @@ pub(super) unsafe extern "system" fn overlay_wnd_proc(
                         // 4. Selecting text with the pointer
                         if state.text_dragging {
                             if let Some(edit) = &mut state.text_edit {
-                                let at = edit.caret_at(client_x);
+                                let at = edit.caret_at(pt);
                                 if at != edit.caret {
                                     edit.move_to(at, true);
                                     start_caret_timer(hwnd);
@@ -828,7 +852,7 @@ pub(super) unsafe extern "system" fn overlay_wnd_proc(
                             .is_some_and(|edit| edit.contains(pt, state.dpi))
                         {
                             if let Some(edit) = &mut state.text_edit {
-                                let at = edit.caret_at(client_x);
+                                let at = edit.caret_at(pt);
                                 edit.move_to(at, wparam.0 & MK_SHIFT != 0);
                             }
                             state.text_dragging = true;
@@ -1034,13 +1058,16 @@ pub(super) unsafe extern "system" fn overlay_wnd_proc(
                                         state.text_dragging = true;
                                         return LRESULT(0);
                                     }
-                                    state.text_edit = Some(TextEditState::new(
-                                        pt,
-                                        String::new(),
-                                        state.active_color,
-                                        DEFAULT_FONT_SIZE * state.dpi as i32 / 96,
-                                        None,
-                                    ));
+                                    state.text_edit = Some(
+                                        TextEditState::new(
+                                            pt,
+                                            String::new(),
+                                            state.active_color,
+                                            DEFAULT_FONT_SIZE * state.dpi as i32 / 96,
+                                            None,
+                                        )
+                                        .with_background(state.settings.text_background),
+                                    );
                                     start_caret_timer(hwnd);
                                     set_overlay_text_editing(true);
                                     state.redraw(hwnd);

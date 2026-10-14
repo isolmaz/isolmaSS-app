@@ -305,12 +305,13 @@ impl OverlayState {
         if policy.caret
             && let Some(edit) = &self.text_edit
         {
-            crate::drawing::text(
+            crate::annotation::render_text(
                 self.mem_dc,
                 edit.pos,
                 &edit.text,
+                edit.color,
                 edit.font_size,
-                bgra_to_colorref(edit.color),
+                edit.background,
             );
         }
     }
@@ -345,21 +346,8 @@ impl OverlayState {
     fn render_text_chrome(&self, buffer: &mut [u8], sel: Rect, edit: &TextEditState) {
         let (width, height) = (self.capture.width, self.capture.height);
         let bounds = edit.bounds();
-        if let Some(range) = edit.selection() {
-            let prefix: String = edit.text.chars().take(range.start).collect();
-            let selected: String = edit.text.chars().take(range.end).collect();
-            let left = if prefix.is_empty() {
-                0
-            } else {
-                crate::drawing::measure_text(&prefix, edit.font_size).0
-            };
-            let right = crate::drawing::measure_text(&selected, edit.font_size).0;
-            let highlight = Rect::new(
-                edit.pos.0 + left,
-                bounds.top,
-                edit.pos.0 + right,
-                bounds.bottom,
-            );
+        let ink = crate::annotation::text_ink(edit.color, edit.background);
+        edit.for_each_selection_line(|highlight, line| {
             crate::drawing::rounded(
                 self.mem_dc,
                 highlight,
@@ -367,33 +355,36 @@ impl OverlayState {
                 crate::theme::TEXT_SELECTION,
                 crate::theme::TEXT_SELECTION,
             );
-            // The highlight covers the glyphs drawn earlier, so the selected run is drawn again.
+            // The highlight covers the glyphs drawn earlier, so the line is drawn again.
             self.with_clip(intersect_rects(highlight, sel), || {
                 crate::drawing::text(
                     self.mem_dc,
-                    edit.pos,
-                    &edit.text,
+                    (edit.pos.0, highlight.top),
+                    line,
                     edit.font_size,
-                    bgra_to_colorref(edit.color),
+                    ink,
                 );
             });
-        }
+        });
         let margin = super::text::text_box_margin(self.dpi);
         self.draw_text_frame(bounds.inflate(margin, margin));
         if edit.caret_visible {
-            let x = edit.pos.0 + edit.caret_offset();
+            let (dx, dy) = edit.caret_offset();
+            let (x, y) = (edit.pos.0 + dx, edit.pos.1 + dy);
             let caret = Rect::new(
                 x,
-                bounds.top,
+                y,
                 x + (self.dpi / 96).max(1) as i32,
-                bounds.bottom,
+                y + edit.line_height(),
             );
             unsafe {
                 let _ = GdiFlush();
             }
+            // Over a background box the caret takes the text's black or white.
+            let caret_color = crate::annotation::text_ink_bgra(edit.color, edit.background);
             let halo = caret.inflate(1, 1);
-            CaptureBuffer::fill_rect(buffer, width, height, &halo, caret_halo(edit.color));
-            CaptureBuffer::fill_rect(buffer, width, height, &caret, edit.color);
+            CaptureBuffer::fill_rect(buffer, width, height, &halo, caret_halo(caret_color));
+            CaptureBuffer::fill_rect(buffer, width, height, &caret, caret_color);
         }
     }
 
@@ -562,6 +553,17 @@ impl OverlayState {
                                 }
                             }
                         };
+                    // The background switch follows the text being typed, else the selected
+                    // text object, else the choice kept for new text under the Text tool.
+                    let text_background = match &self.text_edit {
+                        Some(edit) => Some(edit.background),
+                        None => selected
+                            .and_then(|object| object.text_background())
+                            .or_else(|| {
+                                (self.active_tool == ToolKind::Text)
+                                    .then_some(self.settings.text_background)
+                            }),
+                    };
                     let viewport = selection_work_viewport(&self.capture, sel);
                     let mut tb = Toolbar::layout(
                         &sel,
@@ -576,6 +578,7 @@ impl OverlayState {
                         can_undo,
                         can_redo,
                         self.dpi,
+                        text_background,
                     );
                     if let Some(existing) = &self.toolbar {
                         let still_shown = |item: Option<ToolbarItem>| {
@@ -1115,6 +1118,7 @@ mod tests {
                 text: "AAAA".to_string(),
                 color: GREEN,
                 font_size: 22,
+                background: false,
             },
         ));
         let mut edit = TextEditState::new((200, 150), "BB".to_string(), PLUM, 22, Some(5));
@@ -1178,6 +1182,117 @@ mod tests {
         let frame = bounds.inflate(margin, margin);
         let top_line = Rect::new(frame.left, frame.top, frame.right, frame.top + 1);
         assert!(count_color(&state, top_line, crate::theme::BRAND_AMBER_BGRA) > 0);
+    }
+
+    #[test]
+    fn every_line_of_a_text_box_is_drawn_and_the_caret_sits_on_the_last_line() {
+        let mut state = scene();
+        let edit = TextEditState::new((150, 110), "BB\nBB".to_string(), PLUM, 22, None);
+        let line = edit.line_height();
+        let width = crate::drawing::measure_text("BB", 22).0;
+        state.set_text_edit(Some(edit));
+        state.composite_scene();
+        for row in 0..2 {
+            let band = Rect::new(150, 110 + row * line, 150 + width, 110 + (row + 1) * line);
+            assert!(count_color(&state, band, PLUM) > 20, "line {row}");
+        }
+        // The caret follows the text to the end of the second line.
+        let caret_x = 150 + width;
+        assert_eq!(
+            rgb_at(&state, caret_x, 110 + line + line / 2),
+            [PLUM[0], PLUM[1], PLUM[2]]
+        );
+    }
+
+    #[test]
+    fn a_selection_over_two_lines_is_highlighted_on_both() {
+        let mut state = scene();
+        let mut edit = TextEditState::new((150, 110), "hello\nworld".to_string(), PLUM, 22, None);
+        edit.anchor = Some(3);
+        edit.caret = 8;
+        let line = edit.line_height();
+        edit.caret_visible = false;
+        state.set_text_edit(Some(edit));
+        state.composite_scene();
+        let selected = bgr(crate::theme::TEXT_SELECTION);
+        let color = [selected[0], selected[1], selected[2], 255];
+        for row in 0..2 {
+            let band = Rect::new(150, 110 + row * line, 400, 110 + (row + 1) * line);
+            assert!(count_color(&state, band, color) > 20, "line {row}");
+        }
+    }
+
+    #[test]
+    fn a_text_box_with_a_background_is_filled_behind_white_or_black_text() {
+        let mut state = scene();
+        let mut edit = TextEditState::new((150, 110), "AB".to_string(), PLUM, 22, None);
+        edit.background = true;
+        edit.caret_visible = false;
+        let bounds = edit.bounds();
+        state.set_text_edit(Some(edit));
+        state.composite_scene();
+        // Five pixels of padding on every side, filled with the text colour.
+        assert_eq!(bounds.left, 145);
+        assert_eq!(
+            rgb_at(&state, bounds.left + 2, 125),
+            [PLUM[0], PLUM[1], PLUM[2]]
+        );
+        // The text area inside the padding: the box's rounded corners leave the black
+        // backdrop showing in the corners of `bounds`, which is not text.
+        let text_area = bounds.inflate(-5, -5);
+        assert!(
+            count_color(&state, text_area, [255, 255, 255, 255]) > 20,
+            "white text"
+        );
+        assert_eq!(
+            count_color(&state, text_area, [0, 0, 0, 255]),
+            0,
+            "no black text"
+        );
+    }
+
+    #[test]
+    fn the_background_switch_follows_the_text_tool_the_open_box_and_the_selected_text() {
+        let switch = |state: &OverlayState| {
+            state
+                .toolbar
+                .as_ref()
+                .unwrap()
+                .buttons
+                .iter()
+                .find(|button| button.item == ToolbarItem::TextBackground)
+                .map(|button| button.is_checked)
+        };
+        let text = AnnotationKind::Text {
+            pos: (150, 100),
+            text: "Hi".to_string(),
+            color: RED,
+            font_size: 22,
+            background: true,
+        };
+        let mut state = scene();
+        state.composite_scene();
+        assert_eq!(switch(&state), None, "not with the Rectangle tool");
+        state.active_tool = ToolKind::Text;
+        state.composite_scene();
+        assert_eq!(switch(&state), Some(false));
+        state.settings.text_background = true;
+        state.composite_scene();
+        assert_eq!(switch(&state), Some(true), "the kept choice for new text");
+        state.active_tool = ToolKind::Select;
+        state.composite_scene();
+        assert_eq!(switch(&state), None, "not with Select and nothing selected");
+        state.objects.push(AnnotationObject::new(1, text));
+        state.set_selected_id(Some(1));
+        state.settings.text_background = false;
+        state.composite_scene();
+        assert_eq!(switch(&state), Some(true), "the selected text decides");
+        state.set_selected_id(None);
+        state.set_text_edit(Some(
+            TextEditState::new((150, 100), "x".to_string(), RED, 22, None).with_background(true),
+        ));
+        state.composite_scene();
+        assert_eq!(switch(&state), Some(true), "the open text box decides");
     }
 
     #[test]

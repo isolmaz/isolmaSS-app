@@ -16,6 +16,10 @@ src/overlay/window.rs
 src/save/dialog.rs
 src/toolbar/menu.rs
 
+# Pinned screenshot windows and the OLE drag of the upload card's image
+src/pin/window.rs
+src/drag/ole.rs
+
 # Global shortcut: RegisterHotKey message loop, low-level keyboard hook, registry write
 src/hotkey/system.rs
 
@@ -24,6 +28,9 @@ src/upload/glue.rs
 
 # Update check, download and installer launch against the live release server
 src/updater/live.rs
+
+# Windows text recognition engine: needs an installed recognition language (CI has none)
+src/ocr/engine.rs
 
 # Windows with message loops
 src/settings_window.rs

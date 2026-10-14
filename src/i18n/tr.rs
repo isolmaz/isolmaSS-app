@@ -237,6 +237,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Copy", "Kopyala"),
     ("Copy failed", "Kopyalama başarısız"),
     ("Copy link", "Bağlantıyı kopyala"),
+    ("Copy text", "Metni kopyala"),
     ("Copy to clipboard", "Panoya kopyala"),
     (
         "Could not activate the Cloudflare keys: {}",
@@ -362,6 +363,10 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Could not open the folder", "Klasör açılamadı"),
     ("Could not open the link", "Bağlantı açılamadı"),
     (
+        "Could not open the pin window: {}",
+        "Sabitleme penceresi açılamadı: {}",
+    ),
+    (
         "Could not open the save dialog",
         "Kaydet penceresi açılamadı",
     ),
@@ -385,6 +390,10 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     (
         "Could not prepare the protected keys: {}",
         "Korumalı anahtarlar hazırlanamadı: {}",
+    ),
+    (
+        "Could not prepare the screenshot for pinning: {}",
+        "Ekran görüntüsü sabitlemeye hazırlanamadı: {}",
     ),
     (
         "Could not prepare the screenshot for upload: {}",
@@ -526,6 +535,10 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Kurulum dosyası indiriliyor ve doğrulanıyor…",
     ),
     ("Downloading update", "Güncelleme indiriliyor"),
+    (
+        "Drag the image into another app",
+        "Görseli başka bir uygulamaya sürükleyin",
+    ),
     ("Duplicate OAuth parameter.", "Yinelenen OAuth parametresi."),
     ("Editor", "Düzenleyici"),
     ("Ellipse", "Elips"),
@@ -672,10 +685,15 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     ("No connection found.", "Bağlantı bulunamadı."),
     (
+        "No email addresses or phone numbers found",
+        "E-posta adresi veya telefon numarası bulunamadı",
+    ),
+    (
         "No free Worker name was found; try again.",
         "Boş bir Worker adı bulunamadı; tekrar deneyin.",
     ),
     ("No screenshots yet", "Henüz ekran görüntüsü yok"),
+    ("No text found in the selection", "Seçimde metin bulunamadı"),
     ("None", "Yok"),
     (
         "None of the authorized accounts give you Workers access. Connect again and pick an account where you can use Workers on the Cloudflare consent page; if it persists, make sure the app's OAuth client is public.",
@@ -712,6 +730,8 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Pen", "Kalem"),
     ("Permission granted", "İzin alındı"),
     ("Pick color", "Renk seç"),
+    ("Pin failed", "Sabitlenemedi"),
+    ("Pin to screen", "Ekrana sabitle"),
     ("Pink", "Pembe"),
     ("Press keys · Esc cancels", "Tuşlara basın · Esc iptal"),
     ("Purple", "Mor"),
@@ -721,6 +741,12 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Red", "Kırmızı"),
     ("Redact", "Karart"),
     ("Redact (opaque)", "Karart (opak)"),
+    (
+        "Redact emails and phone numbers",
+        "E-posta ve telefonları karart",
+    ),
+    ("Redacted 1 item", "1 öğe karartıldı"),
+    ("Redacted {} items", "{} öğe karartıldı"),
     ("Redo", "Yinele"),
     ("Refresh", "Yenile"),
     (
@@ -729,6 +755,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     ("Retention (days)", "Saklama (gün)"),
     ("Save", "Kaydet"),
+    ("Save as…", "Farklı kaydet…"),
     ("Save failed", "Kaydetme başarısız"),
     ("Save limits", "Sınırları kaydet"),
     ("Save password", "Şifreyi kaydet"),
@@ -788,6 +815,9 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("System", "Sistem"),
     ("Teal", "Camgöbeği"),
     ("Text", "Metin"),
+    ("Text background", "Metin arka planı"),
+    ("Text copied", "Metin kopyalandı"),
+    ("Text recognition failed", "Metin tanıma başarısız"),
     (
         "The Cloudflare address changed. Connect this computer again before uploading.",
         "Cloudflare adresi değişti. Yüklemeden önce bu bilgisayarı yeniden bağlayın.",
@@ -1184,6 +1214,10 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     (
         "Windows did not allocate a usable screenshot bitmap.",
         "Windows kullanılabilir bir ekran görüntüsü bit eşlemi ayıramadı.",
+    ),
+    (
+        "Windows has no text recognition language installed. Add a language under Settings › Time & language › Language & region.",
+        "Windows'ta yüklü bir metin tanıma dili yok. Ayarlar › Zaman ve dil › Dil ve bölge bölümünden bir dil ekleyin.",
     ),
     (
         "Windows rejected the clipboard image: {}",
