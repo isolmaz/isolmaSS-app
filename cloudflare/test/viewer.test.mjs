@@ -56,7 +56,7 @@ describe('viewer page', () => {
     expect(html).toContain('>İndir</a>');
     expect(html).toContain('>Orijinali aç</a>');
     expect(html).toContain('alt="Paylaşılan ekran görüntüsü"');
-    expect(html).toContain('data-done="Kopyalandı">Bağlantıyı kopyala</button>');
+    expect(html).toContain('data-done="Kopyalandı" data-failed="Kopyalanamadı">Bağlantıyı kopyala</button>');
     expect(html).toContain(`title="Kötüye kullanımı Cloudflare'e bildir" aria-label="Kötüye kullanımı Cloudflare'e bildir">Bildir</a>`);
     expect(html).not.toContain('Download');
     expect(html).not.toContain('Report');
@@ -118,6 +118,7 @@ describe('viewer branding and actions', () => {
     expect(html).not.toContain('Get isolmaSS');
     expect(html).not.toContain('Free screenshot tool');
     expect(html).not.toContain('Copy link');
+    expect(html).not.toContain('Copy failed');
   });
 
   it('follows the first language of Accept-Language only', async () => {
@@ -130,12 +131,14 @@ describe('viewer branding and actions', () => {
   it('keeps Copy link hidden until the script finds the Clipboard API, and copies the page address', async () => {
     const id = await upload(png());
     const html = await (await navigate(`/i/${id}`)).text();
-    expect(html).toContain(`<button class="btn" id="copy" type="button" hidden aria-live="polite" data-url="https://share.test/i/${id}" data-done="Copied">Copy link</button>`);
+    expect(html).toContain(`<button class="btn" id="copy" type="button" hidden aria-live="polite" data-url="https://share.test/i/${id}" data-done="Copied" data-failed="Copy failed">Copy link</button>`);
     const script = /<script nonce="[^"]+">(.*?)<\/script>/.exec(html)[1];
     expect(script).toContain("document.getElementById('copy')");
     expect(script).toContain('if(!navigator.clipboard)return;b.hidden=false');
     expect(script).toContain('navigator.clipboard.writeText(b.dataset.url)');
-    expect(script).toContain('b.textContent=b.dataset.done');
+    // A refused write must end in the "Copy failed" label, not in an unhandled rejection.
+    expect(script).toContain('.then(()=>show(b.dataset.done)).catch(()=>show(b.dataset.failed))');
+    expect(script).toContain('b.textContent=text;clearTimeout(timer);timer=setTimeout(()=>{b.textContent=label},2000)');
     expect(html).toContain('.btn[hidden]{display:none}');
   });
 

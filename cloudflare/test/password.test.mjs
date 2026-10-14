@@ -222,6 +222,19 @@ describe('correct password', () => {
     }
   });
 
+  it.each(['raw=1', 'download=1'])('never answers %s with a 304, even for the ETag of the unprotected image', async query => {
+    const bytes = png({ size: 300 });
+    const id = await upload(bytes, { password: PASSWORD });
+    const cookie = cookieOf(await unlock(id, PASSWORD));
+    const response = await navigate(`/i/${id}?${query}`, { Cookie: cookie, 'If-None-Match': `"${id}"` });
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Content-Type')).toBe('image/png');
+    expect(response.headers.get('Cache-Control')).toBe('private, no-store');
+    expect(response.headers.get('Vary')).toBe('Cookie');
+    expect(response.headers.get('ETag')).toBeNull();
+    expect(await bytesOf(response)).toEqual(bytes);
+  });
+
   it('answers a download or ?raw=1 without a valid cookie with the password form, never with bytes', async () => {
     const id = await upload(png(), { password: PASSWORD });
     const other = await upload(png(), { password: PASSWORD });

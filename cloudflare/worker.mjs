@@ -225,7 +225,7 @@ const VIEWER_TEXT = {
     wrong: 'Wrong password. Check it and try again.',
     shot: {
       title: 'Screenshot', alt: 'Shared screenshot', download: 'Download', original: 'Open original',
-      copy: 'Copy link', copied: 'Copied', report: 'Report', reportTitle: 'Report abuse to Cloudflare',
+      copy: 'Copy link', copied: 'Copied', copyFailed: 'Copy failed', report: 'Report', reportTitle: 'Report abuse to Cloudflare',
     },
     password: { title: 'Password-protected screenshot', heading: 'This screenshot is password protected', note: 'Ask the person who shared it for the password.' },
     gone: { title: 'Screenshot unavailable', heading: 'This screenshot is no longer available', note: 'It expired or its owner deleted it.' },
@@ -244,7 +244,7 @@ const VIEWER_TEXT = {
     wrong: 'Şifre yanlış. Kontrol edip yeniden deneyin.',
     shot: {
       title: 'Ekran görüntüsü', alt: 'Paylaşılan ekran görüntüsü', download: 'İndir', original: 'Orijinali aç',
-      copy: 'Bağlantıyı kopyala', copied: 'Kopyalandı', report: 'Bildir', reportTitle: "Kötüye kullanımı Cloudflare'e bildir",
+      copy: 'Bağlantıyı kopyala', copied: 'Kopyalandı', copyFailed: 'Kopyalanamadı', report: 'Bildir', reportTitle: "Kötüye kullanımı Cloudflare'e bildir",
     },
     password: { title: 'Şifreli ekran görüntüsü', heading: 'Bu ekran görüntüsü şifreli', note: 'Şifreyi paylaşan kişiden isteyin.' },
     gone: { title: 'Ekran görüntüsü yok', heading: 'Bu ekran görüntüsü artık yok', note: 'Süresi doldu ya da paylaşan kişi sildi.' },
@@ -272,8 +272,8 @@ const SITE = 'https://ss.isolmaz.com';
 const DOWNLOAD_PAGE = `${SITE}/download`;
 /** The screenshots live in the uploader's own Cloudflare account, so Cloudflare is who takes abuse reports. */
 const ABUSE_FORM = 'https://abuse.cloudflare.com/';
-/** Shows the "Copy link" button where the Clipboard API exists and confirms a copy for two seconds. */
-const COPY_SCRIPT = "(()=>{const b=document.getElementById('copy');if(!navigator.clipboard)return;b.hidden=false;const label=b.textContent;let timer;b.onclick=()=>navigator.clipboard.writeText(b.dataset.url).then(()=>{b.textContent=b.dataset.done;clearTimeout(timer);timer=setTimeout(()=>{b.textContent=label},2000)})})()";
+/** Shows the "Copy link" button where the Clipboard API exists; a copy or a refusal is confirmed on it for two seconds. */
+const COPY_SCRIPT = "(()=>{const b=document.getElementById('copy');if(!navigator.clipboard)return;b.hidden=false;const label=b.textContent;let timer;const show=text=>{b.textContent=text;clearTimeout(timer);timer=setTimeout(()=>{b.textContent=label},2000)};b.onclick=()=>navigator.clipboard.writeText(b.dataset.url).then(()=>show(b.dataset.done)).catch(()=>show(b.dataset.failed))})()";
 const GLYPHS = {
   lock: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>',
   alert: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v6"/><path d="M12 16.5v.01"/></svg>',
@@ -363,7 +363,7 @@ function sharePage(request, record, locked) {
   const html = documentShell(lang, {
     title: text.title,
     head: locked ? '' : `<meta property="og:type" content="website"><meta property="og:title" content="${escapeHtml(text.title)} · isolmaSS"><meta property="og:image" content="${absolute}"><meta property="og:image:type" content="${record.content_type}">${known ? `<meta property="og:image:width" content="${record.width}"><meta property="og:image:height" content="${record.height}">` : ''}<meta name="twitter:card" content="summary_large_image"><meta name="twitter:image" content="${absolute}">`,
-    body: `<div class="bar"><a class="btn" href="/i/${id}?download=1">${text.download}</a><a class="btn" href="${raw}" target="_blank" rel="noopener">${text.original}</a><button class="btn" id="copy" type="button" hidden aria-live="polite" data-url="${escapeHtml(`${origin}/i/${id}`)}" data-done="${text.copied}">${text.copy}</button><a class="btn quiet end" href="${ABUSE_FORM}" target="_blank" rel="noopener noreferrer" title="${text.reportTitle}" aria-label="${text.reportTitle}">${text.report}</a></div><main class="stage"><a class="shot" href="${raw}"><img src="${raw}" alt="${text.alt}"${known ? ` width="${record.width}" height="${record.height}"` : ''}></a></main><script nonce="${nonce}">${COPY_SCRIPT}</script>`,
+    body: `<div class="bar"><a class="btn" href="/i/${id}?download=1">${text.download}</a><a class="btn" href="${raw}" target="_blank" rel="noopener">${text.original}</a><button class="btn" id="copy" type="button" hidden aria-live="polite" data-url="${escapeHtml(`${origin}/i/${id}`)}" data-done="${text.copied}" data-failed="${text.copyFailed}">${text.copy}</button><a class="btn quiet end" href="${ABUSE_FORM}" target="_blank" rel="noopener noreferrer" title="${text.reportTitle}" aria-label="${text.reportTitle}">${text.report}</a></div><main class="stage"><a class="shot" href="${raw}"><img src="${raw}" alt="${text.alt}"${known ? ` width="${record.width}" height="${record.height}"` : ''}></a></main><script nonce="${nonce}">${COPY_SCRIPT}</script>`,
   });
   return htmlResponse(request, html, { nonce, headers: locked ? { Vary: 'Cookie' } : {} });
 }
