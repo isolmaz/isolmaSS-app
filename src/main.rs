@@ -365,9 +365,7 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
         }
     }
     updater::run_startup_work(settings.check_updates_automatically);
-    std::thread::spawn(|| {
-        drag::sweep();
-    });
+    drag::sweep_in_background();
     if open_settings {
         tray::queue_command(TrayCommand::Settings);
     }
@@ -538,7 +536,10 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
         let _ = KillTimer(tray::window_handle(), CAPTURE_TIMER);
     }
     tray::capture_finished();
+    // The open upload card takes its dragged copy of the image with it.
+    toast::close_now();
     pin::close_all();
+    drag::finish_pending();
     drop(services);
     drop(runtime.take());
     drop(tray_manager);
@@ -574,6 +575,7 @@ fn run_capture_once() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     toast::wait_until_closed();
+    drag::finish_pending();
     pin::wait_until_closed();
     Ok(())
 }

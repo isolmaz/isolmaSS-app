@@ -172,12 +172,14 @@ impl Drop for OleSession {
 }
 
 /// Drags `payload` out of the window the left button is held on and returns when the
-/// button is released (a drop) or Esc is pressed. The drop target decides what it takes.
-pub fn run(payload: Payload) -> Result<()> {
+/// button is released or Esc is pressed. True when a drop target accepted the copy.
+pub fn run(payload: Payload) -> Result<bool> {
     unsafe { OleInitialize(None)? };
     let _session = OleSession;
     let data: IDataObject = DataObject::new(payload).into();
     let source: IDropSource = DropSource.into();
     let mut effect = DROPEFFECT(0);
-    unsafe { DoDragDrop(&data, &source, DROPEFFECT_COPY, &mut effect) }.ok()
+    let outcome = unsafe { DoDragDrop(&data, &source, DROPEFFECT_COPY, &mut effect) };
+    outcome.ok()?;
+    Ok(super::dropped(outcome, effect.0))
 }

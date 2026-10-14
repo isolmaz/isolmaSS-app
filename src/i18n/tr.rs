@@ -538,6 +538,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     ("Duplicate OAuth parameter.", "Yinelenen OAuth parametresi."),
     ("Editor", "Düzenleyici"),
+    ("Ellipse", "Elips"),
     (
         "Enter a positive whole number in every field.",
         "Her alana pozitif bir tam sayı girin.",
@@ -645,6 +646,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Light yellow", "Açık sarı"),
     ("Limits", "Sınırlar"),
     ("Limits saved.", "Sınırlar kaydedildi."),
+    ("Line", "Çizgi"),
     ("Line width", "Çizgi kalınlığı"),
     (
         "Link copied to the clipboard.",
@@ -1291,8 +1293,8 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     ("Windows language", "Windows dili"),
     (
-        "Applies after you save and reopen Settings.",
-        "Kaydedip Ayarlar'ı yeniden açınca uygulanır.",
+        "Applies at once. Cancel restores the previous language.",
+        "Hemen uygulanır. İptal önceki dili geri getirir.",
     ),
     (
         "{} is reserved. Choose another shortcut.",
@@ -1358,4 +1360,12 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Choose color…", "Renk seç…"),
     ("Line width…", "Çizgi kalınlığı…"),
     ("Cut failed", "Metin kesme başarısız"),
+    (
+        "On the Cloudflare page, allow the account that should host your Worker. If you have several accounts, allow only that one.",
+        "Cloudflare sayfasında, Worker'ınızı barındıracak hesaba izin verin. Birden fazla hesabınız varsa yalnızca o hesaba izin verin.",
+    ),
+    (
+        "On the Cloudflare page, allow the account that owns {}.",
+        "Cloudflare sayfasında, {} adresine sahip olan hesaba izin verin.",
+    ),
 ];

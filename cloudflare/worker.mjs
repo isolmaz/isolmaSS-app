@@ -1,7 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 
 /** Reported by /api/setup and /api/stats so the app can offer a Worker update. */
-const WORKER_VERSION = 4;
+const WORKER_VERSION = 5;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: true });
 const IMAGE_ID = /^[A-Za-z0-9_-]{32}$/;
@@ -218,11 +218,15 @@ async function screenshot(request, maximum, type) {
 /** Texts of every page a viewer can see; each page is a { title, heading, note }. */
 const VIEWER_TEXT = {
   en: {
-    footer: 'Shared with isolmaSS',
+    footer: 'Shared with {brand} · Free screenshot tool for Windows',
+    cta: 'Get isolmaSS — free',
     label: 'Password',
     button: 'Open screenshot',
     wrong: 'Wrong password. Check it and try again.',
-    shot: { title: 'Screenshot', alt: 'Shared screenshot', download: 'Download', original: 'Open original' },
+    shot: {
+      title: 'Screenshot', alt: 'Shared screenshot', download: 'Download', original: 'Open original',
+      copy: 'Copy link', copied: 'Copied', copyFailed: 'Copy failed', report: 'Report', reportTitle: 'Report abuse to Cloudflare',
+    },
     password: { title: 'Password-protected screenshot', heading: 'This screenshot is password protected', note: 'Ask the person who shared it for the password.' },
     gone: { title: 'Screenshot unavailable', heading: 'This screenshot is no longer available', note: 'It expired or its owner deleted it.' },
     tooMany: { title: 'Too many attempts', heading: 'Too many attempts', note: 'Try again in one hour.' },
@@ -233,11 +237,15 @@ const VIEWER_TEXT = {
     home: { title: 'Private share host', heading: 'Private isolmaSS share host', note: 'Screenshots here can only be opened with their link.' },
   },
   tr: {
-    footer: 'isolmaSS ile paylaşıldı',
+    footer: '{brand} ile paylaşıldı · Windows için ücretsiz ekran görüntüsü aracı',
+    cta: "isolmaSS'i ücretsiz edinin",
     label: 'Şifre',
     button: 'Ekran görüntüsünü aç',
     wrong: 'Şifre yanlış. Kontrol edip yeniden deneyin.',
-    shot: { title: 'Ekran görüntüsü', alt: 'Paylaşılan ekran görüntüsü', download: 'İndir', original: 'Orijinali aç' },
+    shot: {
+      title: 'Ekran görüntüsü', alt: 'Paylaşılan ekran görüntüsü', download: 'İndir', original: 'Orijinali aç',
+      copy: 'Bağlantıyı kopyala', copied: 'Kopyalandı', copyFailed: 'Kopyalanamadı', report: 'Bildir', reportTitle: "Kötüye kullanımı Cloudflare'e bildir",
+    },
     password: { title: 'Şifreli ekran görüntüsü', heading: 'Bu ekran görüntüsü şifreli', note: 'Şifreyi paylaşan kişiden isteyin.' },
     gone: { title: 'Ekran görüntüsü yok', heading: 'Bu ekran görüntüsü artık yok', note: 'Süresi doldu ya da paylaşan kişi sildi.' },
     tooMany: { title: 'Çok fazla deneme', heading: 'Çok fazla deneme', note: 'Bir saat sonra yeniden deneyin.' },
@@ -259,6 +267,13 @@ function escapeHtml(value) { return String(value).replace(/[&<>"']/g, ch => HTML
 /** The app icon, also used as the favicon of every page. */
 const ICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none"><rect x="16" y="16" width="224" height="224" rx="52" fill="#F59E0B"/><path d="M184 104V76C184 64.9543 175.046 56 164 56H76C64.9543 56 56 64.9543 56 76V164C56 175.046 64.9543 184 76 184H104" stroke="#141413" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/><path d="M120 120L210 150L168 168L150 210L120 120Z" fill="#FFFFFF" stroke="#141413" stroke-width="12" stroke-linejoin="round"/></svg>';
 const FAVICON_URI = `data:image/svg+xml,${encodeURIComponent(ICON_SVG)}`;
+const BRAND_MARK = ICON_SVG.replace('<svg ', '<svg width="22" height="22" aria-hidden="true" ');
+const SITE = 'https://ss.isolmaz.com';
+const DOWNLOAD_PAGE = `${SITE}/download`;
+/** The screenshots live in the uploader's own Cloudflare account, so Cloudflare is who takes abuse reports. */
+const ABUSE_FORM = 'https://abuse.cloudflare.com/';
+/** Shows the "Copy link" button where the Clipboard API exists; a copy or a refusal is confirmed on it for two seconds. */
+const COPY_SCRIPT = "(()=>{const b=document.getElementById('copy');if(!navigator.clipboard)return;b.hidden=false;const label=b.textContent;let timer;const show=text=>{b.textContent=text;clearTimeout(timer);timer=setTimeout(()=>{b.textContent=label},2000)};b.onclick=()=>navigator.clipboard.writeText(b.dataset.url).then(()=>show(b.dataset.done)).catch(()=>show(b.dataset.failed))})()";
 const GLYPHS = {
   lock: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>',
   alert: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v6"/><path d="M12 16.5v.01"/></svg>',
@@ -284,24 +299,33 @@ input[aria-invalid=true]{border-color:var(--danger)}
 .btn.primary{border-color:transparent;background:var(--accent);color:var(--ink)}
 .btn.primary:hover{background:var(--accent-hover)}
 .btn.primary:active{background:var(--accent-pressed)}
+.btn.quiet{border-color:transparent;background:transparent;color:var(--muted);font-weight:400}
+.btn.quiet:hover{background:var(--card);color:var(--fg)}
+.btn[hidden]{display:none}
 :focus-visible{outline:2px solid var(--fg);outline-offset:2px}
 a{color:var(--link)}
+.top{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:.5rem 1rem;padding:.5rem 1rem;border-bottom:1px solid var(--line);background:var(--card)}
+.brand{display:inline-flex;align-items:center;gap:.5rem;color:var(--fg);font-weight:600;text-decoration:none}
+.brand svg{display:block}
+.top .btn{min-height:2rem;padding:.2rem 1rem;font-size:.875rem}
 .bar{display:flex;flex-wrap:wrap;gap:.5rem;padding:.75rem 1rem}
+.end{margin-inline-start:auto}
 .stage{display:grid;place-items:center;flex:1;margin:0;padding:0 1rem 1rem}
 .shot{display:block;cursor:zoom-in}
-.shot img{display:block;width:auto;height:auto;max-width:100%;max-height:calc(100dvh - 8rem);object-fit:contain;border:1px solid var(--line);border-radius:8px;background:var(--card)}
+.shot img{display:block;width:auto;height:auto;max-width:100%;max-height:calc(100dvh - 12rem);object-fit:contain;border:1px solid var(--line);border-radius:8px;background:var(--card)}
 footer{padding:1rem;text-align:center;color:var(--muted);font-size:.875rem}
 `.replaceAll('\n', '');
 const PAGE_CSP = "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'";
 
 function documentShell(lang, { title, head, body }) {
   const text = VIEWER_TEXT[lang];
-  return `<!doctype html><html lang="${lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="robots" content="${ROBOTS}"><meta name="theme-color" content="#F3F3F3" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#202020" media="(prefers-color-scheme: dark)"><title>${escapeHtml(title)} · isolmaSS</title><link rel="icon" type="image/svg+xml" href="${FAVICON_URI}"><meta property="og:site_name" content="isolmaSS">${head}<style>${PAGE_CSS}</style></head><body>${body}<footer>${text.footer}</footer></body></html>`;
+  return `<!doctype html><html lang="${lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="robots" content="${ROBOTS}"><meta name="theme-color" content="#F3F3F3" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#202020" media="(prefers-color-scheme: dark)"><title>${escapeHtml(title)} · isolmaSS</title><link rel="icon" type="image/svg+xml" href="${FAVICON_URI}"><meta property="og:site_name" content="isolmaSS">${head}<style>${PAGE_CSS}</style></head><body><header class="top"><a class="brand" href="${SITE}">${BRAND_MARK}isolmaSS</a><a class="btn primary" href="${DOWNLOAD_PAGE}">${text.cta}</a></header>${body}<footer>${text.footer.replace('{brand}', `<a href="${SITE}">isolmaSS</a>`)}</footer></body></html>`;
 }
-function htmlResponse(request, html, { status = 200, form = false, headers = {} } = {}) {
+/** `nonce` allows the one inline script of the share page; every other page runs none. */
+function htmlResponse(request, html, { status = 200, form = false, nonce = '', headers }) {
   return respond(request, html, { status, headers: {
     ...NO_STORE, ...SHARE_HEADERS, 'Content-Type': 'text/html; charset=utf-8',
-    'Content-Security-Policy': `${PAGE_CSP}; form-action ${form ? "'self'" : "'none'"}`,
+    'Content-Security-Policy': `${PAGE_CSP}${nonce ? `; script-src 'nonce-${nonce}'` : ''}; form-action ${form ? "'self'" : "'none'"}`,
     'X-Frame-Options': 'DENY', ...headers,
   } });
 }
@@ -324,18 +348,24 @@ function passwordPage(request, id, wrong = false) {
   const form = `<form method="post" action="/i/${id}/unlock"><label for="password">${text.label}</label><input id="password" name="password" type="password" required autofocus minlength="12" maxlength="128" autocomplete="off" autocapitalize="off" spellcheck="false"${wrong ? ' aria-invalid="true" aria-describedby="error"' : ''}>${wrong ? `<p class="error" id="error" role="alert">${text.wrong}</p>` : ''}<button class="btn primary" type="submit">${text.button}</button></form>`;
   return cardPage(request, 'password', { status: wrong ? 403 : 200, glyph: 'lock', form, headers: { Vary: 'Cookie' } });
 }
-/** The page an unprotected share shows to a browser; the image itself is the raw URL. */
-function sharePage(request, record) {
+/**
+ * The page a share shows to a browser; the image itself is the raw URL. A password-protected
+ * share shows it once unlocked, with `?raw=1` as the raw URL because the unlock cookie does not
+ * reach the .png address, and without the og: tags, which no unfurler could fetch.
+ */
+function sharePage(request, record, locked) {
   const lang = viewerLanguage(request), text = VIEWER_TEXT[lang].shot;
-  const raw = `/i/${record.id}.${extensionOf(record)}`;
-  const absolute = escapeHtml(`${new URL(request.url).origin}${raw}`);
+  const id = record.id, origin = new URL(request.url).origin;
+  const raw = locked ? `/i/${id}?raw=1` : `/i/${id}.${extensionOf(record)}`;
+  const absolute = escapeHtml(`${origin}${raw}`);
   const known = record.width && record.height;
+  const nonce = randomId();
   const html = documentShell(lang, {
     title: text.title,
-    head: `<meta property="og:type" content="website"><meta property="og:title" content="${escapeHtml(text.title)} · isolmaSS"><meta property="og:image" content="${absolute}"><meta property="og:image:type" content="${record.content_type}">${known ? `<meta property="og:image:width" content="${record.width}"><meta property="og:image:height" content="${record.height}">` : ''}<meta name="twitter:card" content="summary_large_image"><meta name="twitter:image" content="${absolute}">`,
-    body: `<header class="bar"><a class="btn primary" href="${raw}" download="${shareFilename(record)}">${text.download}</a><a class="btn" href="${raw}">${text.original}</a></header><main class="stage"><a class="shot" href="${raw}"><img src="${raw}" alt="${text.alt}"${known ? ` width="${record.width}" height="${record.height}"` : ''}></a></main>`,
+    head: locked ? '' : `<meta property="og:type" content="website"><meta property="og:title" content="${escapeHtml(text.title)} · isolmaSS"><meta property="og:image" content="${absolute}"><meta property="og:image:type" content="${record.content_type}">${known ? `<meta property="og:image:width" content="${record.width}"><meta property="og:image:height" content="${record.height}">` : ''}<meta name="twitter:card" content="summary_large_image"><meta name="twitter:image" content="${absolute}">`,
+    body: `<div class="bar"><a class="btn" href="/i/${id}?download=1">${text.download}</a><a class="btn" href="${raw}" target="_blank" rel="noopener">${text.original}</a><button class="btn" id="copy" type="button" hidden aria-live="polite" data-url="${escapeHtml(`${origin}/i/${id}`)}" data-done="${text.copied}" data-failed="${text.copyFailed}">${text.copy}</button><a class="btn quiet end" href="${ABUSE_FORM}" target="_blank" rel="noopener noreferrer" title="${text.reportTitle}" aria-label="${text.reportTitle}">${text.report}</a></div><main class="stage"><a class="shot" href="${raw}"><img src="${raw}" alt="${text.alt}"${known ? ` width="${record.width}" height="${record.height}"` : ''}></a></main><script nonce="${nonce}">${COPY_SCRIPT}</script>`,
   });
-  return htmlResponse(request, html);
+  return htmlResponse(request, html, { nonce, headers: locked ? { Vary: 'Cookie' } : {} });
 }
 /** Cheap edge answers that never need the Durable Object or the rate limiter. */
 function edgeReply(request, path) {
@@ -528,8 +558,11 @@ export class ShareStore extends DurableObject {
       }
     });
   }
-  /** The image bytes; a HEAD gets the same headers without reading storage or counting a view. */
-  async imageResponse(request, record, now, unlocked) {
+  /**
+   * The image bytes, inline or as a download; a HEAD gets the same headers without reading
+   * storage or counting a view.
+   */
+  async imageResponse(request, record, now, unlocked, download) {
     const head = request.method === 'HEAD';
     let body = null;
     if (!head) {
@@ -544,27 +577,31 @@ export class ShareStore extends DurableObject {
     return new Response(body, { headers: {
       ...SHARE_HEADERS, ...cache, 'Content-Type': record.content_type, 'Content-Length': String(record.size_bytes),
       'Content-Security-Policy': "default-src 'none'; sandbox",
-      'Content-Disposition': `inline; filename="${shareFilename(record)}"`,
+      'Content-Disposition': `${download ? 'attachment' : 'inline'}; filename="${shareFilename(record)}"`,
     } });
   }
   findImage(id, now) {
     return this.sql.exec('SELECT * FROM images WHERE id = ? AND expires_at > ?', id, Math.floor(now / 1000)).toArray()[0];
   }
-  /** GET and HEAD of /i/<id>[.png|.jpg]: the image, its HTML page or the password form. */
+  /**
+   * GET and HEAD of /i/<id>[.png|.jpg]: the image, its HTML page or the password form.
+   * `?download=1` asks for the bytes as an attachment and `?raw=1` for them inline, whatever the
+   * address or the request headers say; both go through the same checks as the page.
+   */
   async view(request, name, now) {
     const match = SHARE_NAME.exec(name);
     const record = match && this.findImage(match[1], now);
     if (!record || (match[2] && match[2] !== extensionOf(record))) return viewerError(request, 404, 'gone');
-    if (record.password_hash) {
-      if (!await this.unlocked(request, record.id, now)) return passwordPage(request, record.id);
-      return await this.imageResponse(request, record, now, true);
-    }
-    if (!match[2] && wantsPage(request)) {
+    const protectedShare = Boolean(record.password_hash);
+    if (protectedShare && !await this.unlocked(request, record.id, now)) return passwordPage(request, record.id);
+    const query = new URL(request.url).searchParams;
+    const download = query.get('download') === '1';
+    if (!match[2] && !download && query.get('raw') !== '1' && wantsPage(request)) {
       if (request.method !== 'HEAD') await this.recordView(request, record, now);
-      return sharePage(request, record);
+      return sharePage(request, record, protectedShare);
     }
-    if (request.headers.get('If-None-Match') === etag(record.id)) return notModified(record, now);
-    return await this.imageResponse(request, record, now, false);
+    if (!protectedShare && request.headers.get('If-None-Match') === etag(record.id)) return notModified(record, now);
+    return await this.imageResponse(request, record, now, protectedShare, download);
   }
   /** POST /i/<id>/unlock: a correct password redirects to the image with a signed cookie. */
   async unlock(request, id, now) {

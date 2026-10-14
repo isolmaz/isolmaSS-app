@@ -5,9 +5,12 @@
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
+use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
-use windows::Win32::Foundation::SYSTEMTIME;
+use windows::Win32::Foundation::{DRAGDROP_S_DROP, SYSTEMTIME};
 use windows::Win32::System::SystemInformation::GetLocalTime;
+use windows::core::HRESULT;
 
 mod ole;
 pub use ole::run;
@@ -20,8 +23,14 @@ const CF_UNICODETEXT: u16 = 13;
 const DROPFILES_LEN: usize = 20;
 /// How many `-2`, `-3`, … names are tried when the plain name is taken.
 const NAME_TRIES: u32 = 99;
-/// How long a dragged copy stays in the temporary folder.
+/// How long a dragged copy stays in the temporary folder if nothing else removed it.
 const KEEP: Duration = Duration::from_secs(24 * 60 * 60);
+/// How long after a drop its card's copy is kept: chat apps and browsers may read the file
+/// only after `DoDragDrop` has returned.
+const GRACE: Duration = Duration::from_secs(10);
+
+/// The deletions [`discard`] has started and that have not been waited for.
+static REMOVALS: Mutex<Vec<JoinHandle<()>>> = Mutex::new(Vec::new());
 
 /// An `HDROP` buffer for one file: the `DROPFILES` header (offset of the list, drop point,
 /// non-client flag, wide-characters flag), the UTF-16 path and the double NUL that ends
@@ -157,9 +166,60 @@ fn remove_older_than(directory: &Path, now: SystemTime, max_age: Duration) -> us
         .count()
 }
 
-/// Removes the dragged copies of earlier sessions that are a day old.
+/// Removes the dragged copies that are a day old, whichever card or session made them.
 pub fn sweep() -> usize {
     remove_older_than(&directory(), SystemTime::now(), KEEP)
+}
+
+/// [`sweep`] on a background thread, for the UI thread; the thread returns the count.
+pub fn sweep_in_background() -> JoinHandle<usize> {
+    std::thread::spawn(sweep)
+}
+
+/// Whether `DoDragDrop` ended with a drop that the target accepted, as opposed to Esc, a
+/// release over nothing or a target that refused the copy.
+fn dropped(outcome: HRESULT, effect: u32) -> bool {
+    outcome == DRAGDROP_S_DROP && effect != 0
+}
+
+/// What is left of the grace period when the card closes `elapsed` after its last accepted
+/// drop; none when nothing was dropped.
+pub fn grace_left(elapsed: Option<Duration>) -> Duration {
+    elapsed.map_or(Duration::ZERO, |elapsed| GRACE.saturating_sub(elapsed))
+}
+
+/// Deletes a file; one that is already gone is fine, any other failure is recorded.
+fn remove_quietly(path: &Path) {
+    if let Err(error) = std::fs::remove_file(path)
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        crate::diagnostics::record("drag cleanup", &error.to_string());
+    }
+}
+
+/// Deletes the dragged copy `path` after `wait`, on a background thread: right away
+/// (`Duration::ZERO`) for a card whose image was never dropped, after what is left of the
+/// grace period for one that was.
+pub fn discard(path: PathBuf, wait: Duration) {
+    let removal = std::thread::spawn(move || {
+        std::thread::sleep(wait);
+        remove_quietly(&path);
+    });
+    let mut pending = REMOVALS.lock().unwrap_or_else(PoisonError::into_inner);
+    pending.retain(|started| !started.is_finished());
+    pending.push(removal);
+}
+
+/// Waits until every deletion started by [`discard`] has been made, at most one grace
+/// period. A process that is about to end calls this, since ending would take the
+/// background thread, and with it the deletion, along.
+pub fn finish_pending() {
+    let mut guard = REMOVALS.lock().unwrap_or_else(PoisonError::into_inner);
+    let pending = std::mem::take(&mut *guard);
+    drop(guard);
+    for removal in pending {
+        let _ = removal.join();
+    }
 }
 
 #[cfg(test)]
@@ -440,7 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn the_startup_sweep_clears_a_stale_copy_from_the_drag_folder() {
+    fn the_sweep_clears_a_stale_copy_from_the_drag_folder_and_only_that_folder() {
         let folder = directory();
         std::fs::create_dir_all(&folder).unwrap();
         let name = format!("sweep-test-{}", std::process::id());
@@ -449,9 +509,97 @@ mod tests {
         std::fs::write(&stale, b"image").unwrap();
         std::fs::write(&fresh, b"image").unwrap();
         age(&stale, KEEP * 2);
-        assert!(sweep() >= 1);
+        // A stale file next to the folder, in the parent, is not this sweep's business.
+        let beside = folder.parent().unwrap().join(format!("{name}-beside.png"));
+        std::fs::write(&beside, b"image").unwrap();
+        age(&beside, KEEP * 2);
+
+        let removed = sweep_in_background().join().expect("the sweep finished");
+        assert!(removed >= 1);
         assert!(!stale.exists());
         assert!(fresh.exists());
+        assert!(beside.exists());
         std::fs::remove_file(&fresh).unwrap();
+        std::fs::remove_file(&beside).unwrap();
+    }
+
+    #[test]
+    fn only_an_accepted_drop_counts_as_a_drop() {
+        use windows::Win32::Foundation::{DRAGDROP_S_CANCEL, S_OK};
+        assert!(dropped(DRAGDROP_S_DROP, 1), "copied");
+        assert!(!dropped(DRAGDROP_S_DROP, 0), "released over a target that refused it");
+        assert!(!dropped(DRAGDROP_S_CANCEL, 1), "Esc");
+        assert!(!dropped(S_OK, 1));
+    }
+
+    #[test]
+    fn the_copy_of_a_dropped_card_is_kept_for_ten_seconds_after_the_drop() {
+        let secs = Duration::from_secs;
+        assert_eq!(grace_left(None), Duration::ZERO, "nothing was dropped");
+        assert_eq!(grace_left(Some(Duration::ZERO)), secs(10));
+        assert_eq!(grace_left(Some(secs(4))), secs(6));
+        assert_eq!(grace_left(Some(Duration::from_millis(9_999))), Duration::from_millis(1));
+        assert_eq!(grace_left(Some(secs(10))), Duration::ZERO);
+        assert_eq!(grace_left(Some(secs(3600))), Duration::ZERO);
+    }
+
+    #[test]
+    fn a_discarded_copy_is_deleted_in_the_background_without_delay() {
+        let dir = TempDir::new("drag_discard");
+        let copy = dir.path().join("shot.png");
+        let neighbour = dir.path().join("neighbour.png");
+        std::fs::write(&copy, b"image").unwrap();
+        std::fs::write(&neighbour, b"image").unwrap();
+        discard(copy.clone(), Duration::ZERO);
+        finish_pending();
+        assert!(!copy.exists());
+        assert!(neighbour.exists(), "only the named copy goes");
+        finish_pending();
+    }
+
+    #[test]
+    fn a_copy_that_was_just_dropped_survives_until_its_grace_period_is_over() {
+        let dir = TempDir::new("drag_grace");
+        let copy = dir.path().join("shot.png");
+        std::fs::write(&copy, b"image").unwrap();
+        let wait = Duration::from_millis(400);
+        let started = std::time::Instant::now();
+        discard(copy.clone(), wait);
+        assert!(copy.exists(), "a chat app may still be reading it");
+        finish_pending();
+        assert!(!copy.exists());
+        assert!(started.elapsed() >= wait, "ending the process waits for the deletion");
+    }
+
+    #[test]
+    fn discarding_a_copy_that_is_gone_or_cannot_be_deleted_changes_nothing_else() {
+        let dir = TempDir::new("drag_discard_fails");
+        discard(dir.path().join("gone.png"), Duration::ZERO);
+        let folder = dir.path().join("folder.png");
+        std::fs::create_dir(&folder).unwrap();
+        discard(folder.clone(), Duration::ZERO);
+        finish_pending();
+        assert!(folder.is_dir(), "a folder is not a copy and stays");
+    }
+
+    #[test]
+    fn finished_deletions_are_not_kept_in_the_list() {
+        let dir = TempDir::new("drag_reap");
+        let first = dir.path().join("first.png");
+        let second = dir.path().join("second.png");
+        std::fs::write(&first, b"image").unwrap();
+        std::fs::write(&second, b"image").unwrap();
+        let pending = || REMOVALS.lock().unwrap_or_else(PoisonError::into_inner);
+        discard(first, Duration::ZERO);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !pending().iter().all(JoinHandle::is_finished) && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        discard(second.clone(), Duration::ZERO);
+        assert_eq!(pending().len(), 1, "only the new deletion is waited for");
+        finish_pending();
+        assert_eq!(pending().len(), 0);
+        assert!(!second.exists());
     }
 }

@@ -882,12 +882,34 @@ fn the_step_icon_is_a_filled_badge_with_its_number_in_the_surface_colour() {
 }
 
 #[test]
+fn the_ellipse_icon_is_a_hollow_outline_and_the_line_icon_a_diagonal_stroke() {
+    let rect = Rect::new(0, 0, 64, 64);
+    let ellipse = Canvas::new(64, 64, WHITE);
+    draw_tool_icon(ellipse.hdc, rect, ToolKind::Ellipse, RED, GREEN, DPI);
+    // The 28 x 20 outline is solid on its left vertex and hollow inside; the corners of
+    // its box are empty.
+    assert_color(ellipse.pixel(18, 32), RED, 2, "outline");
+    assert_eq!(ellipse.pixel(32, 32), rgb(WHITE), "hollow");
+    assert_eq!(ellipse.pixel(19, 23), rgb(WHITE), "corner");
+
+    let line = Canvas::new(64, 64, WHITE);
+    draw_tool_icon(line.hdc, rect, ToolKind::Line, RED, GREEN, DPI);
+    // Rising from bottom left to top right through the centre.
+    assert_color(line.pixel(31, 32), RED, 2, "stroke");
+    assert_color(line.pixel(24, 39), RED, 2, "stroke");
+    assert_eq!(line.pixel(20, 20), rgb(WHITE), "above the stroke");
+    assert_eq!(line.pixel(44, 44), rgb(WHITE), "below the stroke");
+}
+
+#[test]
 fn every_other_tool_has_its_own_centred_glyph_in_the_ink_colour() {
     let rect = Rect::new(0, 0, 64, 64);
     let tools = [
         ToolKind::Select,
         ToolKind::Rectangle,
         ToolKind::Arrow,
+        ToolKind::Ellipse,
+        ToolKind::Line,
         ToolKind::Pen,
         ToolKind::Highlight,
         ToolKind::Text,
@@ -966,6 +988,8 @@ fn menu_label(item: ToolbarItem) -> String {
         Tool(ToolKind::Select) => "Select/move".into(),
         Tool(ToolKind::Rectangle) => "Frame".into(),
         Tool(ToolKind::Arrow) => "Arrow".into(),
+        Tool(ToolKind::Ellipse) => "Ellipse".into(),
+        Tool(ToolKind::Line) => "Line".into(),
         Tool(ToolKind::Pen) => "Pen".into(),
         Tool(ToolKind::Highlight) => "Highlighter".into(),
         Tool(ToolKind::Step) => "Numbered step".into(),

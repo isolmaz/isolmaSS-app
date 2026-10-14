@@ -144,6 +144,8 @@ struct State {
     drag_press: Option<POINT>,
     /// The copy of the uploaded image that drops receive, made by the card's first drag.
     staged: Option<PathBuf>,
+    /// When a drop target last accepted the image; its copy is kept a little longer then.
+    dropped_at: Option<Instant>,
     /// A drag out of the card is running; the card stays until it ends.
     dragging: bool,
 }
@@ -221,6 +223,16 @@ pub fn show_upload(prepared: Prepared, anchor: POINT) {
     }
 }
 
+/// Destroys the open card at once, without its fade-out; the app is quitting.
+pub fn close_now() {
+    let current = CURRENT.with(Cell::get);
+    if current != 0 {
+        unsafe {
+            let _ = DestroyWindow(HWND(current as *mut _));
+        }
+    }
+}
+
 /// Pumps messages until the current toast has closed. Used by one-shot
 /// command-line captures, whose process would otherwise end mid-upload.
 pub fn wait_until_closed() {
@@ -264,6 +276,7 @@ fn create(prepared: Prepared, anchor: POINT) -> Result<(), String> {
         copied_flash: false,
         drag_press: None,
         staged: None,
+        dropped_at: None,
         dragging: false,
     });
     let mut ex_style = WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE;
@@ -914,9 +927,11 @@ fn middle_ellipsis(hdc: HDC, text: &str, width: i32) -> Vec<u16> {
 }
 
 /// Whether a press at `point` can start a drag of the uploaded image: the finished card's
-/// body, anywhere but on its buttons.
+/// body, anywhere but on its buttons, until it starts to fade out.
 fn draggable(state: &State, hwnd: HWND, point: POINT) -> bool {
-    matches!(state.phase, Phase::Done { .. }) && hit(state, hwnd, point).is_none()
+    matches!(state.phase, Phase::Done { .. })
+        && !state.closing()
+        && hit(state, hwnd, point).is_none()
 }
 
 /// Adds the tooltip that names the drag. It asks for its text (`TTN_GETDISPINFOW`) each
@@ -1021,12 +1036,16 @@ fn start_drag(hwnd: HWND) {
         let _ = KillTimer(hwnd, TIMER_CLOSE);
     }
     let payload = crate::drag::Payload::new(file.as_deref(), &link);
-    if let Err(error) = crate::drag::run(payload) {
+    let dropped = crate::drag::run(payload).unwrap_or_else(|error| {
         crate::diagnostics::record("drag", &error.to_string());
-    }
+        false
+    });
     let Some(state) = find() else {
         return;
     };
+    if dropped {
+        state.dropped_at = Some(Instant::now());
+    }
     state.dragging = false;
     state.hovering = false;
     state.hot = None;
@@ -1251,6 +1270,15 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_NCDESTROY => {
+            // The dragged copy of the image goes with the card, once an app that has just
+            // received it has had time to read it; the folder's old copies go too.
+            if let Some(copy) = state.staged.take() {
+                crate::drag::discard(
+                    copy,
+                    crate::drag::grace_left(state.dropped_at.map(|at| at.elapsed())),
+                );
+            }
+            crate::drag::sweep_in_background();
             unsafe {
                 let _ = KillTimer(hwnd, TIMER_ANIMATE);
                 let _ = KillTimer(hwnd, TIMER_CLOSE);

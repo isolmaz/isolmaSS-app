@@ -636,6 +636,12 @@ fn letter_keys_pick_tools_and_remember_the_choice() {
     assert!(state.preferences_dirty);
     press(&mut state, &window, key('b'), 0);
     assert_eq!(state.active_tool, ToolKind::Blur);
+    press(&mut state, &window, key('e'), 0);
+    assert_eq!(state.active_tool, ToolKind::Ellipse);
+    assert_eq!(state.settings.last_tool, ToolKind::Ellipse);
+    press(&mut state, &window, key('l'), 0);
+    assert_eq!(state.active_tool, ToolKind::Line);
+    assert_eq!(state.settings.last_tool, ToolKind::Line);
 }
 
 #[test]
