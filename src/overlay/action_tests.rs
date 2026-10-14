@@ -461,7 +461,7 @@ fn the_command_menu_lists_every_tool_even_when_the_strip_is_collapsed() {
             .any(|b| b.item == ToolbarItem::Tool(ToolKind::Text))
     );
     let menu = state.command_menu_buttons().expect("a toolbar is laid out");
-    assert_eq!(menu.len(), shown.len() + 5);
+    assert_eq!(menu.len(), shown.len() + 7);
     let items: Vec<ToolbarItem> = menu.iter().map(|b| b.item).collect();
     let undo = items
         .iter()
@@ -469,8 +469,10 @@ fn the_command_menu_lists_every_tool_even_when_the_strip_is_collapsed() {
         .unwrap();
     // The hidden tools sit together just before Undo, in toolbar order.
     assert_eq!(
-        &items[undo - 5..undo],
+        &items[undo - 7..undo],
         &[
+            ToolbarItem::Tool(ToolKind::Ellipse),
+            ToolbarItem::Tool(ToolKind::Line),
             ToolbarItem::Tool(ToolKind::Highlight),
             ToolbarItem::Tool(ToolKind::Text),
             ToolbarItem::Tool(ToolKind::Step),
