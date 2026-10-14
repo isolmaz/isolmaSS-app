@@ -322,7 +322,7 @@ function documentShell(lang, { title, head, body }) {
   return `<!doctype html><html lang="${lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="robots" content="${ROBOTS}"><meta name="theme-color" content="#F3F3F3" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#202020" media="(prefers-color-scheme: dark)"><title>${escapeHtml(title)} · isolmaSS</title><link rel="icon" type="image/svg+xml" href="${FAVICON_URI}"><meta property="og:site_name" content="isolmaSS">${head}<style>${PAGE_CSS}</style></head><body><header class="top"><a class="brand" href="${SITE}">${BRAND_MARK}isolmaSS</a><a class="btn primary" href="${DOWNLOAD_PAGE}">${text.cta}</a></header>${body}<footer>${text.footer.replace('{brand}', `<a href="${SITE}">isolmaSS</a>`)}</footer></body></html>`;
 }
 /** `nonce` allows the one inline script of the share page; every other page runs none. */
-function htmlResponse(request, html, { status = 200, form = false, nonce = '', headers = {} } = {}) {
+function htmlResponse(request, html, { status = 200, form = false, nonce = '', headers }) {
   return respond(request, html, { status, headers: {
     ...NO_STORE, ...SHARE_HEADERS, 'Content-Type': 'text/html; charset=utf-8',
     'Content-Security-Policy': `${PAGE_CSP}${nonce ? `; script-src 'nonce-${nonce}'` : ''}; form-action ${form ? "'self'" : "'none'"}`,
