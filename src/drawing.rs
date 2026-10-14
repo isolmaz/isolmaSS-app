@@ -35,16 +35,17 @@ struct LineScratch {
     partial: Vec<i32>,
 }
 impl LineScratch {
+    const EMPTY: Self = Self {
+        wide: Vec::new(),
+        partial: Vec::new(),
+    };
+
     fn load(&mut self, line: &str) {
         self.wide.clear();
         self.wide.extend(line.encode_utf16());
     }
 }
-thread_local! {
-    static LINE: RefCell<LineScratch> = const {
-        RefCell::new(LineScratch { wide: Vec::new(), partial: Vec::new() })
-    };
-}
+thread_local! { static LINE: RefCell<LineScratch> = const { RefCell::new(LineScratch::EMPTY) }; }
 thread_local! { static STOPS: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) }; }
 
 /// Runs `action` on the buffer in `slot`. The buffer is moved out meanwhile, so a nested use
