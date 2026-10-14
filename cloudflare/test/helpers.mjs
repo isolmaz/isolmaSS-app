@@ -55,6 +55,22 @@ export async function upload(bytes, { type = 'image/png', password } = {}) {
   return (await response.json()).id;
 }
 
+/** A raw POST of `body` to /api/upload with the upload token; headers override the defaults. */
+export function postImage(body, headers = {}) {
+  return call('/api/upload', { method: 'POST', headers: { ...uploadAuth(), 'Content-Type': 'image/png', ...headers }, body });
+}
+
+/** The bytes as a stream of unknown length, delivered `step` bytes at a time. */
+export function streamOf(bytes, step = 1000) {
+  let position = 0;
+  return new ReadableStream({
+    pull(controller) {
+      if (position >= bytes.length) controller.close();
+      else controller.enqueue(bytes.slice(position, position += step));
+    },
+  });
+}
+
 export function unlock(id, password, headers = {}) {
   return call(`/i/${id}/unlock`, {
     method: 'POST',

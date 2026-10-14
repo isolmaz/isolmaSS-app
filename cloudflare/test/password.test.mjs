@@ -79,6 +79,35 @@ describe('wrong password', () => {
     expect(await long.text()).toContain('role="alert"');
   });
 
+  it('treats a form without a password field as an empty, wrong password', async () => {
+    const id = await upload(png(), { password: PASSWORD });
+    const form = { 'Content-Type': 'application/x-www-form-urlencoded' };
+    for (const body of ['other=1', '', 'password=']) {
+      const response = await call(`/i/${id}/unlock`, { method: 'POST', headers: form, body });
+      expect(response.status).toBe(403);
+      expect(response.headers.get('Set-Cookie')).toBeNull();
+      expect(await response.text()).toContain('role="alert"');
+    }
+  });
+
+  it('answers a request without a body with a 400 page', async () => {
+    const id = await upload(png(), { password: PASSWORD });
+    const response = await call(`/i/${id}/unlock`, { method: 'POST' });
+    expect(response.status).toBe(400);
+    expect(response.headers.get('Content-Type')).toBe('text/html; charset=utf-8');
+    expect(response.headers.get('Set-Cookie')).toBeNull();
+    expect(await response.text()).toContain('This request could not be processed.');
+  });
+
+  it('never matches a stored hash of the wrong length, which only an older Worker could have written', async () => {
+    const id = await upload(png(), { password: PASSWORD });
+    await sql('UPDATE images SET password_hash=? WHERE id=?', base64Url(new Uint8Array(16)), id);
+    const response = await unlock(id, PASSWORD);
+    expect(response.status).toBe(403);
+    expect(response.headers.get('Set-Cookie')).toBeNull();
+    expect(await response.text()).toContain('role="alert"');
+  });
+
   it('rejects a body over 4 KiB with a 413 page', async () => {
     const id = await upload(png(), { password: PASSWORD });
     const response = await unlock(id, 'x'.repeat(5000));

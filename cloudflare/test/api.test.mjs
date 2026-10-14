@@ -1,27 +1,13 @@
 import { evictDurableObject, reset, runInDurableObject } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
-  admin, adminAuth, call, jpeg, navigate, png, putSettings, sql, store, upload, uploadAuth,
+  admin, adminAuth, call, jpeg, navigate, png, postImage, putSettings, sql, store, streamOf, upload,
 } from './helpers.mjs';
 
 const JSON_TYPE = 'application/json; charset=utf-8';
 const LIMIT_MESSAGE = 'Upload limit reached. Change limits or wait for reset.';
 
 beforeEach(async () => { await reset(); });
-
-function post(body, headers = {}) {
-  return call('/api/upload', { method: 'POST', headers: { ...uploadAuth(), 'Content-Type': 'image/png', ...headers }, body });
-}
-
-function streamOf(bytes, step = 1000) {
-  let position = 0;
-  return new ReadableStream({
-    pull(controller) {
-      if (position >= bytes.length) controller.close();
-      else controller.enqueue(bytes.slice(position, position += step));
-    },
-  });
-}
 
 describe('upload', () => {
   it('stores PNG dimensions for the viewer page and none for JPEG', async () => {
@@ -34,7 +20,7 @@ describe('upload', () => {
   });
 
   it('answers 201 with the share address', async () => {
-    const response = await post(png());
+    const response = await postImage(png());
     expect(response.status).toBe(201);
     const { id, url } = await response.json();
     expect(id).toMatch(/^[A-Za-z0-9_-]{32}$/);
@@ -42,7 +28,7 @@ describe('upload', () => {
   });
 
   it('keeps 400 for malformed images', async () => {
-    const response = await post(new Uint8Array(64).fill(9));
+    const response = await postImage(new Uint8Array(64).fill(9));
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: 'Invalid PNG image.' });
   });
@@ -51,20 +37,20 @@ describe('upload', () => {
     beforeEach(async () => { await putSettings({ max_image_bytes: 1024 }); });
 
     it('answers 413 for a body of known length', async () => {
-      const response = await post(png({ size: 4000 }));
+      const response = await postImage(png({ size: 4000 }));
       expect(response.status).toBe(413);
       expect(response.headers.get('Content-Type')).toBe(JSON_TYPE);
       expect(await response.json()).toEqual({ error: 'Image exceeds the configured size limit.' });
     });
 
     it('answers 413 for a streamed body of unknown length', async () => {
-      const response = await post(streamOf(png({ size: 4000 })));
+      const response = await postImage(streamOf(png({ size: 4000 })));
       expect(response.status).toBe(413);
       expect(await response.json()).toEqual({ error: 'Image exceeds the configured size limit.' });
     });
 
     it('accepts an image at the limit', async () => {
-      expect((await post(png({ size: 1024 }))).status).toBe(201);
+      expect((await postImage(png({ size: 1024 }))).status).toBe(201);
     });
   });
 
@@ -83,7 +69,7 @@ describe('daily upload limit', () => {
   it('answers 429 before reading the image, with the seconds until the UTC reset', async () => {
     await upload(png());
     // Not an image: reading it would give 400, so a 429 proves the quota was checked first.
-    const response = await post(new Uint8Array(50).fill(9));
+    const response = await postImage(new Uint8Array(50).fill(9));
     expect(response.status).toBe(429);
     expect(response.headers.get('Content-Type')).toBe(JSON_TYPE);
     expect(await response.json()).toEqual({ error: LIMIT_MESSAGE });
@@ -94,7 +80,7 @@ describe('daily upload limit', () => {
   });
 
   it('lets only one of two simultaneous uploads through', async () => {
-    const responses = await Promise.all([post(png()), post(png())]);
+    const responses = await Promise.all([postImage(png()), postImage(png())]);
     expect(responses.map(response => response.status).sort()).toEqual([201, 429]);
     const limited = responses.find(response => response.status === 429);
     expect(await limited.json()).toEqual({ error: LIMIT_MESSAGE });
@@ -104,14 +90,14 @@ describe('daily upload limit', () => {
   it('is not an upload limit when only the warning is on', async () => {
     await putSettings({ limit_action: 'warn' });
     await upload(png());
-    expect((await post(png())).status).toBe(201);
+    expect((await postImage(png())).status).toBe(201);
   });
 });
 
 describe('storage limits', () => {
   it('answers 429 without Retry-After when stopping uploads at the storage threshold', async () => {
     await putSettings({ max_storage_bytes: 1_048_576, warning_percent: 1, limit_action: 'block_upload' });
-    const response = await post(png({ size: 20_000 }));
+    const response = await postImage(png({ size: 20_000 }));
     expect(response.status).toBe(429);
     expect(await response.json()).toEqual({ error: LIMIT_MESSAGE });
     expect(response.headers.get('Retry-After')).toBeNull();
@@ -119,7 +105,7 @@ describe('storage limits', () => {
 
   it('answers 507 when the image does not fit at all', async () => {
     await putSettings({ max_storage_bytes: 1_048_576 });
-    const response = await post(png({ size: 1_100_000 }));
+    const response = await postImage(png({ size: 1_100_000 }));
     expect(response.status).toBe(507);
     expect(await response.json()).toEqual({ error: 'Free storage limit reached. Delete images or lower retention.' });
   });
