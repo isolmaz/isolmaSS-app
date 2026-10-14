@@ -474,10 +474,14 @@ impl TextEditState {
             .nth(row)
             .or_else(|| self.lines().last())
             .expect("a text has a first line");
-        span.start
-            + nearest_boundary(span.end - span.start, pt.0 - self.pos.0, |columns| {
-                columns_width(line, columns, self.font_size)
-            })
+        span.start + self.column_at(line, span.end - span.start, pt.0 - self.pos.0)
+    }
+
+    /// Column of `line`, of `count` characters, nearest to `x`; the line is measured once.
+    fn column_at(&self, line: &str, count: usize, x: i32) -> usize {
+        crate::drawing::with_caret_stops(line, self.font_size, |stops| {
+            nearest_boundary(count, x, |columns| stops[columns])
+        })
     }
 
     /// Moves the caret one line up or down, to the column nearest its horizontal position.
@@ -491,12 +495,7 @@ impl TextEditState {
             row.checked_sub(1)
         };
         let target = match neighbour.and_then(|neighbour| self.lines().nth(neighbour)) {
-            Some((span, line)) => {
-                span.start
-                    + nearest_boundary(span.end - span.start, x, |columns| {
-                        columns_width(line, columns, self.font_size)
-                    })
-            }
+            Some((span, line)) => span.start + self.column_at(line, span.end - span.start, x),
             None => self.caret,
         };
         self.move_to(target, extend);
@@ -508,29 +507,29 @@ impl TextEditState {
         self.move_to(if end { span.end } else { span.start }, extend);
     }
 
-    /// Highlight rectangles of the selection, one for each line it touches, each with the
-    /// text of its line. A selected line break widens the highlight of its line a little so
-    /// that empty lines show as well.
-    pub(super) fn selection_lines(&self) -> impl Iterator<Item = (Rect, &str)> {
-        let range = self.selection().unwrap_or(0..0);
+    /// Calls `each` with the highlight rectangle of the selection on every line it touches,
+    /// and the text of that line. A selected line break widens the highlight of its line a
+    /// little so that empty lines show as well. The text is measured once for all lines.
+    pub(super) fn for_each_selection_line(&self, mut each: impl FnMut(Rect, &str)) {
+        let Some(range) = self.selection() else {
+            return;
+        };
         let (origin, font_size, height) = (self.pos, self.font_size, self.line_height());
         let break_width = (font_size / 4).max(2);
-        self.lines()
-            .enumerate()
-            .filter_map(move |(row, (span, line))| {
+        crate::drawing::with_caret_stops(&self.text, font_size, |stops| {
+            for (row, (span, line)) in self.lines().enumerate() {
                 let from = range.start.clamp(span.start, span.end);
                 let to = range.end.clamp(span.start, span.end);
                 let breaks = range.start <= span.end && span.end < range.end;
                 if from == to && !breaks {
-                    return None;
+                    continue;
                 }
                 let top = origin.1 + row as i32 * height;
-                let left = origin.0 + columns_width(line, from - span.start, font_size);
-                let right = origin.0
-                    + columns_width(line, to - span.start, font_size)
-                    + if breaks { break_width } else { 0 };
-                Some((Rect::new(left, top, right, top + height), line))
-            })
+                let left = origin.0 + stops[from];
+                let right = origin.0 + stops[to] + if breaks { break_width } else { 0 };
+                each(Rect::new(left, top, right, top + height), line);
+            }
+        });
     }
 
     /// Moves the IME composition window to the caret; otherwise Windows opens it, and
@@ -956,6 +955,59 @@ mod tests {
             .expect("a line has boundaries")
     }
 
+    fn selection_rects(state: &TextEditState) -> Vec<Rect> {
+        let mut rects = Vec::new();
+        state.for_each_selection_line(|rect, _| rects.push(rect));
+        rects
+    }
+
+    #[test]
+    fn a_selection_over_many_lines_measures_every_line_like_a_single_measurement() {
+        // Far more lines than the measurement cache holds.
+        let text = (0..60)
+            .map(|index| format!("l{index} Wié"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut state = TextEditState::new((7, 9), text.clone(), [0, 0, 0, 255], 22, None);
+        state.select_all();
+        let line = state.line_height();
+        let width = |text: &str| crate::drawing::measure_text(text, 22).0;
+        let mut seen = Vec::new();
+        state.for_each_selection_line(|rect, text| seen.push((rect, text.to_string())));
+        assert_eq!(seen.len(), 60);
+        for (row, (rect, shown)) in seen.iter().enumerate() {
+            assert_eq!(shown, text.split('\n').nth(row).unwrap());
+            let top = 9 + row as i32 * line;
+            let right = 7 + width(shown) + if row < 59 { 22 / 4 } else { 0 };
+            assert_eq!(*rect, Rect::new(7, top, right, top + line), "row {row}");
+        }
+    }
+
+    #[test]
+    fn clicking_picks_the_boundary_at_the_measured_width_of_the_prefix() {
+        let state = TextEditState::new(
+            (10, 20),
+            "ab\nWiéW\nx".to_string(),
+            [0, 0, 0, 255],
+            22,
+            None,
+        );
+        let line = state.line_height();
+        let width = |text: &str| crate::drawing::measure_text(text, 22).0;
+        // Offsets: "ab" 0..2, "WiéW" 3..7, "x" 8..9.
+        for (columns, prefix) in [(0, ""), (1, "W"), (2, "Wi"), (3, "Wié"), (4, "WiéW")] {
+            let x = 10 + width(prefix);
+            assert_eq!(
+                state.caret_at((x, 20 + line + 3)),
+                3 + columns,
+                "{prefix:?}"
+            );
+        }
+        assert_eq!(state.caret_at((-50, 20 + line)), 3);
+        assert_eq!(state.caret_at((900, 20 + line)), 7);
+        assert_eq!(state.caret_at((900, 20 + 9 * line)), 9, "below the text");
+    }
+
     #[test]
     fn up_and_down_keep_the_horizontal_position_from_line_to_line() {
         // Offsets: "WWWWWW" 0..6, "ii" 7..9, "WWWWWW" 10..16.
@@ -1063,17 +1115,14 @@ mod tests {
             22,
             None,
         );
-        assert_eq!(state.selection_lines().count(), 0, "nothing is selected");
+        assert!(selection_rects(&state).is_empty(), "nothing is selected");
         let line = state.line_height();
         // "orl" of "world", which starts at offset 6.
         state.anchor = Some(7);
         state.caret = 10;
         let width = |text: &str| crate::drawing::measure_text(text, 22).0;
         assert_eq!(
-            state
-                .selection_lines()
-                .map(|(rect, _)| rect)
-                .collect::<Vec<_>>(),
+            selection_rects(&state),
             [Rect::new(
                 30 + width("w"),
                 40 + line,
@@ -1099,10 +1148,7 @@ mod tests {
         state.anchor = Some(2);
         state.caret = 12;
         assert_eq!(
-            state
-                .selection_lines()
-                .map(|(rect, _)| rect)
-                .collect::<Vec<_>>(),
+            selection_rects(&state),
             [
                 Rect::new(
                     30 + width("he"),
@@ -1117,7 +1163,7 @@ mod tests {
         // A selection made backwards covers the same lines.
         state.anchor = Some(12);
         state.caret = 2;
-        assert_eq!(state.selection_lines().count(), 3);
+        assert_eq!(selection_rects(&state).len(), 3);
     }
 
     #[test]
@@ -1127,10 +1173,7 @@ mod tests {
         state.anchor = Some(1);
         state.caret = 3;
         let line = state.line_height();
-        let rects = state
-            .selection_lines()
-            .map(|(rect, _)| rect)
-            .collect::<Vec<_>>();
+        let rects = selection_rects(&state);
         let first = crate::drawing::measure_text("a", 22).0;
         assert_eq!(
             rects,

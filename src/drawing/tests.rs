@@ -498,6 +498,48 @@ fn measurement_falls_back_to_the_font_size_when_gdi_has_no_handles_left() {
     assert!(measure_ui_text("quota probe").0 > body);
 }
 
+#[test]
+fn caret_stops_are_the_prefix_widths_of_every_line_in_one_pass() {
+    on_thread(|| {
+        // Offsets: "ab" 0..2, "Wi" 3..5, "" 6, "é🙂b" 7..10; the line breaks are 2, 5 and 6.
+        let text = "ab\nWi\n\né🙂b";
+        let stops = with_caret_stops(text, 22, |stops| stops.to_vec());
+        assert_eq!(stops.len(), text.chars().count() + 1);
+        let width = |prefix: &str| measure_text(prefix, 22).0;
+        assert_eq!([stops[0], stops[1], stops[2]], [0, width("a"), width("ab")]);
+        assert_eq!([stops[3], stops[4], stops[5]], [0, width("W"), width("Wi")]);
+        assert_eq!([stops[6], stops[7], stops[8]], [0, 0, width("é")]);
+        // A surrogate pair is one character with one boundary after both its units.
+        assert!(stops[9] > stops[8], "the emoji has a width");
+        assert!(stops[10] > stops[9], "the last character has a width");
+        assert_eq!(
+            cached_measurements(),
+            5,
+            "stops never enter the metrics cache"
+        );
+    });
+}
+
+#[test]
+fn caret_stops_of_nested_requests_do_not_share_a_buffer() {
+    with_caret_stops("ab", 20, |outer| {
+        let inner = with_caret_stops("abc", 20, |stops| stops.to_vec());
+        assert_eq!((outer.len(), inner.len()), (3, 4));
+        assert_eq!(outer[..], inner[..3]);
+    });
+}
+
+#[test]
+fn caret_stops_fall_back_to_one_font_size_per_character_without_gdi_handles() {
+    let quota = GdiQuota::exhaust();
+    let fallback = with_caret_stops("ab\n\nc", 17, |stops| stops.to_vec());
+    assert_eq!(fallback, [0, 17, 17, 0, 0, 17]);
+    drop(quota);
+    let real = with_caret_stops("ab\n\nc", 17, |stops| stops.to_vec());
+    assert_eq!(real.len(), 6);
+    assert_eq!(real[1], measure_text("a", 17).0);
+}
+
 // ---------------------------------------------------------------------------
 // Text and icons
 // ---------------------------------------------------------------------------

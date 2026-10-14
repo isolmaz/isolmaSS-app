@@ -268,7 +268,7 @@ impl OverlayState {
         let (width, height) = (self.capture.width, self.capture.height);
         let bounds = edit.bounds();
         let ink = crate::annotation::text_ink(edit.color, edit.background);
-        for (highlight, line) in edit.selection_lines() {
+        edit.for_each_selection_line(|highlight, line| {
             crate::drawing::rounded(
                 self.mem_dc,
                 highlight,
@@ -286,7 +286,7 @@ impl OverlayState {
                     ink,
                 );
             });
-        }
+        });
         let margin = super::text::text_box_margin(self.dpi);
         self.draw_text_frame(bounds.inflate(margin, margin));
         if edit.caret_visible {
