@@ -100,7 +100,9 @@ impl Toolbar {
     pub const WHEEL_ROW: i32 = 26;
 
     /// Builds a floating tool rail and action strip. Each panel flips to the
-    /// opposite edge when the selection reaches a monitor boundary.
+    /// opposite edge when the selection reaches a monitor boundary. An expanded rail that
+    /// is too tall for the work area as one column gets a second column for the tools
+    /// behind the chevron; a grid replaces the panels only when that is still too tall.
     #[allow(clippy::too_many_arguments)]
     pub fn layout(
         selection: &Rect,
@@ -140,11 +142,14 @@ impl Toolbar {
             (ToolbarItem::Action(ToolbarAction::Undo), can_undo),
             (ToolbarItem::Action(ToolbarAction::Redo), can_redo),
         ];
-        let hidden = if expanded { 0 } else { MORE_TOOLS.len() as i32 };
+        let more_count = MORE_TOOLS.len() as i32;
+        let hidden = if expanded { 0 } else { more_count };
         let visible_count = tool_items.len() as i32 - hidden;
         let tool_width = tool_button + pad * 2;
-        let tool_height =
-            pad * 2 + visible_count * tool_button + (visible_count - 1) * scale(2) + scale(12);
+        let rail_height = |rows: i32, group_gaps: i32| {
+            pad * 2 + rows * tool_button + (rows - 1) * scale(2) + group_gaps
+        };
+        let tool_height = rail_height(visible_count, scale(12));
 
         let action_button = scale(32);
         let action_gap = scale(3);
@@ -172,6 +177,18 @@ impl Toolbar {
             (viewport.right - outer_pad).max(viewport.left + outer_pad),
             (viewport.bottom - outer_pad).max(viewport.top + outer_pad),
         );
+        // An expanded rail too tall for the work area as one column keeps the collapsed rail
+        // as its main column and puts the overflow tools in a second one beside it. Only
+        // when even that is too tall does the grid below take over.
+        let two_columns = expanded && tool_height + action_height > safe.height();
+        let (tool_width, tool_height) = if two_columns {
+            (
+                tool_width + tool_button + scale(2),
+                rail_height(visible_count - more_count, scale(12)).max(rail_height(more_count, 0)),
+            )
+        } else {
+            (tool_width, tool_height)
+        };
         let contains = |outer: Rect, inner: Rect| {
             inner.left >= outer.left
                 && inner.top >= outer.top
@@ -293,7 +310,19 @@ impl Toolbar {
         let mut buttons = Vec::with_capacity(
             visible_count as usize + usize::from(show_color) + usize::from(show_thickness) + 5,
         );
-        let mut y = tool_bounds.bottom - pad - tool_button;
+        // The main column stays on the selection's side, so the chevron keeps its place
+        // when the rail grows a second column.
+        let rail_centre = tool_bounds.left + tool_bounds.right;
+        let main_on_left = rail_centre >= selection.left + selection.right;
+        let column_x = |column: usize| {
+            let offset = column as i32 * (tool_button + scale(2));
+            if main_on_left {
+                tool_bounds.left + pad + offset
+            } else {
+                tool_bounds.right - pad - tool_button - offset
+            }
+        };
+        let mut y = [tool_bounds.bottom - pad - tool_button; 2];
         for (item, enabled) in tool_items
             .into_iter()
             .filter(|(item, _)| expanded || !is_more_tool(*item))
@@ -301,18 +330,15 @@ impl Toolbar {
             let is_checked = matches!(item, ToolbarItem::Tool(tool) if tool == active_tool)
                 || matches!(item, ToolbarItem::MoreTools)
                     && (expanded || is_more_tool(ToolbarItem::Tool(active_tool)));
+            let column = usize::from(two_columns && is_more_tool(item));
+            let (left, top) = (column_x(column), y[column]);
             buttons.push(ToolbarButton {
                 item,
-                rect: Rect::new(
-                    tool_bounds.left + pad,
-                    y,
-                    tool_bounds.left + pad + tool_button,
-                    y + tool_button,
-                ),
+                rect: Rect::new(left, top, left + tool_button, top + tool_button),
                 is_enabled: enabled,
                 is_checked,
             });
-            y -= tool_button
+            y[column] -= tool_button
                 + scale(2)
                 + if matches!(
                     item,
