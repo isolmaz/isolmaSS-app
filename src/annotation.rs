@@ -3,12 +3,14 @@ use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{COLORREF, POINT};
 use windows::Win32::Graphics::Gdi::{
-    CreatePen, CreateSolidBrush, DeleteObject, GetStockObject, HBRUSH, HDC, HGDIOBJ, HPEN,
-    NULL_BRUSH, NULL_PEN, PS_DOT, PS_SOLID, Polygon, Polyline, Rectangle as GdiRectangle,
-    SelectObject,
+    GET_STOCK_OBJECT_FLAGS, GetStockObject, HDC, NULL_BRUSH, NULL_PEN, PS_DOT, PS_SOLID, Polygon,
+    Polyline, Rectangle as GdiRectangle, SelectObject, WHITE_BRUSH,
 };
 
 mod smooth;
+
+#[cfg(test)]
+mod render_tests;
 
 /// Available annotation tools.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -31,47 +33,32 @@ pub fn bgra_to_colorref(bgra: [u8; 4]) -> COLORREF {
     COLORREF((bgra[2] as u32) | ((bgra[1] as u32) << 8) | ((bgra[0] as u32) << 16))
 }
 
-// RAII cleanup guards for GDI objects
-struct PenGuard {
-    hdc: HDC,
-    old: HGDIOBJ,
-    pen: HPEN,
+/// Runs `draw` with the stock object `stock` selected into `hdc`, then restores the
+/// previous selection. Stock objects are never created or deleted.
+fn with_stock_object<T>(hdc: HDC, stock: GET_STOCK_OBJECT_FLAGS, draw: impl FnOnce() -> T) -> T {
+    let previous = unsafe { SelectObject(hdc, GetStockObject(stock)) };
+    let drawn = draw();
+    unsafe {
+        SelectObject(hdc, previous);
+    }
+    drawn
 }
 
-impl Drop for PenGuard {
-    fn drop(&mut self) {
-        unsafe {
-            // Invalid `old` means SelectObject failed and the DC is unchanged:
-            // never restore the sentinel, never delete an invalid handle.
-            if !self.old.is_invalid() {
-                SelectObject(self.hdc, self.old);
-            }
-            if !self.pen.is_invalid() {
-                let _ = DeleteObject(HGDIOBJ(self.pen.0));
-            }
+/// The largest size in `1..=max` for which `fits` holds, given that `fits` is true up to
+/// some size and false beyond it. Binary search: `fits` runs O(log max) times.
+fn largest_fitting(max: i32, mut fits: impl FnMut(i32) -> bool) -> Option<i32> {
+    let (mut low, mut high) = (1, max);
+    let mut best = None;
+    while low <= high {
+        let mid = low + (high - low) / 2;
+        if fits(mid) {
+            best = Some(mid);
+            low = mid + 1;
+        } else {
+            high = mid - 1;
         }
     }
-}
-
-struct BrushGuard {
-    hdc: HDC,
-    old: HGDIOBJ,
-    brush: Option<HBRUSH>,
-}
-
-impl Drop for BrushGuard {
-    fn drop(&mut self) {
-        unsafe {
-            if !self.old.is_invalid() {
-                SelectObject(self.hdc, self.old);
-            }
-            if let Some(b) = self.brush
-                && !b.is_invalid()
-            {
-                let _ = DeleteObject(HGDIOBJ(b.0));
-            }
-        }
-    }
+    best
 }
 
 /// The specific data for each annotation kind.
@@ -176,13 +163,62 @@ fn arrow_geometry(start: (i32, i32), end: (i32, i32), thickness: i32) -> Option<
     })
 }
 
-pub fn render_pen_preview(hdc: HDC, points: &[(i32, i32)], color: [u8; 4], thickness: i32) {
-    if points.len() < 2 {
-        return;
-    }
-    if smooth::polyline(hdc, points, color, thickness) {
-        return;
-    }
+/// Hollow frame with plain GDI: `rect` outlined by a `thickness` px pen.
+fn plain_frame(hdc: HDC, rect: Rect, color: [u8; 4], thickness: i32) {
+    crate::drawing::with_pen(hdc, PS_SOLID, thickness, bgra_to_colorref(color), || {
+        with_stock_object(hdc, NULL_BRUSH, || unsafe {
+            let _ = GdiRectangle(hdc, rect.left, rect.top, rect.right, rect.bottom);
+        })
+    });
+}
+
+/// Arrow with plain GDI: a pen shaft from `start` to the head's base and a filled head.
+fn plain_arrow(
+    hdc: HDC,
+    start: (i32, i32),
+    end: (i32, i32),
+    arrow: &ArrowGeometry,
+    color: [u8; 4],
+    thickness: i32,
+) {
+    let colorref = bgra_to_colorref(color);
+    let [_, p_left, p_right] = arrow.head;
+    let shaft_points = [
+        POINT {
+            x: start.0,
+            y: start.1,
+        },
+        POINT {
+            x: arrow.base.0.round() as i32,
+            y: arrow.base.1.round() as i32,
+        },
+    ];
+    crate::drawing::with_pen(hdc, PS_SOLID, thickness, colorref, || unsafe {
+        let _ = Polyline(hdc, &shaft_points);
+    });
+
+    let arrow_points = [
+        POINT { x: end.0, y: end.1 },
+        POINT {
+            x: p_left.0.round() as i32,
+            y: p_left.1.round() as i32,
+        },
+        POINT {
+            x: p_right.0.round() as i32,
+            y: p_right.1.round() as i32,
+        },
+    ];
+    // Reusing the wide shaft pen to outline the triangle inflates every edge by half
+    // the stroke width and deforms the head as width changes.
+    crate::drawing::with_brush(hdc, colorref, || {
+        with_stock_object(hdc, NULL_PEN, || unsafe {
+            let _ = Polygon(hdc, &arrow_points);
+        })
+    });
+}
+
+/// Freehand stroke with plain GDI through every input point.
+fn plain_polyline(hdc: HDC, points: &[(i32, i32)], color: [u8; 4], thickness: i32) {
     thread_local! { static POINTS: std::cell::RefCell<Vec<POINT>> = const { std::cell::RefCell::new(Vec::new()) }; }
     POINTS.with(|scratch| {
         let mut scratch = scratch.borrow_mut();
@@ -201,6 +237,28 @@ pub fn render_pen_preview(hdc: HDC, points: &[(i32, i32)], color: [u8; 4], thick
             },
         );
     });
+}
+
+pub fn render_pen_preview(hdc: HDC, points: &[(i32, i32)], color: [u8; 4], thickness: i32) {
+    draw_polyline(hdc, points, color, thickness, true);
+}
+
+/// Draws the stroke through GDI+ when `anti_aliased`, and falls back to plain GDI when GDI+
+/// cannot draw it (or is not asked to).
+fn draw_polyline(
+    hdc: HDC,
+    points: &[(i32, i32)],
+    color: [u8; 4],
+    thickness: i32,
+    anti_aliased: bool,
+) {
+    if points.len() < 2 {
+        return;
+    }
+    if anti_aliased && smooth::polyline(hdc, points, color, thickness) {
+        return;
+    }
+    plain_polyline(hdc, points, color, thickness);
 }
 
 impl AnnotationObject {
@@ -609,28 +667,16 @@ impl AnnotationObject {
                 let max_font = width_limited_font
                     .min(available_height.saturating_sub(4))
                     .max(1);
-                let mut new_font = requested_font.clamp(8.min(max_font), max_font);
+                let requested_font = requested_font.clamp(8.min(max_font), max_font);
                 // Extent grows with font size: binary-search the largest fitting
                 // size (O(log n) measures) instead of a per-pixel decrement loop
                 // re-measuring on every mouse move.
-                let (mut width, mut height) = crate::drawing::measure_text(text, 1);
-                let mut best_font = 1;
-                if width <= available_width && height <= available_height {
-                    let (mut low, mut high) = (1, new_font);
-                    while low <= high {
-                        let mid = low + (high - low) / 2;
-                        let (w, h) = crate::drawing::measure_text(text, mid);
-                        if w <= available_width && h <= available_height {
-                            best_font = mid;
-                            width = w;
-                            height = h;
-                            low = mid + 1;
-                        } else {
-                            high = mid - 1;
-                        }
-                    }
-                }
-                new_font = best_font;
+                let new_font = largest_fitting(requested_font, |size| {
+                    let (w, h) = crate::drawing::measure_text(text, size);
+                    w <= available_width && h <= available_height
+                })
+                .unwrap_or(1);
+                let (width, height) = crate::drawing::measure_text(text, new_font);
                 let new_pos = match handle {
                     AnnotationResizeHandle::TopLeft => (anchor.0 - width, anchor.1 - height),
                     AnnotationResizeHandle::TopRight => (anchor.0, anchor.1 - height),
@@ -713,37 +759,21 @@ impl AnnotationObject {
     /// Renders vector shapes (Rectangle, Arrow, Pen, Text) onto `hdc`. Strokes are
     /// anti-aliased through GDI+ when it is available and drawn with plain GDI otherwise.
     pub fn render_gdi(&self, hdc: HDC) {
+        self.render_gdi_with(hdc, true);
+    }
+
+    /// [`render_gdi`](Self::render_gdi), with GDI+ strokes only when `anti_aliased`.
+    fn render_gdi_with(&self, hdc: HDC, anti_aliased: bool) {
         match &self.kind {
             AnnotationKind::Rectangle {
                 rect,
                 color,
                 thickness,
             } => {
-                if smooth::frame(hdc, *rect, *color, *thickness) {
+                if anti_aliased && smooth::frame(hdc, *rect, *color, *thickness) {
                     return;
                 }
-                let pen = unsafe { CreatePen(PS_SOLID, *thickness, bgra_to_colorref(*color)) };
-                if pen.is_invalid() {
-                    return;
-                }
-                let old_pen = unsafe { SelectObject(hdc, HGDIOBJ(pen.0)) };
-                let null_brush = unsafe { GetStockObject(NULL_BRUSH) };
-                let old_brush = unsafe { SelectObject(hdc, null_brush) };
-
-                let _pen_guard = PenGuard {
-                    hdc,
-                    old: old_pen,
-                    pen,
-                };
-                let _brush_guard = BrushGuard {
-                    hdc,
-                    old: old_brush,
-                    brush: None,
-                };
-
-                unsafe {
-                    let _ = GdiRectangle(hdc, rect.left, rect.top, rect.right, rect.bottom);
-                }
+                plain_frame(hdc, *rect, *color, *thickness);
             }
             AnnotationKind::Arrow {
                 start,
@@ -754,78 +784,16 @@ impl AnnotationObject {
                 let Some(arrow) = arrow_geometry(*start, *end, *thickness) else {
                     return;
                 };
-                if smooth::arrow(hdc, *start, &arrow, *color, *thickness) {
+                if anti_aliased && smooth::arrow(hdc, *start, &arrow, *color, *thickness) {
                     return;
                 }
-
-                let colorref = bgra_to_colorref(*color);
-                let pen = unsafe { CreatePen(PS_SOLID, *thickness, colorref) };
-                if pen.is_invalid() {
-                    return;
-                }
-                let old_pen = unsafe { SelectObject(hdc, HGDIOBJ(pen.0)) };
-                let _pen_guard = PenGuard {
-                    hdc,
-                    old: old_pen,
-                    pen,
-                };
-
-                let base = arrow.base;
-                let [_, p_left, p_right] = arrow.head;
-
-                // Draw shaft
-                let shaft_points = [
-                    POINT {
-                        x: start.0,
-                        y: start.1,
-                    },
-                    POINT {
-                        x: base.0.round() as i32,
-                        y: base.1.round() as i32,
-                    },
-                ];
-                unsafe {
-                    let _ = Polyline(hdc, &shaft_points);
-                }
-
-                // Draw filled arrowhead triangle
-                let brush = unsafe { CreateSolidBrush(colorref) };
-                if brush.is_invalid() {
-                    // Shaft is already drawn; guards restore the pen on return.
-                    return;
-                }
-                let old_brush = unsafe { SelectObject(hdc, HGDIOBJ(brush.0)) };
-                let _brush_guard = BrushGuard {
-                    hdc,
-                    old: old_brush,
-                    brush: Some(brush),
-                };
-                // Reusing the wide shaft pen to outline the triangle inflates every
-                // edge by half the stroke width and deforms the head as width changes.
-                unsafe {
-                    SelectObject(hdc, GetStockObject(NULL_PEN));
-                }
-
-                let arrow_points = [
-                    POINT { x: end.0, y: end.1 },
-                    POINT {
-                        x: p_left.0.round() as i32,
-                        y: p_left.1.round() as i32,
-                    },
-                    POINT {
-                        x: p_right.0.round() as i32,
-                        y: p_right.1.round() as i32,
-                    },
-                ];
-                unsafe {
-                    let _ = Polygon(hdc, &arrow_points);
-                }
+                plain_arrow(hdc, *start, *end, &arrow, *color, *thickness);
             }
             AnnotationKind::Pen {
                 points,
                 color,
                 thickness,
-            } => render_pen_preview(hdc, points, *color, *thickness),
+            } => draw_polyline(hdc, points, *color, *thickness, anti_aliased),
             AnnotationKind::Step {
                 number,
                 color,
@@ -906,58 +874,23 @@ impl AnnotationObject {
             AnnotationKind::Arrow { .. } => self.bounds().inflate(half, half),
             _ => self.geometry_bounds().inflate(half, half),
         };
-        let pen = unsafe { CreatePen(PS_DOT, 1, crate::theme::BRAND_AMBER) };
-        if pen.is_invalid() {
-            return;
-        }
-        let old_pen = unsafe { SelectObject(hdc, HGDIOBJ(pen.0)) };
-        let null_brush = unsafe { GetStockObject(NULL_BRUSH) };
-        let old_brush = unsafe { SelectObject(hdc, null_brush) };
-
-        let _pen_guard = PenGuard {
-            hdc,
-            old: old_pen,
-            pen,
-        };
-        let _brush_guard = BrushGuard {
-            hdc,
-            old: old_brush,
-            brush: None,
-        };
-
-        unsafe {
-            let _ = GdiRectangle(hdc, b.left, b.top, b.right, b.bottom);
-        }
+        crate::drawing::with_pen(hdc, PS_DOT, 1, crate::theme::BRAND_AMBER, || {
+            with_stock_object(hdc, NULL_BRUSH, || unsafe {
+                let _ = GdiRectangle(hdc, b.left, b.top, b.right, b.bottom);
+            })
+        });
 
         // Handles: white squares with a solid amber outline, readable on any image.
-        let handle_pen = unsafe { CreatePen(PS_SOLID, 1, crate::theme::BRAND_AMBER) };
-        if handle_pen.is_invalid() {
-            return; // dashed box is already drawn; degrade to no handles
-        }
-        let old_handle_pen = unsafe { SelectObject(hdc, HGDIOBJ(handle_pen.0)) };
-        let _handle_pen_guard = PenGuard {
-            hdc,
-            old: old_handle_pen,
-            pen: handle_pen,
-        };
-        let old_hbrush = unsafe {
-            SelectObject(
-                hdc,
-                GetStockObject(windows::Win32::Graphics::Gdi::WHITE_BRUSH),
-            )
-        };
-        let _handle_guard = BrushGuard {
-            hdc,
-            old: old_hbrush,
-            brush: None,
-        };
-
         let (handles, count) = self.resize_handle_points(dpi);
-        for (_, (cx, cy)) in &handles[..count] {
-            unsafe {
-                let _ = GdiRectangle(hdc, cx - half, cy - half, cx + half, cy + half);
-            }
-        }
+        crate::drawing::with_pen(hdc, PS_SOLID, 1, crate::theme::BRAND_AMBER, || {
+            with_stock_object(hdc, WHITE_BRUSH, || {
+                for (_, (cx, cy)) in &handles[..count] {
+                    unsafe {
+                        let _ = GdiRectangle(hdc, cx - half, cy - half, cx + half, cy + half);
+                    }
+                }
+            })
+        });
     }
 }
 
@@ -1411,6 +1344,9 @@ impl HistoryManager {
 
 #[cfg(test)]
 mod tests {
+    use super::AnnotationResizeHandle::{
+        ArrowEnd, ArrowStart, BottomLeft, BottomRight, TopLeft, TopRight,
+    };
     use super::*;
 
     const COLOR: [u8; 4] = [49, 49, 224, 255];
@@ -1421,6 +1357,91 @@ mod tests {
             rect.right <= limit.right && rect.bottom <= limit.bottom,
             "{rect:?}"
         );
+    }
+
+    fn object(kind: AnnotationKind) -> AnnotationObject {
+        AnnotationObject::new(1, kind)
+    }
+
+    fn rectangle_kind(rect: Rect, thickness: i32) -> AnnotationKind {
+        AnnotationKind::Rectangle {
+            rect,
+            color: COLOR,
+            thickness,
+        }
+    }
+
+    fn arrow_kind(start: (i32, i32), end: (i32, i32), thickness: i32) -> AnnotationKind {
+        AnnotationKind::Arrow {
+            start,
+            end,
+            color: COLOR,
+            thickness,
+        }
+    }
+
+    fn pen_kind(points: &[(i32, i32)], thickness: i32) -> AnnotationKind {
+        AnnotationKind::Pen {
+            points: points.to_vec(),
+            color: COLOR,
+            thickness,
+        }
+    }
+
+    fn highlight_kind(points: &[(i32, i32)], thickness: i32) -> AnnotationKind {
+        AnnotationKind::Highlight {
+            points: points.to_vec(),
+            color: COLOR,
+            thickness,
+        }
+    }
+
+    fn step_kind(pos: (i32, i32), radius: i32) -> AnnotationKind {
+        AnnotationKind::Step {
+            pos,
+            number: 1,
+            color: COLOR,
+            radius,
+        }
+    }
+
+    fn text_kind(pos: (i32, i32), text: &str, font_size: i32) -> AnnotationKind {
+        AnnotationKind::Text {
+            pos,
+            text: text.to_string(),
+            color: COLOR,
+            font_size,
+        }
+    }
+
+    fn blur_kind(rect: Rect) -> AnnotationKind {
+        AnnotationKind::Blur {
+            rect,
+            block_size: 8,
+        }
+    }
+
+    fn redact_kind(rect: Rect) -> AnnotationKind {
+        AnnotationKind::Redact { rect }
+    }
+
+    /// The font size of a text annotation; `None` for every other kind.
+    fn font_size_of(object: &AnnotationObject) -> Option<i32> {
+        match &object.kind {
+            AnnotationKind::Text { font_size, .. } => Some(*font_size),
+            _ => None,
+        }
+    }
+
+    /// 8-bit BGRA gradient: blue grows by 16 per column, green by 16 per row.
+    fn gradient(width: usize, height: usize) -> Vec<u8> {
+        (0..height)
+            .flat_map(|y| (0..width).flat_map(move |x| [x as u8 * 16, y as u8 * 16, 100, 7]))
+            .collect()
+    }
+
+    fn pixel_at(buffer: &[u8], width: usize, x: usize, y: usize) -> [u8; 4] {
+        buffer[(y * width + x) * 4..][..4].try_into().unwrap()
     }
 
     #[test]
@@ -1461,11 +1482,7 @@ mod tests {
         };
         let mut object = AnnotationObject::new(1, arrow.clone());
         object.resize_from(&arrow, AnnotationResizeHandle::ArrowEnd, (100, -5), limit);
-        let AnnotationKind::Arrow { start, end, .. } = object.kind else {
-            unreachable!();
-        };
-        assert_eq!(start, (5, 5));
-        assert_eq!(end, (20, 0));
+        assert_eq!(object.kind, arrow_kind((5, 5), (20, 0), 2));
     }
 
     #[test]
@@ -1482,10 +1499,7 @@ mod tests {
             (30, 40),
             Rect::new(0, 0, 50, 50),
         );
-        let AnnotationKind::Pen { points, .. } = object.kind else {
-            unreachable!();
-        };
-        assert_eq!(points, vec![(10, 10), (20, 25), (30, 40)]);
+        assert_eq!(object.kind, pen_kind(&[(10, 10), (20, 25), (30, 40)], 2));
     }
 
     #[test]
@@ -1504,12 +1518,12 @@ mod tests {
             (1000, 1000),
             limit,
         );
-        let AnnotationKind::Text { pos, font_size, .. } = &object.kind else {
-            unreachable!();
-        };
-        assert!(*font_size >= 20 && *font_size <= 40);
-        assert_eq!(*pos, (10, 10));
-        assert_within(object.geometry_bounds(), limit);
+        let font_size = font_size_of(&object).unwrap();
+        assert!((20..=40).contains(&font_size), "{font_size}");
+        let bounds = object.geometry_bounds();
+        assert_eq!((bounds.left, bounds.top), (10, 10));
+        assert_within(bounds, limit);
+        assert_eq!(font_size_of(&AnnotationObject::new(2, frame_at(0))), None);
     }
 
     #[test]
@@ -1938,5 +1952,574 @@ mod tests {
         assert!(arrow_geometry((5, 5), (5, 5), 3).is_none());
         assert!(arrow_geometry((5, 5), (6, 6), 3).is_none());
         assert!(arrow_geometry((5, 5), (7, 5), 3).is_some());
+    }
+
+    #[test]
+    fn bgra_packs_into_a_colorref_with_red_in_the_low_byte() {
+        assert_eq!(
+            bgra_to_colorref([0x11, 0x22, 0x33, 0x44]),
+            COLORREF(0x0011_2233)
+        );
+    }
+
+    #[test]
+    fn bounds_include_the_stroke_of_each_kind() {
+        let points = [(10, 20), (30, 5), (20, 40)];
+        let (text_width, text_height) = crate::drawing::measure_text("Hi", 20);
+        let rect = Rect::new(1, 2, 31, 42);
+        for (kind, expected) in [
+            (
+                rectangle_kind(Rect::new(10, 20, 50, 40), 3),
+                Rect::new(7, 17, 53, 43),
+            ),
+            (arrow_kind((50, 10), (20, 40), 2), Rect::new(12, 2, 58, 48)),
+            // Pen: the points' box including the last pixel, grown by the stroke width.
+            (pen_kind(&points, 3), Rect::new(7, 2, 34, 44)),
+            // Highlight: the marker is twice as thick as the stroke width.
+            (highlight_kind(&points, 3), Rect::new(4, -1, 37, 47)),
+            (pen_kind(&[], 3), Rect::default()),
+            (highlight_kind(&[], 3), Rect::default()),
+            (
+                text_kind((12, 15), "Hi", 20),
+                Rect::new(12, 15, 12 + text_width, 15 + text_height),
+            ),
+            (blur_kind(rect), rect),
+            (redact_kind(rect), rect),
+        ] {
+            assert_eq!(object(kind.clone()).bounds(), expected, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn hit_testing_uses_the_tolerance_of_each_kind() {
+        let text = object(text_kind((300, 300), "Hi", 20));
+        let text_box = text.bounds();
+        let sides = [(0, 0), (0, 50), (50, 50)];
+        // (kind, point, expected)
+        let mut cases = vec![
+            (
+                rectangle_kind(Rect::new(100, 100, 200, 160), 2),
+                (94, 130),
+                true,
+            ),
+            (
+                rectangle_kind(Rect::new(100, 100, 200, 160), 2),
+                (93, 130),
+                false,
+            ),
+            (
+                rectangle_kind(Rect::new(100, 100, 200, 160), 2),
+                (150, 130),
+                true,
+            ),
+            (
+                rectangle_kind(Rect::new(100, 100, 200, 160), 2),
+                (205, 130),
+                true,
+            ),
+            (
+                rectangle_kind(Rect::new(100, 100, 200, 160), 2),
+                (206, 130),
+                false,
+            ),
+            (arrow_kind((0, 0), (100, 0), 2), (50, 8), true),
+            (arrow_kind((0, 0), (100, 0), 2), (50, 9), false),
+            (arrow_kind((0, 0), (100, 0), 2), (108, 0), true),
+            (arrow_kind((0, 0), (100, 0), 2), (109, 0), false),
+            (arrow_kind((0, 0), (100, 0), 2), (-8, 0), true),
+            // An arrow that starts and ends on one point is a disc.
+            (arrow_kind((10, 10), (10, 10), 2), (10, 18), true),
+            (arrow_kind((10, 10), (10, 10), 2), (10, 19), false),
+            (arrow_kind((10, 10), (10, 10), 2), (18, 10), true),
+            (pen_kind(&[(10, 10)], 2), (10, 18), true),
+            (pen_kind(&[(10, 10)], 2), (10, 19), false),
+            (pen_kind(&sides, 2), (2, 25), true),
+            (pen_kind(&sides, 2), (25, 52), true),
+            (pen_kind(&sides, 2), (25, 25), false),
+            (pen_kind(&[(0, 0), (100, 0)], 10), (50, 16), true),
+            (pen_kind(&[(0, 0), (100, 0)], 10), (50, 17), false),
+            // The marker is wider than a pen of the same thickness.
+            (highlight_kind(&[(0, 0), (100, 0)], 10), (50, 20), true),
+            (highlight_kind(&[(0, 0), (100, 0)], 10), (50, 21), false),
+            (pen_kind(&[], 2), (0, 0), false),
+            (step_kind((50, 60), 14), (36, 46), true),
+            (step_kind((50, 60), 14), (65, 46), false),
+            (blur_kind(Rect::new(10, 10, 60, 60)), (10, 10), true),
+            (blur_kind(Rect::new(10, 10, 60, 60)), (60, 10), false),
+            (redact_kind(Rect::new(10, 10, 60, 60)), (59, 59), true),
+            (redact_kind(Rect::new(10, 10, 60, 60)), (60, 60), false),
+        ];
+        // Text is grabbed within 4 px of its box.
+        for (point, expected) in [
+            ((text_box.left - 4, text_box.top), true),
+            ((text_box.left - 5, text_box.top), false),
+            ((text_box.right + 3, text_box.top), true),
+            ((text_box.right + 4, text_box.top), false),
+        ] {
+            cases.push((text.kind.clone(), point, expected));
+        }
+        for (kind, point, expected) in cases {
+            assert_eq!(
+                object(kind.clone()).hit_test(point),
+                expected,
+                "{kind:?} {point:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn translation_moves_every_kind_by_the_offset() {
+        let points = [(1, 1), (2, 2)];
+        let moved = [(6, -2), (7, -1)];
+        for (kind, expected) in [
+            (
+                rectangle_kind(Rect::new(10, 10, 30, 20), 2),
+                rectangle_kind(Rect::new(15, 7, 35, 17), 2),
+            ),
+            (
+                arrow_kind((0, 0), (10, 10), 2),
+                arrow_kind((5, -3), (15, 7), 2),
+            ),
+            (pen_kind(&points, 2), pen_kind(&moved, 2)),
+            (highlight_kind(&points, 2), highlight_kind(&moved, 2)),
+            (step_kind((50, 60), 14), step_kind((55, 57), 14)),
+            (text_kind((50, 60), "Hi", 20), text_kind((55, 57), "Hi", 20)),
+            (
+                blur_kind(Rect::new(10, 10, 30, 20)),
+                blur_kind(Rect::new(15, 7, 35, 17)),
+            ),
+            (
+                redact_kind(Rect::new(10, 10, 30, 20)),
+                redact_kind(Rect::new(15, 7, 35, 17)),
+            ),
+        ] {
+            let mut moving = object(kind.clone());
+            moving.translate(5, -3);
+            assert_eq!(moving.kind, expected, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn geometry_bounds_are_the_unstroked_extent() {
+        let points = [(10, 20), (30, 5), (20, 40)];
+        let rect = Rect::new(1, 2, 31, 42);
+        for (kind, expected) in [
+            (rectangle_kind(rect, 4), rect),
+            (arrow_kind((50, 10), (20, 40), 2), Rect::new(20, 10, 50, 40)),
+            (pen_kind(&points, 3), Rect::new(10, 5, 30, 40)),
+            (highlight_kind(&points, 3), Rect::new(10, 5, 30, 40)),
+            (pen_kind(&[], 3), Rect::default()),
+            (highlight_kind(&[], 3), Rect::default()),
+            (blur_kind(rect), rect),
+            (redact_kind(rect), rect),
+        ] {
+            assert_eq!(object(kind.clone()).geometry_bounds(), expected, "{kind:?}");
+        }
+        let text = object(text_kind((12, 15), "Hi", 20));
+        assert_eq!(text.geometry_bounds(), text.bounds());
+        let step = object(step_kind((50, 60), 14));
+        assert_eq!(step.geometry_bounds(), step.bounds());
+    }
+
+    #[test]
+    fn each_kind_offers_its_own_resize_grips() {
+        let rectangle = object(rectangle_kind(Rect::new(100, 100, 200, 200), 2));
+        // The grips sit on the corners of the bounds grown by the 4 px gap.
+        for (point, handle) in [
+            ((96, 96), TopLeft),
+            ((204, 96), TopRight),
+            ((96, 204), BottomLeft),
+            ((204, 204), BottomRight),
+        ] {
+            assert_eq!(rectangle.hit_resize_handle(point, 3, 96), Some(handle));
+        }
+        assert_eq!(rectangle.hit_resize_handle((150, 150), 3, 96), None);
+
+        // An arrow is resized by its two ends only.
+        let arrow = object(arrow_kind((10, 10), (60, 40), 2));
+        assert_eq!(arrow.hit_resize_handle((11, 9), 3, 96), Some(ArrowStart));
+        assert_eq!(arrow.hit_resize_handle((62, 41), 3, 96), Some(ArrowEnd));
+        assert_eq!(arrow.hit_resize_handle((35, 25), 3, 96), None);
+        assert_eq!(arrow.hit_resize_handle((6, 6), 3, 96), None);
+
+        // A step badge cannot be resized.
+        let step = object(step_kind((50, 60), 14));
+        for point in [(50, 60), (36, 46), (64, 74), (0, 0)] {
+            assert_eq!(step.hit_resize_handle(point, 30, 96), None, "{point:?}");
+        }
+    }
+
+    #[test]
+    fn rectangle_like_resizes_move_the_dragged_corner_and_keep_a_minimum_size() {
+        let limit = Rect::new(0, 0, 100, 100);
+        let source = Rect::new(10, 10, 20, 20);
+        for (handle, cursor, expected) in [
+            (TopLeft, (5, 5), Rect::new(5, 5, 20, 20)),
+            (TopRight, (40, 5), Rect::new(10, 5, 40, 20)),
+            (BottomLeft, (5, 40), Rect::new(5, 10, 20, 40)),
+            (BottomRight, (40, 50), Rect::new(10, 10, 40, 50)),
+            // Dragged past the fixed corner: a redaction stays one pixel wide.
+            (BottomRight, (0, 0), Rect::new(10, 10, 11, 11)),
+            // Arrow ends do not apply to a rectangle.
+            (ArrowStart, (50, 50), source),
+            (ArrowEnd, (50, 50), source),
+        ] {
+            let original = redact_kind(source);
+            let mut redaction = object(original.clone());
+            redaction.resize_from(&original, handle, cursor, limit);
+            assert_eq!(
+                redaction.kind,
+                redact_kind(expected),
+                "{handle:?} {cursor:?}"
+            );
+        }
+
+        // Frames and blurs keep six pixels.
+        let frame = rectangle_kind(source, 2);
+        let mut resized = object(frame.clone());
+        resized.resize_from(&frame, BottomRight, (11, 11), limit);
+        assert_eq!(resized.kind, rectangle_kind(Rect::new(10, 10, 16, 16), 2));
+        let blur = blur_kind(source);
+        let mut resized = object(blur.clone());
+        resized.resize_from(&blur, TopLeft, (19, 19), limit);
+        assert_eq!(resized.kind, blur_kind(Rect::new(14, 14, 20, 20)));
+    }
+
+    #[test]
+    fn arrow_resize_moves_one_end_and_ignores_drags_that_collapse_the_arrow() {
+        let limit = Rect::new(0, 0, 100, 100);
+        let original = arrow_kind((5, 5), (50, 50), 2);
+        for (handle, cursor, start, end) in [
+            (ArrowStart, (20, 10), (20, 10), (50, 50)),
+            // Less than 4 px of length on both axes: the arrow stays as it was.
+            (ArrowEnd, (7, 7), (5, 5), (50, 50)),
+            // 4 px along either axis is long enough.
+            (ArrowEnd, (5, 9), (5, 5), (5, 9)),
+            (ArrowEnd, (9, 5), (5, 5), (9, 5)),
+            // Corner grips do not apply to an arrow.
+            (TopLeft, (60, 60), (5, 5), (50, 50)),
+        ] {
+            let mut arrow = object(original.clone());
+            arrow.resize_from(&original, handle, cursor, limit);
+            assert_eq!(
+                arrow.kind,
+                arrow_kind(start, end, 2),
+                "{handle:?} {cursor:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn stroke_resizes_scale_the_points_and_keep_the_kind() {
+        let limit = Rect::new(0, 0, 50, 50);
+        let marker = highlight_kind(&[(10, 10), (20, 20)], 2);
+        let mut resized = object(marker.clone());
+        resized.resize_from(&marker, BottomRight, (30, 30), limit);
+        assert_eq!(resized.kind, highlight_kind(&[(10, 10), (30, 30)], 2));
+
+        let pen = pen_kind(&[(10, 10), (20, 20)], 2);
+        let mut resized = object(pen.clone());
+        resized.resize_from(&pen, TopLeft, (0, 0), limit);
+        assert_eq!(resized.kind, pen_kind(&[(0, 0), (20, 20)], 2));
+    }
+
+    #[test]
+    fn step_badges_ignore_resizing() {
+        let step = step_kind((50, 60), 14);
+        let mut resized = object(step.clone());
+        resized.resize_from(&step, BottomRight, (90, 90), Rect::new(0, 0, 100, 100));
+        assert_eq!(resized.kind, step);
+    }
+
+    #[test]
+    fn text_resize_keeps_the_corner_opposite_the_dragged_grip() {
+        let limit = Rect::new(0, 0, 400, 300);
+        let original = text_kind((100, 100), "Hi", 20);
+        let source = object(original.clone()).geometry_bounds();
+        let (width, height) = (source.width(), source.height());
+        // Each cursor is twice as far from the fixed corner as the text is wide and tall.
+        type Case = (
+            AnnotationResizeHandle,
+            (i32, i32),
+            (i32, i32),
+            fn(Rect) -> (i32, i32),
+        );
+        let cases: [Case; 4] = [
+            (
+                TopLeft,
+                (source.right - 2 * width, source.bottom - 2 * height),
+                (source.right, source.bottom),
+                |b| (b.right, b.bottom),
+            ),
+            (
+                TopRight,
+                (source.left + 2 * width, source.bottom - 2 * height),
+                (source.left, source.bottom),
+                |b| (b.left, b.bottom),
+            ),
+            (
+                BottomLeft,
+                (source.right - 2 * width, source.top + 2 * height),
+                (source.right, source.top),
+                |b| (b.right, b.top),
+            ),
+            (
+                BottomRight,
+                (source.left + 2 * width, source.top + 2 * height),
+                (source.left, source.top),
+                |b| (b.left, b.top),
+            ),
+        ];
+        for (handle, cursor, fixed, corner) in cases {
+            let mut resized = object(original.clone());
+            resized.resize_from(&original, handle, cursor, limit);
+            assert_eq!(corner(resized.geometry_bounds()), fixed, "{handle:?}");
+            assert!(font_size_of(&resized).unwrap() > 20, "{handle:?}");
+        }
+    }
+
+    #[test]
+    fn largest_fitting_finds_the_biggest_size_the_predicate_accepts() {
+        for (max, limit, expected) in [
+            (40, 17, Some(17)),
+            (40, 40, Some(40)),
+            (10, 1000, Some(10)),
+            (40, 1, Some(1)),
+            (40, 0, None),
+            (0, 5, None),
+        ] {
+            assert_eq!(
+                largest_fitting(max, |size| size <= limit),
+                expected,
+                "{max} {limit}"
+            );
+        }
+        // The search probes the sizes logarithmically, not one by one.
+        let mut probes = 0;
+        assert_eq!(
+            largest_fitting(1000, |size| {
+                probes += 1;
+                size <= 321
+            }),
+            Some(321)
+        );
+        assert!(probes <= 10, "{probes}");
+    }
+
+    #[test]
+    fn color_and_thickness_apply_only_to_the_kinds_that_have_them() {
+        let new_color = [1, 2, 3, 255];
+        let rect = Rect::new(0, 0, 10, 10);
+        // (kind, has a color, has a thickness)
+        for (kind, has_color, has_thickness) in [
+            (rectangle_kind(rect, 2), true, true),
+            (arrow_kind((0, 0), (10, 10), 2), true, true),
+            (pen_kind(&[(0, 0), (5, 5)], 2), true, true),
+            (highlight_kind(&[(0, 0), (5, 5)], 2), true, true),
+            (step_kind((5, 5), 14), true, false),
+            (text_kind((5, 5), "A", 20), true, false),
+            (blur_kind(rect), false, false),
+            (redact_kind(rect), false, false),
+        ] {
+            let mut annotation = object(kind.clone());
+            assert_eq!(annotation.get_color(), has_color.then_some(COLOR));
+            assert_eq!(annotation.get_thickness(), has_thickness.then_some(2));
+            annotation.set_color(new_color);
+            annotation.set_thickness(7);
+            assert_eq!(annotation.get_color(), has_color.then_some(new_color));
+            assert_eq!(annotation.get_thickness(), has_thickness.then_some(7));
+            if !has_color && !has_thickness {
+                assert_eq!(annotation.kind, kind);
+            }
+        }
+    }
+
+    #[test]
+    fn square_snap_keeps_the_longer_side_in_the_drag_direction() {
+        for (current, expected) in [
+            ((30, 15), (30, 30)),
+            ((0, 15), (0, 20)),
+            ((14, 2), (18, 2)),
+            ((10, 10), (10, 10)),
+            ((-5, 40), (-20, 40)),
+        ] {
+            assert_eq!(snap_square((10, 10), current), expected, "{current:?}");
+        }
+    }
+
+    #[test]
+    fn angle_snap_rounds_the_drag_to_the_nearest_45_degrees_keeping_its_length() {
+        for (start, current, expected) in [
+            ((0, 0), (100, 10), (100, 0)),
+            ((0, 0), (50, 48), (49, 49)),
+            ((0, 0), (-3, -100), (0, -100)),
+            ((10, 20), (110, 25), (110, 20)),
+            // Under two pixels there is no direction to snap.
+            ((0, 0), (1, 1), (1, 1)),
+        ] {
+            assert_eq!(
+                snap_angle_45(start, current),
+                expected,
+                "{start:?} {current:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pixelate_replaces_each_block_with_its_average_and_makes_it_opaque() {
+        let mut buffer = gradient(8, 8);
+        apply_pixelate_blur(&mut buffer, 8, 8, &Rect::new(0, 0, 8, 8), 4);
+        // Blue is the mean of four columns, green the mean of four rows; red is constant.
+        for ((x, y), expected) in [
+            ((0, 0), [24, 24, 100, 255]),
+            ((3, 3), [24, 24, 100, 255]),
+            ((4, 0), [88, 24, 100, 255]),
+            ((7, 3), [88, 24, 100, 255]),
+            ((0, 4), [24, 88, 100, 255]),
+            ((7, 7), [88, 88, 100, 255]),
+        ] {
+            assert_eq!(pixel_at(&buffer, 8, x, y), expected, "({x}, {y})");
+        }
+
+        // Blocks below 4 px are raised to 4.
+        let mut small = gradient(8, 8);
+        apply_pixelate_blur(&mut small, 8, 8, &Rect::new(0, 0, 8, 8), 1);
+        assert_eq!(small, buffer);
+    }
+
+    #[test]
+    fn pixelate_clamps_to_the_buffer_and_leaves_the_rest_alone() {
+        let mut buffer = gradient(8, 8);
+        apply_pixelate_blur(&mut buffer, 8, 8, &Rect::new(-5, -5, 6, 6), 4);
+        // The 2 px wide edge blocks average their own pixels only.
+        assert_eq!(pixel_at(&buffer, 8, 0, 0), [24, 24, 100, 255]);
+        assert_eq!(pixel_at(&buffer, 8, 5, 0), [72, 24, 100, 255]);
+        assert_eq!(pixel_at(&buffer, 8, 0, 5), [24, 72, 100, 255]);
+        assert_eq!(pixel_at(&buffer, 8, 5, 5), [72, 72, 100, 255]);
+        assert_eq!(pixel_at(&buffer, 8, 6, 0), [96, 0, 100, 7]);
+        assert_eq!(pixel_at(&buffer, 8, 7, 7), [112, 112, 100, 7]);
+    }
+
+    #[test]
+    fn pixelate_ignores_degenerate_requests() {
+        let untouched = gradient(8, 8);
+        for (rect, width, height) in [
+            (Rect::new(2, 2, 2, 6), 8, 8),
+            (Rect::new(2, 6, 6, 6), 8, 8),
+            (Rect::new(0, 0, 8, 8), 0, 8),
+            (Rect::new(0, 0, 8, 8), 8, 0),
+            (Rect::new(20, 20, 30, 30), 8, 8),
+        ] {
+            let mut buffer = untouched.clone();
+            apply_pixelate_blur(&mut buffer, width, height, &rect, 4);
+            assert_eq!(buffer, untouched, "{rect:?} {width}x{height}");
+        }
+    }
+
+    #[test]
+    fn pixelate_averages_only_the_rows_a_short_buffer_holds() {
+        let mut buffer = gradient(8, 8)[..8 * 6 * 4].to_vec();
+        apply_pixelate_blur(&mut buffer, 8, 8, &Rect::new(0, 0, 8, 8), 4);
+        assert_eq!(pixel_at(&buffer, 8, 0, 0), [24, 24, 100, 255]);
+        // Rows 4 and 5 are the only rows of the second block row.
+        assert_eq!(pixel_at(&buffer, 8, 0, 4), [24, 72, 100, 255]);
+        assert_eq!(pixel_at(&buffer, 8, 0, 5), [24, 72, 100, 255]);
+        assert_eq!(pixel_at(&buffer, 8, 7, 5), [88, 72, 100, 255]);
+        assert_eq!(buffer.len(), 8 * 6 * 4);
+
+        // A buffer that ends before the second block row: nothing there to average or write.
+        let mut top_only = gradient(8, 8)[..8 * 4 * 4].to_vec();
+        apply_pixelate_blur(&mut top_only, 8, 8, &Rect::new(0, 0, 8, 8), 4);
+        assert_eq!(pixel_at(&top_only, 8, 0, 3), [24, 24, 100, 255]);
+        assert_eq!(pixel_at(&top_only, 8, 7, 3), [88, 24, 100, 255]);
+        assert_eq!(top_only.len(), 8 * 4 * 4);
+    }
+
+    #[test]
+    fn render_blur_pixelates_blurs_and_ignores_every_other_kind() {
+        let mut buffer = gradient(8, 8);
+        object(blur_kind(Rect::new(0, 0, 8, 8))).render_blur(&mut buffer, 8, 8);
+        // One 8 px block: blue averages all eight columns, green all eight rows.
+        assert!(
+            buffer
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| *pixel == [56, 56, 100, 255])
+        );
+
+        let untouched = gradient(8, 8);
+        let mut buffer = untouched.clone();
+        object(redact_kind(Rect::new(2, 2, 6, 6))).render_blur(&mut buffer, 0, 8);
+        object(redact_kind(Rect::new(2, 2, 6, 6))).render_blur(&mut buffer, 8, 0);
+        for kind in [
+            rectangle_kind(Rect::new(1, 1, 6, 6), 2),
+            arrow_kind((1, 1), (6, 6), 2),
+            pen_kind(&[(1, 1), (6, 6)], 2),
+            step_kind((4, 4), 3),
+            text_kind((1, 1), "A", 8),
+        ] {
+            object(kind).render_blur(&mut buffer, 8, 8);
+        }
+        assert_eq!(buffer, untouched);
+    }
+
+    #[test]
+    fn a_highlight_entirely_off_the_image_changes_nothing() {
+        let mut pixels = vec![100u8; 40 * 20 * 4];
+        let original = pixels.clone();
+        render_highlight(
+            &mut pixels,
+            40,
+            20,
+            &[(-100, -100), (-90, -100)],
+            [200, 0, 0, 255],
+            2,
+        );
+        assert_eq!(pixels, original);
+    }
+
+    #[test]
+    fn history_keeps_only_the_newest_entries() {
+        let mut objects: Vec<_> = (1..=4)
+            .map(|id| AnnotationObject::new(id, frame_at(id as i32)))
+            .collect();
+        let mut history = HistoryManager::new(3);
+        for object in &objects {
+            history.record(EditCommand::Add(object.clone()));
+        }
+        // The oldest step was dropped: object 1 stays, 4, 3 and 2 are undone.
+        assert_eq!(undo_steps(&mut history, &mut objects), 3);
+        assert_eq!(
+            objects.iter().map(|object| object.id).collect::<Vec<_>>(),
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn redoing_an_undone_add_restores_the_object_and_can_be_undone_again() {
+        let added = AnnotationObject::new(5, frame_at(3));
+        let mut objects = vec![added.clone()];
+        let mut history = HistoryManager::default();
+        history.record(EditCommand::Add(added.clone()));
+
+        assert!(history.undo(&mut objects));
+        assert!(objects.is_empty());
+        assert!(history.redo(&mut objects));
+        assert_eq!(objects, vec![added]);
+        assert!(history.can_undo());
+        assert!(history.undo(&mut objects));
+        assert!(objects.is_empty());
+    }
+
+    #[test]
+    fn record_merge_folds_edits_made_within_the_merge_window() {
+        let mut history = HistoryManager::default();
+        history.record_merge(nudge(7, 0, 1), MergeKey::Nudge);
+        history.record_merge(nudge(7, 1, 2), MergeKey::Nudge);
+        let mut objects = vec![AnnotationObject::new(7, frame_at(2))];
+
+        assert_eq!(undo_steps(&mut history, &mut objects), 1);
+        assert_eq!(objects[0].kind, frame_at(0));
     }
 }

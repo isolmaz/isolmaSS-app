@@ -239,13 +239,7 @@ pub struct CaptureTimings {
 
 enum PixelStorage {
     Owned(Vec<u8>),
-    Dib {
-        pointer: *mut u8,
-        length: usize,
-        memory_dc: HDC,
-        bitmap: HBITMAP,
-        old_bitmap: HGDIOBJ,
-    },
+    Dib(DibSection),
 }
 
 pub struct PixelBuffer(PixelStorage);
@@ -256,27 +250,192 @@ impl std::ops::Deref for PixelBuffer {
     fn deref(&self) -> &Self::Target {
         match &self.0 {
             PixelStorage::Owned(bytes) => bytes,
-            PixelStorage::Dib {
-                pointer, length, ..
-            } => unsafe { std::slice::from_raw_parts(*pointer, *length) },
+            PixelStorage::Dib(section) => section.pixels(),
         }
     }
 }
 
-impl Drop for PixelBuffer {
-    fn drop(&mut self) {
-        if let PixelStorage::Dib {
-            memory_dc,
-            bitmap,
-            old_bitmap,
-            ..
-        } = self.0
-        {
-            unsafe {
-                SelectObject(memory_dc, old_bitmap);
-                let _ = DeleteDC(memory_dc);
-                let _ = DeleteObject(HGDIOBJ(bitmap.0));
+/// GDI steps that can fail without leaving a Win32 error code to report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GdiFailure {
+    NoBitmap,
+    SelectBitmap,
+    Flush,
+}
+
+impl From<GdiFailure> for Error {
+    fn from(failure: GdiFailure) -> Self {
+        let message = match failure {
+            GdiFailure::NoBitmap => {
+                crate::i18n::t("Windows did not allocate a usable screenshot bitmap.")
             }
+            GdiFailure::SelectBitmap => {
+                crate::i18n::t("Windows could not select the screenshot bitmap.")
+            }
+            GdiFailure::Flush => {
+                crate::i18n::t("Windows could not finish drawing the captured screen.")
+            }
+        };
+        Error::new(windows::core::HRESULT::from_win32(31), message)
+    }
+}
+
+/// Win32 reports a failed device-context call with a null handle and the thread's last error.
+fn valid_dc(dc: HDC) -> Result<HDC> {
+    if dc.is_invalid() {
+        Err(Error::from_win32())
+    } else {
+        Ok(dc)
+    }
+}
+
+/// Size in bytes of a `width` x `height` 32-bit pixel buffer.
+fn pixel_bytes(width: usize, height: usize) -> Result<usize> {
+    width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| {
+            Error::new(
+                windows::core::HRESULT::from_win32(534),
+                crate::i18n::t("The virtual screen exceeds the supported pixel-buffer size."),
+            )
+        })
+}
+
+// RAII cleanup helper for HDC released via ReleaseDC
+struct DcReleaseGuard {
+    hwnd: HWND,
+    hdc: HDC,
+}
+
+impl Drop for DcReleaseGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = ReleaseDC(self.hwnd, self.hdc);
+        }
+    }
+}
+
+/// A memory device context, deleted on drop.
+struct MemoryDc(HDC);
+
+impl Drop for MemoryDc {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = DeleteDC(self.0);
+        }
+    }
+}
+
+/// A GDI bitmap, deleted on drop.
+struct OwnedBitmap(HBITMAP);
+
+impl Drop for OwnedBitmap {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = DeleteObject(HGDIOBJ(self.0.0));
+        }
+    }
+}
+
+/// A top-down 32-bit DIB section selected into its own memory device context. GDI draws
+/// into it and the CPU reads the pixels in place, without a copy.
+struct DibSection {
+    // Declaration order is drop order: the device context goes before the bitmap it holds.
+    memory_dc: MemoryDc,
+    _bitmap: OwnedBitmap,
+    old_bitmap: HGDIOBJ,
+    bits: *mut u8,
+    len: usize,
+    width: i32,
+    height: i32,
+}
+
+impl DibSection {
+    /// Creates a `width` x `height` section whose device context is compatible with
+    /// `compatible_with`.
+    fn new(compatible_with: HDC, width: i32, height: i32) -> Result<Self> {
+        if width <= 0 || height <= 0 {
+            return Err(Error::new(
+                windows::core::HRESULT::from_win32(87),
+                crate::i18n::t("The virtual screen has no capturable area."),
+            ));
+        }
+        let len = pixel_bytes(width as usize, height as usize)?;
+
+        let memory_dc = MemoryDc(valid_dc(unsafe { CreateCompatibleDC(compatible_with) })?);
+
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                biHeight: -height, // negative = top-down
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                biSizeImage: 0,
+                biXPelsPerMeter: 0,
+                biYPelsPerMeter: 0,
+                biClrUsed: 0,
+                biClrImportant: 0,
+            },
+            bmiColors: [RGBQUAD::default()],
+        };
+        let mut bits: *mut c_void = std::ptr::null_mut();
+        let bitmap = OwnedBitmap(unsafe {
+            CreateDIBSection(compatible_with, &bmi, DIB_RGB_COLORS, &mut bits, None, 0)?
+        });
+        let bits = std::ptr::NonNull::new(bits.cast::<u8>()).ok_or(GdiFailure::NoBitmap)?;
+
+        let old_bitmap = unsafe { SelectObject(memory_dc.0, HGDIOBJ(bitmap.0.0)) };
+        (!old_bitmap.is_invalid())
+            .then_some(())
+            .ok_or(GdiFailure::SelectBitmap)?;
+
+        Ok(Self {
+            memory_dc,
+            _bitmap: bitmap,
+            old_bitmap,
+            bits: bits.as_ptr(),
+            len,
+            width,
+            height,
+        })
+    }
+
+    /// Copies the `width` x `height` area of `source` at `(x, y)` into the section.
+    fn copy_from(&self, source: HDC, x: i32, y: i32) -> Result<()> {
+        unsafe {
+            BitBlt(
+                self.memory_dc.0,
+                0,
+                0,
+                self.width,
+                self.height,
+                source,
+                x,
+                y,
+                SRCCOPY | CAPTUREBLT,
+            )?;
+        }
+        // GDI batches writes to DIB sections. Complete them before reading pixels on the CPU.
+        unsafe { GdiFlush() }
+            .as_bool()
+            .then_some(())
+            .ok_or(GdiFailure::Flush)?;
+        Ok(())
+    }
+
+    fn pixels(&self) -> &[u8] {
+        // SAFETY: `bits` points at `len` bytes that live as long as `bitmap`.
+        unsafe { std::slice::from_raw_parts(self.bits, self.len) }
+    }
+}
+
+impl Drop for DibSection {
+    fn drop(&mut self) {
+        unsafe {
+            SelectObject(self.memory_dc.0, self.old_bitmap);
         }
     }
 }
@@ -296,42 +455,6 @@ pub struct CaptureBuffer {
     /// Pre-rendered dimmed 32-bit BGRA pixel data.
     pub dimmed: Vec<u8>,
     pub timings: CaptureTimings,
-}
-
-// RAII cleanup helper for HDC released via ReleaseDC
-struct DcReleaseGuard {
-    hwnd: HWND,
-    hdc: HDC,
-}
-
-impl Drop for DcReleaseGuard {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = ReleaseDC(self.hwnd, self.hdc);
-        }
-    }
-}
-
-// RAII cleanup helper for HDC deleted via DeleteDC
-struct DcDeleteGuard(HDC);
-
-impl Drop for DcDeleteGuard {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = DeleteDC(self.0);
-        }
-    }
-}
-
-// RAII cleanup helper for GDI object deleted via DeleteObject
-struct GdiObjectGuard(HGDIOBJ);
-
-impl Drop for GdiObjectGuard {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = DeleteObject(self.0);
-        }
-    }
 }
 
 static BUFFER_POOL: LazyLock<Mutex<Option<Vec<u8>>>> = LazyLock::new(|| Mutex::new(None));
@@ -386,136 +509,44 @@ impl CaptureBuffer {
         let width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
         let height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
 
-        if width <= 0 || height <= 0 {
-            return Err(Error::new(
-                windows::core::HRESULT::from_win32(87),
-                crate::i18n::t("The virtual screen has no capturable area."),
-            ));
-        }
-
-        let buffer_size = (width as usize)
-            .checked_mul(height as usize)
-            .and_then(|px| px.checked_mul(4))
-            .ok_or_else(|| {
-                Error::new(
-                    windows::core::HRESULT::from_win32(534),
-                    crate::i18n::t("The virtual screen exceeds the supported pixel-buffer size."),
-                )
-            })?;
-
-        // 1. Get desktop window DC
-        let screen_dc = unsafe { GetDC(HWND::default()) };
-        if screen_dc.is_invalid() {
-            return Err(Error::from_win32());
-        }
+        // Desktop window DC
+        let screen_dc = valid_dc(unsafe { GetDC(HWND::default()) })?;
         let _screen_guard = DcReleaseGuard {
             hwnd: HWND::default(),
             hdc: screen_dc,
         };
+        Self::capture_from(total_start, screen_dc, x, y, width, height)
+    }
 
-        // 2. Create compatible memory DC
-        let mem_dc = unsafe { CreateCompatibleDC(screen_dc) };
-        if mem_dc.is_invalid() {
-            return Err(Error::from_win32());
-        }
-        let _mem_guard = DcDeleteGuard(mem_dc);
-
-        // 3. Create a 32-bit top-down DIB section
-        let bmi = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: width,
-                biHeight: -height, // negative = top-down
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
-                biSizeImage: 0,
-                biXPelsPerMeter: 0,
-                biYPelsPerMeter: 0,
-                biClrUsed: 0,
-                biClrImportant: 0,
-            },
-            bmiColors: [RGBQUAD::default()],
-        };
-
-        let mut bits_ptr: *mut c_void = std::ptr::null_mut();
-        let hbitmap: HBITMAP =
-            unsafe { CreateDIBSection(screen_dc, &bmi, DIB_RGB_COLORS, &mut bits_ptr, None, 0)? };
-        let _bitmap_guard = GdiObjectGuard(HGDIOBJ(hbitmap.0));
-        if hbitmap.is_invalid() || bits_ptr.is_null() {
-            return Err(Error::new(
-                windows::core::HRESULT::from_win32(31),
-                crate::i18n::t("Windows did not allocate a usable screenshot bitmap."),
-            ));
-        }
-
-        // 4. Select DIB section into memory DC
-        let old_obj = unsafe { SelectObject(mem_dc, HGDIOBJ(hbitmap.0)) };
-        if old_obj.is_invalid() {
-            return Err(Error::new(
-                windows::core::HRESULT::from_win32(31),
-                crate::i18n::t("Windows could not select the screenshot bitmap."),
-            ));
-        }
-
+    /// Copies the `width` x `height` area of `source` at `(x, y)` into a new capture
+    /// and pre-renders its dimmed backdrop. `total_start` anchors `timings.total`.
+    fn capture_from(
+        total_start: Instant,
+        source: HDC,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) -> Result<Self> {
+        let section = DibSection::new(source, width, height)?;
         let setup = total_start.elapsed();
-        // 5. BitBlt from screen DC to memory DC with CAPTUREBLT
-        let bit_blt_start = Instant::now();
-        let blt_res = unsafe {
-            BitBlt(
-                mem_dc,
-                0,
-                0,
-                width,
-                height,
-                screen_dc,
-                x,
-                y,
-                SRCCOPY | CAPTUREBLT,
-            )
-        };
 
-        if let Err(error) = blt_res {
-            unsafe {
-                SelectObject(mem_dc, old_obj);
-            }
-            return Err(error);
-        }
-        // GDI batches writes to DIB sections. Complete them before reading pixels on the CPU.
-        if !unsafe { GdiFlush() }.as_bool() {
-            unsafe {
-                SelectObject(mem_dc, old_obj);
-            }
-            return Err(Error::new(
-                windows::core::HRESULT::from_win32(31),
-                crate::i18n::t("Windows could not finish drawing the captured screen."),
-            ));
-        }
+        let bit_blt_start = Instant::now();
+        section.copy_from(source, x, y)?;
         let bit_blt = bit_blt_start.elapsed();
 
-        // 6. Dim directly from the captured DIB; no full-screen copy is required.
-        let original_slice =
-            unsafe { std::slice::from_raw_parts(bits_ptr.cast::<u8>(), buffer_size) };
-        let mut dimmed = take_dimmed_buffer(buffer_size);
+        // Dim directly from the captured DIB; no full-screen copy is required.
+        let mut dimmed = take_dimmed_buffer(section.len);
         let dim_start = Instant::now();
-        Self::fill_dimmed_buffer(original_slice, &mut dimmed);
+        Self::fill_dimmed_buffer(section.pixels(), &mut dimmed);
         let dim = dim_start.elapsed();
-        let original = PixelBuffer(PixelStorage::Dib {
-            pointer: bits_ptr.cast::<u8>(),
-            length: buffer_size,
-            memory_dc: mem_dc,
-            bitmap: hbitmap,
-            old_bitmap: old_obj,
-        });
-        std::mem::forget(_mem_guard);
-        std::mem::forget(_bitmap_guard);
 
         Ok(Self {
             x,
             y,
             width,
             height,
-            original,
+            original: PixelBuffer(PixelStorage::Dib(section)),
             dimmed,
             timings: CaptureTimings {
                 setup,
@@ -599,12 +630,12 @@ impl CaptureBuffer {
         let t = thickness.min(clamped.width()).min(clamped.height());
         let stride = width as usize * 4;
 
+        // Every border pixel lies inside `clamped`, which is inside the buffer's
+        // `width` x `height`; only a `target` shorter than that needs a guard.
         let fill_pixel = |target: &mut [u8], x: i32, y: i32| {
-            if x >= 0 && x < width && y >= 0 && y < height {
-                let offset = (y as usize * stride) + (x as usize * 4);
-                if offset + 4 <= target.len() {
-                    target[offset..offset + 4].copy_from_slice(&color_bgra);
-                }
+            let offset = (y as usize * stride) + (x as usize * 4);
+            if offset + 4 <= target.len() {
+                target[offset..offset + 4].copy_from_slice(&color_bgra);
             }
         };
 
@@ -716,6 +747,8 @@ impl CaptureBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::Foundation::{COLORREF, ERROR_INVALID_HANDLE, SetLastError};
+    use windows::Win32::Graphics::Gdi::SetPixel;
 
     #[test]
     fn test_selection_hit_zones() {
@@ -925,6 +958,477 @@ mod tests {
                 assert_eq!(pixel(x), accent, "dpi {dpi} x {x}");
             }
             assert_eq!(pixel(30), [0; 4], "dpi {dpi}");
+        }
+    }
+
+    fn english() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::i18n::TEST_LANGUAGE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        crate::i18n::set_preference(crate::i18n::LanguagePreference::English);
+        guard
+    }
+
+    /// A device context handle that every GDI call rejects.
+    fn bogus_dc() -> HDC {
+        HDC(std::ptr::dangling_mut::<c_void>())
+    }
+
+    /// A real memory device context to build sections compatible with.
+    fn compatible_dc() -> MemoryDc {
+        MemoryDc(valid_dc(unsafe { CreateCompatibleDC(None) }).unwrap())
+    }
+
+    /// Writes `color(x, y)` into every pixel of `section` through its pixel memory.
+    fn paint(section: &DibSection, color: impl Fn(i32, i32) -> [u8; 4]) {
+        let pixels = unsafe { std::slice::from_raw_parts_mut(section.bits, section.len) };
+        for y in 0..section.height {
+            for x in 0..section.width {
+                let offset = (y * section.width + x) as usize * 4;
+                pixels[offset..offset + 4].copy_from_slice(&color(x, y));
+            }
+        }
+    }
+
+    fn pixels_of(width: usize, height: usize, pixel: impl Fn(usize, usize) -> [u8; 4]) -> Vec<u8> {
+        (0..height)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .flat_map(|(x, y)| pixel(x, y))
+            .collect()
+    }
+
+    fn at(buffer: &[u8], width: usize, x: usize, y: usize) -> [u8; 4] {
+        buffer[(y * width + x) * 4..][..4].try_into().unwrap()
+    }
+
+    #[test]
+    fn normalized_orders_two_corners_whichever_way_they_are_dragged() {
+        let expected = Rect::new(10, 5, 30, 40);
+        assert_eq!(Rect::normalized((10, 40), (30, 5)), expected);
+        assert_eq!(Rect::normalized((30, 5), (10, 40)), expected);
+        assert_eq!(Rect::normalized((10, 5), (30, 40)), expected);
+        assert_eq!(
+            Rect::normalized((30, 40), (30, 40)),
+            Rect::new(30, 40, 30, 40)
+        );
+    }
+
+    #[test]
+    fn union_is_the_bounding_box_and_ignores_empty_rects() {
+        let a = Rect::new(10, 20, 30, 40);
+        let b = Rect::new(25, 5, 50, 30);
+        assert_eq!(a.union(&b), Rect::new(10, 5, 50, 40));
+        assert_eq!(b.union(&a), Rect::new(10, 5, 50, 40));
+        let empty = Rect::new(100, 100, 100, 150);
+        assert_eq!(empty.union(&a), a);
+        assert_eq!(a.union(&empty), a);
+        assert_eq!(empty.union(&empty), empty);
+    }
+
+    #[test]
+    fn an_empty_selection_hits_nothing() {
+        let empty = Rect::new(50, 50, 50, 80);
+        assert_eq!(
+            empty.hit_test_selection((50, 60), 4, 8),
+            SelectionHitZone::None
+        );
+    }
+
+    #[test]
+    fn copy_rect_copies_only_the_clamped_rows_and_columns() {
+        let source = pixels_of(4, 3, |x, y| [x as u8 + 1, y as u8 + 1, 7, 255]);
+        let mut target = vec![0u8; source.len()];
+        CaptureBuffer::copy_rect(&mut target, 4, 3, &Rect::new(1, 1, 3, 3), &source);
+        for y in 0..3 {
+            for x in 0..4 {
+                let inside = (1..3).contains(&x) && (1..3).contains(&y);
+                let expected = if inside { at(&source, 4, x, y) } else { [0; 4] };
+                assert_eq!(at(&target, 4, x, y), expected, "({x}, {y})");
+            }
+        }
+
+        // A rectangle hanging over the buffer is cut at its edges.
+        let mut target = vec![0u8; source.len()];
+        CaptureBuffer::copy_rect(&mut target, 4, 3, &Rect::new(-2, -2, 2, 1), &source);
+        for y in 0..3 {
+            for x in 0..4 {
+                let expected = if x < 2 && y < 1 {
+                    at(&source, 4, x, y)
+                } else {
+                    [0; 4]
+                };
+                assert_eq!(at(&target, 4, x, y), expected, "({x}, {y})");
+            }
+        }
+    }
+
+    #[test]
+    fn copy_rect_ignores_empty_degenerate_and_out_of_buffer_rects() {
+        let source = vec![9u8; 4 * 3 * 4];
+        for (width, height, rect) in [
+            (4, 3, Rect::new(2, 1, 2, 3)),
+            (4, 3, Rect::new(2, 2, 3, 2)),
+            (0, 3, Rect::new(0, 0, 4, 3)),
+            (4, -1, Rect::new(0, 0, 4, 3)),
+            (4, 3, Rect::new(10, 10, 20, 20)),
+        ] {
+            let mut target = vec![0u8; source.len()];
+            CaptureBuffer::copy_rect(&mut target, width, height, &rect, &source);
+            assert!(target.iter().all(|&byte| byte == 0), "{rect:?}");
+        }
+    }
+
+    #[test]
+    fn copy_rect_skips_rows_a_short_buffer_does_not_hold() {
+        let source = vec![9u8; 4 * 3 * 4];
+        // Only the first two rows fit in the target.
+        let mut target = vec![0u8; 4 * 2 * 4];
+        CaptureBuffer::copy_rect(&mut target, 4, 3, &Rect::new(0, 0, 4, 3), &source);
+        assert!(target.iter().all(|&byte| byte == 9));
+        // Only the first row fits in the source.
+        let mut target = vec![0u8; 4 * 3 * 4];
+        CaptureBuffer::copy_rect(&mut target, 4, 3, &Rect::new(0, 0, 4, 3), &source[..16]);
+        assert!(target[..16].iter().all(|&byte| byte == 9));
+        assert!(target[16..].iter().all(|&byte| byte == 0));
+    }
+
+    #[test]
+    fn punch_out_and_restore_copy_from_the_original_and_the_dimmed_pixels() {
+        let capture = CaptureBuffer {
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 3,
+            original: PixelBuffer(PixelStorage::Owned(vec![200u8; 4 * 3 * 4])),
+            dimmed: vec![50u8; 4 * 3 * 4],
+            timings: CaptureTimings::default(),
+        };
+        let rect = Rect::new(1, 0, 3, 2);
+        let mut target = vec![0u8; 4 * 3 * 4];
+        capture.punch_out(&mut target, &rect);
+        for y in 0..3 {
+            for x in 0..4 {
+                let expected = if (1..3).contains(&x) && y < 2 {
+                    [200; 4]
+                } else {
+                    [0; 4]
+                };
+                assert_eq!(at(&target, 4, x, y), expected, "({x}, {y})");
+            }
+        }
+        capture.restore_dimmed(&mut target, &Rect::new(0, 0, 2, 1));
+        assert_eq!(at(&target, 4, 0, 0), [50; 4]);
+        assert_eq!(at(&target, 4, 1, 0), [50; 4]);
+        assert_eq!(at(&target, 4, 2, 0), [200; 4]);
+        assert_eq!(at(&target, 4, 1, 1), [200; 4]);
+    }
+
+    #[test]
+    fn dimming_scales_each_color_channel_to_45_percent_and_makes_alpha_opaque() {
+        let original = [255, 100, 20, 7, 0, 1, 2, 255];
+        let mut dimmed = [0u8; 8];
+        CaptureBuffer::fill_dimmed_buffer(&original, &mut dimmed);
+        // v * 115 / 255, rounded down: 255 -> 115, 100 -> 45, 20 -> 9, 2 -> 0.
+        assert_eq!(dimmed, [115, 45, 9, 255, 0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn dimmed_buffers_are_pooled_unless_they_are_oversized() {
+        assert_eq!(take_dimmed_buffer(24).len(), 24);
+
+        let mut capture = CaptureBuffer::dummy(1, 1);
+        capture.dimmed = Vec::with_capacity(MAX_POOLED_BYTES);
+        let pooled = capture.dimmed.capacity();
+        drop(capture);
+        let reused = take_dimmed_buffer(16);
+        assert_eq!(reused.len(), 16);
+        assert!(reused.capacity() >= pooled);
+
+        let mut capture = CaptureBuffer::dummy(1, 1);
+        capture.dimmed = Vec::with_capacity(MAX_POOLED_BYTES + 1);
+        drop(capture);
+        assert!(take_dimmed_buffer(16).capacity() <= MAX_POOLED_BYTES);
+    }
+
+    #[test]
+    fn border_and_fill_cover_exactly_their_pixels() {
+        let accent = [1, 2, 3, 255];
+        let mut buffer = vec![0u8; 10 * 10 * 4];
+        CaptureBuffer::draw_border(&mut buffer, 10, 10, &Rect::new(2, 2, 8, 8), accent, 2);
+        for y in 0..10 {
+            for x in 0..10 {
+                let on_ring = (2..8).contains(&x)
+                    && (2..8).contains(&y)
+                    && !((4..6).contains(&x) && (4..6).contains(&y));
+                let expected = if on_ring { accent } else { [0; 4] };
+                assert_eq!(at(&buffer, 10, x, y), expected, "({x}, {y})");
+            }
+        }
+
+        let mut buffer = vec![0u8; 10 * 10 * 4];
+        CaptureBuffer::fill_rect(&mut buffer, 10, 10, &Rect::new(3, 4, 7, 6), accent);
+        for y in 0..10 {
+            for x in 0..10 {
+                let inside = (3..7).contains(&x) && (4..6).contains(&y);
+                let expected = if inside { accent } else { [0; 4] };
+                assert_eq!(at(&buffer, 10, x, y), expected, "({x}, {y})");
+            }
+        }
+    }
+
+    #[test]
+    fn a_border_thicker_than_its_rect_fills_it_and_one_off_the_buffer_is_cut() {
+        let accent = [1, 2, 3, 255];
+        let mut buffer = vec![0u8; 10 * 10 * 4];
+        CaptureBuffer::draw_border(&mut buffer, 10, 10, &Rect::new(2, 2, 5, 4), accent, 9);
+        for y in 0..10 {
+            for x in 0..10 {
+                let inside = (2..5).contains(&x) && (2..4).contains(&y);
+                let expected = if inside { accent } else { [0; 4] };
+                assert_eq!(at(&buffer, 10, x, y), expected, "({x}, {y})");
+            }
+        }
+
+        // A frame hanging over the buffer is drawn on its outermost pixels.
+        let mut buffer = vec![0u8; 10 * 10 * 4];
+        CaptureBuffer::draw_border(&mut buffer, 10, 10, &Rect::new(6, 6, 14, 14), accent, 1);
+        assert_eq!(at(&buffer, 10, 6, 8), accent);
+        assert_eq!(at(&buffer, 10, 8, 6), accent);
+        assert_eq!(at(&buffer, 10, 9, 9), accent);
+        assert_eq!(at(&buffer, 10, 7, 7), [0; 4]);
+    }
+
+    #[test]
+    fn drawing_ignores_degenerate_requests() {
+        let accent = [1, 2, 3, 255];
+        let untouched = vec![0u8; 10 * 10 * 4];
+        let full = Rect::new(0, 0, 10, 10);
+        let off_buffer = Rect::new(20, 20, 30, 30);
+        let empty = Rect::new(4, 4, 4, 8);
+
+        // (rect, thickness, width, height)
+        for (rect, thickness, width, height) in [
+            (empty, 1, 10, 10),
+            (full, 0, 10, 10),
+            (full, 1, 0, 10),
+            (full, 1, 10, -3),
+            (off_buffer, 1, 10, 10),
+        ] {
+            let mut buffer = untouched.clone();
+            CaptureBuffer::draw_border(&mut buffer, width, height, &rect, accent, thickness);
+            assert_eq!(buffer, untouched, "{rect:?} {thickness} {width}x{height}");
+        }
+        for (rect, width, height) in [
+            (empty, 10, 10),
+            (full, 0, 10),
+            (full, 10, -3),
+            (off_buffer, 10, 10),
+        ] {
+            let mut buffer = untouched.clone();
+            CaptureBuffer::fill_rect(&mut buffer, width, height, &rect, accent);
+            assert_eq!(buffer, untouched, "{rect:?} {width}x{height}");
+        }
+        let mut buffer = untouched.clone();
+        for (rect, width, height) in [(empty, 10, 10), (full, 0, 10), (full, 10, 0)] {
+            CaptureBuffer::draw_contrast_selection(&mut buffer, width, height, &rect, accent, 96);
+        }
+        assert_eq!(buffer, untouched);
+    }
+
+    #[test]
+    fn drawing_skips_rows_a_short_buffer_does_not_hold() {
+        let accent = [1, 2, 3, 255];
+        let full = Rect::new(0, 0, 10, 10);
+        // The buffer holds only the first two of the ten rows.
+        let mut short = vec![0u8; 10 * 2 * 4];
+        CaptureBuffer::draw_border(&mut short, 10, 10, &full, accent, 1);
+        for x in 0..10 {
+            assert_eq!(at(&short, 10, x, 0), accent, "top row {x}");
+            let on_side = x == 0 || x == 9;
+            assert_eq!(
+                at(&short, 10, x, 1),
+                if on_side { accent } else { [0; 4] },
+                "second row {x}"
+            );
+        }
+        CaptureBuffer::fill_rect(&mut short, 10, 10, &full, accent);
+        assert!(
+            short
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| *pixel == accent)
+        );
+    }
+
+    #[test]
+    fn pixel_bytes_is_four_bytes_per_pixel_and_rejects_overflow() {
+        assert_eq!(pixel_bytes(1920, 1080).unwrap(), 8_294_400);
+        for (width, height) in [(usize::MAX, 2), (usize::MAX / 4 + 1, 1)] {
+            let error = pixel_bytes(width, height).unwrap_err();
+            assert_eq!(error.code(), windows::core::HRESULT::from_win32(534));
+        }
+    }
+
+    #[test]
+    fn gdi_failures_carry_error_31_and_their_own_message() {
+        let _english = english();
+        for (failure, message) in [
+            (
+                GdiFailure::NoBitmap,
+                "Windows did not allocate a usable screenshot bitmap.",
+            ),
+            (
+                GdiFailure::SelectBitmap,
+                "Windows could not select the screenshot bitmap.",
+            ),
+            (
+                GdiFailure::Flush,
+                "Windows could not finish drawing the captured screen.",
+            ),
+        ] {
+            let error = Error::from(failure);
+            assert_eq!(error.code(), windows::core::HRESULT::from_win32(31));
+            assert!(error.message().contains(message), "{}", error.message());
+        }
+        crate::i18n::set_preference(crate::i18n::LanguagePreference::System);
+    }
+
+    #[test]
+    fn valid_dc_passes_a_handle_and_turns_a_null_one_into_the_last_error() {
+        let dc = compatible_dc();
+        assert_eq!(valid_dc(dc.0).unwrap(), dc.0);
+        unsafe { SetLastError(ERROR_INVALID_HANDLE) };
+        let error = valid_dc(HDC::default()).unwrap_err();
+        assert_eq!(error.code(), windows::core::HRESULT::from_win32(6));
+    }
+
+    #[test]
+    fn dib_sections_are_top_down_32_bit_pixel_memory_that_gdi_draws_into() {
+        let compatible = compatible_dc();
+        let section = DibSection::new(compatible.0, 5, 3).unwrap();
+        assert_eq!(section.pixels().len(), 5 * 3 * 4);
+        // COLORREF 0x00BBGGRR lands in the DIB as B, G, R: row 1 is the second row from the top.
+        unsafe {
+            SetPixel(section.memory_dc.0, 2, 1, COLORREF(0x0030_2010));
+            let _ = GdiFlush();
+        }
+        assert_eq!(at(section.pixels(), 5, 2, 1)[..3], [0x30, 0x20, 0x10]);
+        assert_eq!(at(section.pixels(), 5, 2, 0)[..3], [0, 0, 0]);
+        assert_eq!(at(section.pixels(), 5, 1, 1)[..3], [0, 0, 0]);
+    }
+
+    #[test]
+    fn dib_sections_reject_what_gdi_cannot_provide() {
+        let _english = english();
+        let compatible = compatible_dc();
+        for (width, height) in [(0, 5), (5, 0), (-3, 5), (5, -3)] {
+            let error = DibSection::new(compatible.0, width, height).err().unwrap();
+            assert_eq!(
+                error.code(),
+                windows::core::HRESULT::from_win32(87),
+                "{width}x{height}"
+            );
+            assert!(
+                error
+                    .message()
+                    .contains("The virtual screen has no capturable area."),
+                "{}",
+                error.message()
+            );
+        }
+        assert!(DibSection::new(bogus_dc(), 4, 4).is_err());
+        // 40 GB of pixels: the memory device context exists, the bitmap cannot.
+        assert!(DibSection::new(compatible.0, 100_000, 100_000).is_err());
+        crate::i18n::set_preference(crate::i18n::LanguagePreference::System);
+    }
+
+    #[test]
+    fn copying_from_an_unusable_source_fails_and_leaves_the_section_intact() {
+        let compatible = compatible_dc();
+        let section = DibSection::new(compatible.0, 4, 4).unwrap();
+        paint(&section, |_, _| [5, 6, 7, 255]);
+        assert!(section.copy_from(bogus_dc(), 0, 0).is_err());
+        assert!(
+            section
+                .pixels()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| *pixel == [5, 6, 7, 255])
+        );
+    }
+
+    #[test]
+    fn capture_from_copies_the_requested_area_and_pre_renders_the_dimmed_copy() {
+        let compatible = compatible_dc();
+        let source = DibSection::new(compatible.0, 8, 6).unwrap();
+        paint(&source, |x, y| [x as u8 * 10, y as u8 * 10, 100, 255]);
+
+        let capture =
+            CaptureBuffer::capture_from(Instant::now(), source.memory_dc.0, 2, 1, 4, 3).unwrap();
+        assert_eq!((capture.x, capture.y), (2, 1));
+        assert_eq!((capture.width, capture.height), (4, 3));
+        assert_eq!(capture.original.len(), 4 * 3 * 4);
+        assert_eq!(capture.dimmed.len(), 4 * 3 * 4);
+        for row in 0..3usize {
+            for col in 0..4usize {
+                let blue = (2 + col as u32) * 10;
+                let green = (1 + row as u32) * 10;
+                assert_eq!(
+                    at(&capture.original, 4, col, row)[..3],
+                    [blue as u8, green as u8, 100],
+                    "original ({col}, {row})"
+                );
+                // 115 / 255 of each channel, alpha opaque.
+                assert_eq!(
+                    at(&capture.dimmed, 4, col, row),
+                    [(blue * 115 / 255) as u8, (green * 115 / 255) as u8, 45, 255],
+                    "dimmed ({col}, {row})"
+                );
+            }
+        }
+        let timings = capture.timings;
+        assert!(timings.total >= timings.setup + timings.bit_blt + timings.dim);
+    }
+
+    #[test]
+    fn capture_from_reports_the_failure_instead_of_a_partial_capture() {
+        let compatible = compatible_dc();
+        let source = DibSection::new(compatible.0, 8, 6).unwrap();
+        assert!(
+            CaptureBuffer::capture_from(Instant::now(), source.memory_dc.0, 0, 0, 0, 6).is_err()
+        );
+        assert!(CaptureBuffer::capture_from(Instant::now(), bogus_dc(), 0, 0, 4, 3).is_err());
+    }
+
+    #[test]
+    fn virtual_screen_capture_matches_the_desktop_geometry_and_dims_every_pixel() {
+        let capture = CaptureBuffer::capture_virtual_screen().unwrap();
+        let metric = |index| unsafe { GetSystemMetrics(index) };
+        assert_eq!(
+            (capture.x, capture.y, capture.width, capture.height),
+            (
+                metric(SM_XVIRTUALSCREEN),
+                metric(SM_YVIRTUALSCREEN),
+                metric(SM_CXVIRTUALSCREEN),
+                metric(SM_CYVIRTUALSCREEN)
+            )
+        );
+        let bytes = capture.width as usize * capture.height as usize * 4;
+        assert_eq!(capture.original.len(), bytes);
+        assert_eq!(capture.dimmed.len(), bytes);
+        for (source, dimmed) in capture
+            .original
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(capture.dimmed.as_chunks::<4>().0.iter())
+        {
+            assert_eq!(dimmed[3], 255);
+            for channel in 0..3 {
+                assert_eq!(dimmed[channel] as u32, source[channel] as u32 * 115 / 255);
+            }
         }
     }
 }
