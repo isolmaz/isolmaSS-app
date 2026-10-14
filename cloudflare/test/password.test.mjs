@@ -27,8 +27,11 @@ describe('password form', () => {
     expect(html).toContain(`<form method="post" action="/i/${id}/unlock">`);
     expect(html).toContain('<label for="password">Password</label>');
     expect(html).toMatch(/<input id="password" name="password" type="password" required autofocus minlength="12" maxlength="128"/);
-    expect(html).not.toContain('aria-invalid');
-    expect(html).not.toContain('role="alert"');
+    // The page's stylesheet mentions aria-invalid, so inspect the elements, not the whole document.
+    const input = /<input id="password"[^>]*>/.exec(html)[0];
+    expect(input).not.toContain('aria-invalid');
+    expect(input).not.toContain('aria-describedby');
+    expect(html).not.toMatch(/<[a-z][^>]*\brole="alert"/i);
   });
 
   it('is Turkish when the browser prefers Turkish', async () => {

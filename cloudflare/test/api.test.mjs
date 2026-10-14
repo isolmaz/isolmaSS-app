@@ -176,7 +176,11 @@ describe('storage schema', () => {
     });
     for (let restart = 0; restart < 2; restart++) {
       await evictDurableObject(store());
-      expect((await admin('/api/stats')).status).toBe(200);
+      // evictDurableObject waits for in-flight requests, and a response body
+      // nobody reads keeps its request in flight, so the next eviction would hang.
+      const stats = await admin('/api/stats');
+      expect(stats.status).toBe(200);
+      await stats.text();
       const names = (await sql('PRAGMA table_info(images)')).map(column => column.name);
       expect(names).toEqual(expect.arrayContaining(['width', 'height']));
       expect(names.filter(name => name === 'width')).toHaveLength(1);
