@@ -52,6 +52,20 @@ fn brush_in_use(hdc: HDC, color: COLORREF) -> HGDIOBJ {
     with_brush(hdc, color, || current(hdc, OBJ_BRUSH))
 }
 
+const SPARE: u32 = 0x00A0_B0C0;
+
+fn spare_brush() -> HGDIOBJ {
+    HGDIOBJ(unsafe { CreateSolidBrush(COLORREF(SPARE)) }.0)
+}
+
+/// The object of `kind` selected while `with_object` runs for `key`. Every
+/// test reaches `with_object` through this one fixed instantiation, which
+/// therefore sees a cache hit, a cached creation, a temporary object (full
+/// cache) and a failed creation.
+fn selected(hdc: HDC, key: Key, create: fn() -> HGDIOBJ, kind: OBJ_TYPE) -> HGDIOBJ {
+    with_object(hdc, key, create, || current(hdc, kind))
+}
+
 fn stock(object: GET_STOCK_OBJECT_FLAGS) -> HGDIOBJ {
     unsafe { GetStockObject(object) }
 }
@@ -223,6 +237,12 @@ fn cached_objects_are_selected_for_the_action_and_restored_afterwards() {
         // The same request reuses the same objects, which outlive the draw.
         let fresh = brush_in_use(hdc, COLORREF(0x0030_6090));
         assert_ne!(fresh, inside.0);
+        let spare = selected(hdc, Key::Brush(SPARE), spare_brush, OBJ_BRUSH);
+        assert_eq!(
+            selected(hdc, Key::Brush(SPARE), spare_brush, OBJ_BRUSH),
+            spare
+        );
+        assert!(alive(spare), "a cached object outlives the draw");
         let again = brush_in_use(hdc, RED);
         assert_eq!(again, inside.0);
         assert!(alive(again));
@@ -271,13 +291,9 @@ fn a_failed_creation_selects_a_stock_object_and_is_logged_once_per_key() {
                         assert_ne!(own.1, stock(BLACK_PEN));
                         assert_ne!(own.2, stock(SYSTEM_FONT));
                         let stand_ins = (
-                            with_object(hdc, Key::Brush(1), failing, || current(hdc, OBJ_BRUSH)),
-                            with_object(hdc, Key::Pen(PS_SOLID.0, 1, 2), failing, || {
-                                current(hdc, OBJ_PEN)
-                            }),
-                            with_object(hdc, Key::Font("No Such Face", 12, 400), failing, || {
-                                current(hdc, OBJ_FONT)
-                            }),
+                            selected(hdc, Key::Brush(1), failing, OBJ_BRUSH),
+                            selected(hdc, Key::Pen(PS_SOLID.0, 1, 2), failing, OBJ_PEN),
+                            selected(hdc, Key::Font("No Such Face", 12, 400), failing, OBJ_FONT),
                         );
                         assert_eq!(
                             stand_ins,
@@ -299,10 +315,10 @@ fn a_failed_creation_selects_a_stock_object_and_is_logged_once_per_key() {
         nested();
         nested();
         assert_eq!(logged_failures(), 3);
-        with_object(hdc, Key::Brush(1), failing, || ());
+        selected(hdc, Key::Brush(1), failing, OBJ_BRUSH);
         assert_eq!(logged_failures(), 3, "a key already reported stays quiet");
         for index in 0..70u32 {
-            with_object(hdc, Key::Brush(100 + index), failing, || ());
+            selected(hdc, Key::Brush(100 + index), failing, OBJ_BRUSH);
         }
         assert_eq!(logged_failures(), 64, "the failure log is bounded");
         assert_eq!(cached_objects(), 3, "failures are never cached");
@@ -321,6 +337,8 @@ fn a_full_cache_hands_out_temporary_objects_that_are_deleted_after_use() {
         let temporary = brush_in_use(hdc, RED);
         assert!(!alive(temporary), "deleted once the draw is over");
         assert_eq!(cached_objects(), 48, "the cache stays bounded");
+        let spare = selected(hdc, Key::Brush(SPARE), spare_brush, OBJ_BRUSH);
+        assert!(!alive(spare), "any kind of object is temporary when full");
         let kept = brush_in_use(hdc, COLORREF(5));
         assert!(alive(kept), "cached brushes are not deleted");
     });
