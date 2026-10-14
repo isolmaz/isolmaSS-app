@@ -8,7 +8,7 @@
 //! [`invalidate_theme_cache`] runs (window procs call it from `WM_SETTINGCHANGE`).
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use windows::Win32::Foundation::{COLORREF, HWND};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM};
 
 /// Current system theme, derived from `AppsUseLightTheme`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -49,11 +49,13 @@ pub fn set_preference(preference: ThemePreference) {
 type SetPreferredAppMode = unsafe extern "system" fn(i32) -> i32;
 type AllowDarkModeForWindow = unsafe extern "system" fn(HWND, i32) -> i32;
 type FlushMenuThemes = unsafe extern "system" fn();
+type RefreshImmersiveColorPolicyState = unsafe extern "system" fn();
 
 struct UxTheme {
     set_preferred_app_mode: Option<SetPreferredAppMode>,
     allow_dark_mode_for_window: Option<AllowDarkModeForWindow>,
     flush_menu_themes: Option<FlushMenuThemes>,
+    refresh_immersive_color_policy_state: Option<RefreshImmersiveColorPolicyState>,
 }
 
 fn uxtheme() -> &'static UxTheme {
@@ -74,6 +76,7 @@ fn uxtheme() -> &'static UxTheme {
                 set_preferred_app_mode: None,
                 allow_dark_mode_for_window: None,
                 flush_menu_themes: None,
+                refresh_immersive_color_policy_state: None,
             };
         };
         let ordinal = |number: usize| unsafe {
@@ -85,6 +88,7 @@ fn uxtheme() -> &'static UxTheme {
                 set_preferred_app_mode: ordinal(135).map(|f| std::mem::transmute(f)),
                 allow_dark_mode_for_window: ordinal(133).map(|f| std::mem::transmute(f)),
                 flush_menu_themes: ordinal(136).map(|f| std::mem::transmute(f)),
+                refresh_immersive_color_policy_state: ordinal(104).map(|f| std::mem::transmute(f)),
             }
         }
     });
@@ -110,6 +114,44 @@ fn set_app_mode(preference: u8) {
             }
         }
     }
+}
+
+/// Re-reads Windows' light/dark colour policy and drops the cached menu themes,
+/// so native popup menus (the tray menu) follow a live theme flip while the
+/// preference is System. Forced light or dark leaves the menus as they are.
+/// Call it when `WM_SETTINGCHANGE` names "ImmersiveColorSet"
+/// ([`is_color_setting_change`]).
+pub fn refresh_native_menus() {
+    let preference = PREFERENCE.load(Ordering::Acquire);
+    if preference != 0 {
+        return;
+    }
+    if let Some(refresh) = uxtheme().refresh_immersive_color_policy_state {
+        // SAFETY: ordinal 104 takes no arguments and returns nothing.
+        unsafe { refresh() };
+    }
+    set_app_mode(preference);
+}
+
+/// True when the `lparam` of `WM_SETTINGCHANGE` names the "ImmersiveColorSet"
+/// area, i.e. the Windows light/dark colours changed. The shell passes the
+/// area as a NUL-terminated wide string, or null for unrelated changes.
+pub fn is_color_setting_change(lparam: LPARAM) -> bool {
+    const AREA: &str = "ImmersiveColorSet";
+    if lparam.0 == 0 {
+        return false;
+    }
+    let text = lparam.0 as *const u16;
+    let mut length = 0;
+    for unit in AREA.encode_utf16() {
+        // SAFETY: the loop stops at the first mismatch, and a NUL terminator
+        // never matches a letter, so nothing past the string end is read.
+        if unsafe { *text.add(length) } != unit {
+            return false;
+        }
+        length += 1;
+    }
+    unsafe { *text.add(length) == 0 }
 }
 
 /// Gives a standard control the native light or dark visual style. Edits and
@@ -566,4 +608,30 @@ unsafe extern "system" fn theme_child(
         apply_control_theme(child, dark, false);
     }
     true.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn color_setting_change_matches_only_the_immersive_color_area() {
+        let wide = |text: &str| -> Vec<u16> { text.encode_utf16().chain(Some(0)).collect() };
+        let area = wide("ImmersiveColorSet");
+        assert!(is_color_setting_change(LPARAM(area.as_ptr() as isize)));
+        for other in [
+            "",
+            "ImmersiveColor",
+            "ImmersiveColorSets",
+            "intl",
+            "WindowMetrics",
+        ] {
+            let text = wide(other);
+            assert!(
+                !is_color_setting_change(LPARAM(text.as_ptr() as isize)),
+                "{other:?}"
+            );
+        }
+        assert!(!is_color_setting_change(LPARAM(0)));
+    }
 }

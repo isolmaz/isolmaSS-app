@@ -2,7 +2,7 @@
 //! encodes the image ([`prepare`]); sending happens on a background thread
 //! owned by the upload toast ([`crate::toast`]), so the editor closes at once.
 use crate::capture::Rect;
-use crate::cloudflare_setup::{self, CloudCredentials, RequestBody};
+use crate::cloudflare_setup::{self, CloudCredentials, RequestBody, UploadProgress};
 use crate::save::save_buffer_to_image;
 use crate::settings::{SaveFormat, Settings};
 use serde::Deserialize;
@@ -10,6 +10,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub const WM_UPLOAD_DONE: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 41;
+/// Posted to the toast while the file is written: WPARAM is the share of the
+/// body already sent in per-mille, LPARAM the number of the attempt.
+pub const WM_UPLOAD_PROGRESS: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 42;
 
 /// The encoded screenshot on disk; removed when the last owner drops it.
 struct TemporaryScreenshot(PathBuf);
@@ -28,6 +31,7 @@ impl Drop for TemporaryScreenshot {
 #[derive(Clone)]
 pub struct Prepared {
     file: Arc<TemporaryScreenshot>,
+    bytes: u64,
     format: SaveFormat,
     credentials: CloudCredentials,
 }
@@ -68,15 +72,22 @@ pub fn prepare(
     .map_err(|error| {
         crate::i18n::tf("Could not prepare the screenshot for upload: {}", &[&error])
     })?;
+    let bytes = std::fs::metadata(&output)
+        .map_err(|error| {
+            crate::i18n::tf("Could not prepare the screenshot for upload: {}", &[&error])
+        })?
+        .len();
     Ok(Prepared {
         file,
+        bytes,
         format: settings.save_format,
         credentials,
     })
 }
 
 /// Sends the prepared screenshot (blocking) and returns its share link.
-pub fn send(prepared: &Prepared) -> Result<String, String> {
+/// `progress` receives `(bytes sent, total bytes)` while the file is written.
+pub fn send(prepared: &Prepared, progress: UploadProgress<'_>) -> Result<String, String> {
     let type_name = match prepared.format {
         SaveFormat::Png => "image/png",
         SaveFormat::Jpeg => "image/jpeg",
@@ -90,22 +101,14 @@ pub fn send(prepared: &Prepared) -> Result<String, String> {
         Some(type_name),
         prepared.credentials.share_password.as_deref(),
         RequestBody::File(&prepared.file.0),
+        progress,
     )?;
     if status != 201 {
-        let detail = serde_json::from_slice::<serde_json::Value>(&body)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("error")
-                    .and_then(|text| text.as_str())
-                    .map(str::to_owned)
-            })
-            .unwrap_or_else(|| crate::i18n::tf("The upload failed (HTTP {}).", &[&status]));
-        return Err(detail
-            .chars()
-            .filter(|character| !character.is_control())
-            .take(240)
-            .collect());
+        return Err(cloudflare_setup::rejection(
+            status,
+            &body,
+            Some(prepared.bytes),
+        ));
     }
     let receipt: UploadReceipt = serde_json::from_slice(&body).map_err(|_| {
         crate::i18n::t("Cloudflare returned an invalid upload response.").to_string()

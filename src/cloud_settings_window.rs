@@ -11,14 +11,21 @@ use windows::Win32::Foundation::{
     ERROR_CLASS_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, HBRUSH, HDC, HFONT, HGDIOBJ,
-    InvalidateRect, PAINTSTRUCT, PS_SOLID, RedrawWindow, SetBkColor, SetBkMode, SetTextColor,
-    TRANSPARENT,
+    BeginPaint, CreateSolidBrush, DT_CALCRECT, DT_NOPREFIX, DT_WORDBREAK, DeleteObject, DrawTextW,
+    EndPaint, FillRect, GetDC, GetMonitorInfoW, HBRUSH, HDC, HFONT, HGDIOBJ, HMONITOR,
+    InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MapWindowPoints, MonitorFromPoint,
+    MonitorFromWindow, PAINTSTRUCT, PATCOPY, PS_SOLID, PatBlt, RDW_ALLCHILDREN, RDW_ERASE,
+    RDW_FRAME, RDW_INVALIDATE, RectVisible, RedrawWindow, ReleaseDC, SelectObject, SetBkColor,
+    SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
-    CDDS_PREPAINT, CDRF_SKIPDEFAULT, NM_CUSTOMDRAW, NMCUSTOMDRAW, NMHDR,
+    CDDS_PREPAINT, CDRF_SKIPDEFAULT, DRAWITEMSTRUCT, EM_SETMARGINS, MEASUREITEMSTRUCT,
+    NM_CUSTOMDRAW, NMCUSTOMDRAW, NMHDR, ODS_FOCUS, ODS_NOFOCUSRECT, ODS_SELECTED,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled, SetActiveWindow};
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    EnableWindow, GetFocus, IsWindowEnabled, SetActiveWindow, SetFocus,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
 
@@ -49,6 +56,7 @@ const ID_PASSWORD_LABEL: i32 = 1104;
 const ID_MODE_LABEL: i32 = 1106;
 const ID_IMAGES_LABEL: i32 = 1107;
 const ID_COST_NOTE: i32 = 1108;
+const ID_IMAGES_EMPTY: i32 = 1109;
 const ID_STEP_CONSENT: i32 = 1110;
 const ID_CONSENT_NOTE: i32 = 1111;
 const ID_LIMIT_LABEL_FIRST: i32 = 1200;
@@ -91,8 +99,90 @@ const WIDTH: i32 = 480;
 const MARGIN: i32 = 20;
 const TAB_BAR: i32 = 48;
 const ROW: i32 = 30;
-const PITCH: i32 = 36;
-const FOOTER: i32 = 60;
+/// Room for a footer status of three lines.
+const FOOTER: i32 = 64;
+const CONTENT_TOP: i32 = TAB_BAR + 12;
+/// One line of label text.
+const LABEL: i32 = 20;
+/// Text-box frame height, equal to a button's.
+const FIELD: i32 = 32;
+const LABEL_GAP: i32 = 2;
+const CELL_HEIGHT: i32 = LABEL + LABEL_GAP + FIELD;
+/// Limits grid: row distance and the gutter between its two columns.
+const GRID_PITCH: i32 = CELL_HEIGHT + 4;
+const GUTTER: i32 = 20;
+const SAVE_LIMITS_WIDTH: i32 = 150;
+const IMAGE_LIST_HEIGHT: i32 = 190;
+/// Height of an image row, as a Windows 11 list item.
+const IMAGE_ROW: i32 = 32;
+/// Side room of the empty-list text inside the list.
+const EMPTY_INSET: i32 = 24;
+/// Footer status: left of the Close button.
+const STATUS_WIDTH: i32 = WIDTH - 2 * MARGIN - 100 - 12;
+/// Horizontal and vertical gap between an edit and its frame. The dialog
+/// paints the frame, which a child cannot, so the edit sits inset in it.
+const EDIT_PAD: (i32, i32) = (2, 6);
+/// The same for the image list, whose frame hugs it.
+const LIST_PAD: (i32, i32) = (1, 1);
+/// Text margin inside an edit, on top of its inset.
+const EDIT_MARGIN: i32 = 4;
+
+// Static control styles (the SystemServices feature is not enabled).
+const SS_CENTER: u32 = 0x1;
+const SS_NOPREFIX: u32 = 0x80;
+const SS_ENDELLIPSIS: u32 = 0x4000;
+
+/// Top of the Limits grid cell `index` (row-major, two columns); `column` is
+/// the cell width.
+fn limit_cell(index: i32, column: i32) -> (i32, i32) {
+    (
+        MARGIN + index % 2 * (column + GUTTER),
+        CONTENT_TOP + index / 2 * GRID_PITCH,
+    )
+}
+
+/// Where the cost note and the Save button start: below the grid, whose last
+/// cell holds the "At the limit" choice after the limit fields.
+fn limits_note_top() -> i32 {
+    let rows = (LIMITS.len() as i32 + 2) / 2;
+    CONTENT_TOP + (rows - 1) * GRID_PITCH + CELL_HEIGHT + 12
+}
+
+/// Bottom of the Limits tab for a cost note `note` design pixels tall.
+fn limits_bottom(note: i32) -> i32 {
+    limits_note_top() + note.max(ROW + 2)
+}
+
+/// Design pixels for `pixels` device pixels at `dpi`, rounded up so measured
+/// text always fits.
+fn design(pixels: i32, dpi: u32) -> i32 {
+    (pixels * 96 + dpi as i32 - 1) / dpi as i32
+}
+
+/// The button Enter presses while focus rests on control `id`: the one that
+/// applies the edits of the focused section, otherwise the dialog's own.
+fn default_for(id: i32) -> i32 {
+    match id {
+        ID_PASSWORD => ID_SAVE_PASSWORD,
+        ID_MODE => ID_SAVE_LIMITS,
+        ID_IMAGES => ID_OPEN_IMAGE,
+        _ if is_limit_edit(id) => ID_SAVE_LIMITS,
+        _ => ID_CLOSE,
+    }
+}
+
+fn is_limit_edit(id: i32) -> bool {
+    (ID_LIMIT_FIRST..ID_LIMIT_FIRST + LIMITS.len() as i32).contains(&id)
+}
+
+/// Controls that report focus changes and selections through WM_COMMAND.
+fn is_input(id: i32) -> bool {
+    matches!(id, ID_PASSWORD | ID_MODE | ID_IMAGES) || is_limit_edit(id)
+}
+
+fn frame_padding(id: i32) -> (i32, i32) {
+    if id == ID_IMAGES { LIST_PAD } else { EDIT_PAD }
+}
 
 struct State {
     settings: Settings,
@@ -112,9 +202,14 @@ struct State {
     images: Vec<(String, String)>,
     response: Arc<Mutex<Option<Completion>>>,
     dpi: u32,
+    owner: Option<HWND>,
+    /// Push button Enter presses; it is drawn with the accent fill.
+    default_id: i32,
     font: HFONT,
     heading_font: HFONT,
-    page_brush: HBRUSH,
+    /// Dialog content: the lighter layer.
+    content_brush: HBRUSH,
+    /// Command band with the status and Close button.
     footer_brush: HBRUSH,
     input_brush: HBRUSH,
 }
@@ -126,13 +221,13 @@ impl State {
     fn refresh_brushes(&mut self) {
         let tokens = crate::theme::tokens();
         unsafe {
-            for brush in [self.page_brush, self.footer_brush, self.input_brush] {
+            for brush in [self.content_brush, self.footer_brush, self.input_brush] {
                 if !brush.is_invalid() {
                     let _ = DeleteObject(HGDIOBJ(brush.0));
                 }
             }
-            self.page_brush = CreateSolidBrush(tokens.page);
-            self.footer_brush = CreateSolidBrush(tokens.card);
+            self.content_brush = CreateSolidBrush(tokens.card);
+            self.footer_brush = CreateSolidBrush(tokens.page);
             self.input_brush = CreateSolidBrush(tokens.control_fill);
         }
     }
@@ -157,6 +252,7 @@ impl State {
                 }
             }
         }
+        fit_inputs(hwnd, self.dpi);
         for font in previous {
             if !font.is_invalid() {
                 unsafe {
@@ -175,7 +271,7 @@ impl Drop for State {
                 }
             }
         }
-        for brush in [self.page_brush, self.footer_brush, self.input_brush] {
+        for brush in [self.content_brush, self.footer_brush, self.input_brush] {
             if !brush.is_invalid() {
                 unsafe {
                     let _ = DeleteObject(HGDIOBJ(brush.0));
@@ -238,26 +334,45 @@ fn create(hwnd: HWND, class: PCWSTR, id: i32, text: &str, style: WINDOW_STYLE) -
     }
 }
 fn button(hwnd: HWND, id: i32, text: &str) -> Result<HWND> {
+    push_button(hwnd, id, text, BS_PUSHBUTTON)
+}
+/// The button Enter presses when the dialog opens.
+fn default_button(hwnd: HWND, id: i32, text: &str) -> Result<HWND> {
+    push_button(hwnd, id, text, BS_DEFPUSHBUTTON)
+}
+fn push_button(hwnd: HWND, id: i32, text: &str, style: i32) -> Result<HWND> {
     create(
         hwnd,
         w!("BUTTON"),
         id,
         text,
-        WINDOW_STYLE(WS_TABSTOP.0 | BS_PUSHBUTTON as u32),
+        WINDOW_STYLE(WS_TABSTOP.0 | style as u32),
     )
 }
+/// Wrapping text; its row is sized with [`measure_text`].
 fn label(hwnd: HWND, id: i32, text: &str) -> Result<HWND> {
-    create(hwnd, w!("STATIC"), id, text, WINDOW_STYLE(0))
+    create(hwnd, w!("STATIC"), id, text, WINDOW_STYLE(SS_NOPREFIX))
 }
-fn edit(hwnd: HWND, id: i32, password: bool) -> Result<HWND> {
+/// One line that ends in an ellipsis when it is too long for its row.
+/// SS_ENDELLIPSIS forces single-line rendering, so wrapping text must use
+/// [`label`].
+fn single_line_label(hwnd: HWND, id: i32, text: &str) -> Result<HWND> {
+    create(
+        hwnd,
+        w!("STATIC"),
+        id,
+        text,
+        WINDOW_STYLE(SS_NOPREFIX | SS_ENDELLIPSIS),
+    )
+}
+/// A single-line text box; `kind` is `ES_PASSWORD` or `ES_NUMBER`.
+fn edit(hwnd: HWND, id: i32, kind: i32) -> Result<HWND> {
     create(
         hwnd,
         w!("EDIT"),
         id,
         "",
-        WINDOW_STYLE(
-            WS_TABSTOP.0 | ES_AUTOHSCROLL as u32 | if password { ES_PASSWORD as u32 } else { 0 },
-        ),
+        WINDOW_STYLE(WS_TABSTOP.0 | ES_AUTOHSCROLL as u32 | kind as u32),
     )
 }
 fn scale(value: i32, dpi: u32) -> i32 {
@@ -277,6 +392,136 @@ fn place(hwnd: HWND, id: i32, (x, y, width, height): (i32, i32, i32, i32), dpi: 
         }
     }
 }
+/// Places an input inside the frame the dialog paints around it.
+fn place_framed(hwnd: HWND, id: i32, (x, y, width, height): (i32, i32, i32, i32), dpi: u32) {
+    let (pad_x, pad_y) = frame_padding(id);
+    place(
+        hwnd,
+        id,
+        (x + pad_x, y + pad_y, width - 2 * pad_x, height - 2 * pad_y),
+        dpi,
+    );
+}
+
+/// Text margins inside the framed edits, the selection height of the combo
+/// boxes and the row height of the image list, in device pixels. Re-applied
+/// whenever the fonts are, as all depend on the DPI.
+fn fit_inputs(hwnd: HWND, dpi: u32) {
+    let margin = scale(EDIT_MARGIN, dpi) as isize;
+    for id in
+        std::iter::once(ID_PASSWORD).chain(ID_LIMIT_FIRST..ID_LIMIT_FIRST + LIMITS.len() as i32)
+    {
+        if let Some(edit) = control(hwnd, id) {
+            unsafe {
+                SendMessageW(
+                    edit,
+                    EM_SETMARGINS,
+                    WPARAM((EC_LEFTMARGIN | EC_RIGHTMARGIN) as usize),
+                    LPARAM(margin | margin << 16),
+                );
+            }
+        }
+    }
+    if let Some(list) = control(hwnd, ID_IMAGES) {
+        unsafe {
+            SendMessageW(
+                list,
+                LB_SETITEMHEIGHT,
+                WPARAM(0),
+                LPARAM(scale(IMAGE_ROW, dpi) as isize),
+            );
+        }
+    }
+    for id in [ID_MODE, ID_ACCOUNT] {
+        if let Some(combo) = control(hwnd, id) {
+            unsafe {
+                // wParam -1 addresses the selection field.
+                SendMessageW(
+                    combo,
+                    CB_SETITEMHEIGHT,
+                    WPARAM(usize::MAX),
+                    LPARAM(scale(FIELD - 4, dpi) as isize),
+                );
+            }
+        }
+    }
+}
+
+fn current_text(child: HWND) -> String {
+    let length = unsafe { GetWindowTextLengthW(child) }.max(0) as usize;
+    let mut buffer = vec![0u16; length + 1];
+    let copied = unsafe { GetWindowTextW(child, &mut buffer) }.max(0) as usize;
+    String::from_utf16_lossy(&buffer[..copied])
+}
+
+/// Design pixels `text` needs when word-wrapped to `width` design pixels in
+/// the font of control `id`, at least one line.
+fn measure_text(hwnd: HWND, dpi: u32, id: i32, text: &str, width: i32) -> i32 {
+    let Some(child) = control(hwnd, id) else {
+        return LABEL;
+    };
+    let mut text: Vec<u16> = text.encode_utf16().collect();
+    if text.is_empty() {
+        return LABEL;
+    }
+    let font =
+        HGDIOBJ(unsafe { SendMessageW(child, WM_GETFONT, WPARAM(0), LPARAM(0)) }.0 as *mut _);
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: scale(width, dpi),
+        bottom: 0,
+    };
+    unsafe {
+        let dc = GetDC(hwnd);
+        let previous = SelectObject(dc, font);
+        DrawTextW(
+            dc,
+            &mut text,
+            &mut rect,
+            DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX,
+        );
+        SelectObject(dc, previous);
+        ReleaseDC(hwnd, dc);
+    }
+    design(rect.bottom, dpi).max(LABEL)
+}
+
+/// [`measure_text`] for the text the control shows now.
+fn measure_current(hwnd: HWND, dpi: u32, id: i32, width: i32) -> i32 {
+    match control(hwnd, id) {
+        Some(child) => measure_text(hwnd, dpi, id, &current_text(child), width),
+        None => LABEL,
+    }
+}
+
+/// Statistics summary of the Connection tab: uploads and views today and this
+/// month, then the active images and their size in MB.
+fn stats_text(values: [&dyn std::fmt::Display; 6]) -> String {
+    crate::i18n::tf(
+        "Today: uploads {} · views {}\r\nThis month: uploads {} · views {}\r\nActive images: {} · {} MB\r\nWatch your Cloudflare account's overall usage in its dashboard.",
+        &values,
+    )
+}
+
+/// Footer status: centred in the band at `band_top` (device pixels), up to
+/// the three lines the band holds.
+fn fit_status(hwnd: HWND, dpi: u32, band_top: i32) {
+    let Some(child) = control(hwnd, ID_STATUS) else {
+        return;
+    };
+    let height = measure_current(hwnd, dpi, ID_STATUS, STATUS_WIDTH).min(FOOTER - 4);
+    unsafe {
+        let _ = MoveWindow(
+            child,
+            scale(MARGIN, dpi),
+            band_top + scale(FOOTER - height, dpi) / 2,
+            scale(STATUS_WIDTH, dpi),
+            scale(height, dpi),
+            true,
+        );
+    }
+}
 
 /// Which tab of the paired dialog a control belongs to (`None`: always shown).
 fn tab_of(id: i32) -> Option<usize> {
@@ -284,12 +529,13 @@ fn tab_of(id: i32) -> Option<usize> {
         ID_INTRO | ID_STATS | ID_PASSWORD_LABEL | ID_PASSWORD | ID_SAVE_PASSWORD | ID_REFRESH
         | ID_UPDATE_WORKER | ID_FORGET => Some(0),
         ID_MODE_LABEL | ID_MODE | ID_SAVE_LIMITS | ID_COST_NOTE => Some(1),
-        _ if (ID_LIMIT_FIRST..ID_LIMIT_FIRST + LIMITS.len() as i32).contains(&id)
+        _ if is_limit_edit(id)
             || (ID_LIMIT_LABEL_FIRST..ID_LIMIT_LABEL_FIRST + LIMITS.len() as i32).contains(&id) =>
         {
             Some(1)
         }
-        ID_IMAGES_LABEL | ID_IMAGES | ID_DELETE | ID_OPEN_IMAGE | ID_COPY_IMAGE => Some(2),
+        ID_IMAGES_LABEL | ID_IMAGES | ID_IMAGES_EMPTY | ID_DELETE | ID_OPEN_IMAGE
+        | ID_COPY_IMAGE => Some(2),
         _ => None,
     }
 }
@@ -300,7 +546,13 @@ fn show_tab(hwnd: HWND, state: &State) {
     }
     for id in 1000..1300 {
         if let (Some(tab), Some(child)) = (tab_of(id), control(hwnd, id)) {
-            let visible = tab == state.tab && (id != ID_UPDATE_WORKER || state.outdated);
+            let visible = tab == state.tab
+                && match id {
+                    ID_UPDATE_WORKER => state.outdated,
+                    // Only once the list has loaded and turned out empty.
+                    ID_IMAGES_EMPTY => state.loaded && state.images.is_empty(),
+                    _ => true,
+                };
             unsafe {
                 let _ = ShowWindow(child, if visible { SW_SHOW } else { SW_HIDE });
             }
@@ -324,20 +576,30 @@ fn show_tab(hwnd: HWND, state: &State) {
 }
 
 /// Positions every control; returns the client height in design pixels.
+/// Text rows take the height their text needs in the current font and DPI.
 fn layout(hwnd: HWND, state: &State) -> i32 {
     let dpi = state.dpi;
     let right = WIDTH - MARGIN;
     let full = WIDTH - 2 * MARGIN;
+    let measure = |id: i32, width: i32| measure_current(hwnd, dpi, id, width);
     let bottom = if state.guided() {
-        place(hwnd, ID_INTRO, (MARGIN, 18, full, 40), dpi);
-        place(hwnd, ID_STEP_CONSENT, (MARGIN, 74, full, 20), dpi);
-        place(hwnd, ID_CONSENT_NOTE, (MARGIN, 98, full, 40), dpi);
-        place(hwnd, ID_STEP_ACCOUNT, (MARGIN, 74, full, 20), dpi);
-        place(hwnd, ID_ACCOUNT, (MARGIN, 102, full, 220), dpi);
-        place(hwnd, ID_CONNECT, (MARGIN, 146, 230, ROW + 2), dpi);
-        place(hwnd, ID_INSTALL, (MARGIN, 146, 230, ROW + 2), dpi);
-        place(hwnd, ID_STATUS, (MARGIN, 192, full, 40), dpi);
-        240
+        let intro = measure(ID_INTRO, full);
+        place(hwnd, ID_INTRO, (MARGIN, 18, full, intro), dpi);
+        let step = 18 + intro + 16;
+        place(hwnd, ID_STEP_CONSENT, (MARGIN, step, full, LABEL), dpi);
+        place(hwnd, ID_STEP_ACCOUNT, (MARGIN, step, full, LABEL), dpi);
+        let note_top = step + LABEL + 4;
+        let note = measure(ID_CONSENT_NOTE, full);
+        place(hwnd, ID_CONSENT_NOTE, (MARGIN, note_top, full, note), dpi);
+        let combo_top = step + LABEL + 8;
+        place(hwnd, ID_ACCOUNT, (MARGIN, combo_top, full, 220), dpi);
+        // Both steps put their button on the same row.
+        let action = (note_top + note + 10).max(combo_top + FIELD + 14);
+        place(hwnd, ID_CONNECT, (MARGIN, action, 230, ROW + 2), dpi);
+        place(hwnd, ID_INSTALL, (MARGIN, action, 230, ROW + 2), dpi);
+        let status = action + ROW + 2 + 14;
+        place(hwnd, ID_STATUS, (MARGIN, status, full, 3 * LABEL), dpi);
+        status + 3 * LABEL
     } else {
         let mut x = MARGIN - 10;
         for (index, name) in tab_names().iter().enumerate() {
@@ -345,74 +607,172 @@ fn layout(hwnd: HWND, state: &State) -> i32 {
             place(hwnd, ID_TAB_FIRST + index as i32, (x, 6, width, 40), dpi);
             x += width;
         }
-        let top = TAB_BAR + 16;
+        let top = CONTENT_TOP;
         // Connection
-        place(hwnd, ID_INTRO, (MARGIN, top, full, 20), dpi);
-        place(hwnd, ID_STATS, (MARGIN, top + 30, full, 80), dpi);
-        place(hwnd, ID_PASSWORD_LABEL, (MARGIN, top + 124, full, 20), dpi);
-        place(hwnd, ID_PASSWORD, (MARGIN, top + 150, full - 162, 26), dpi);
+        place(hwnd, ID_INTRO, (MARGIN, top, full, LABEL), dpi);
+        let stats_top = top + LABEL + 8;
+        // Until the numbers arrive, reserve the height of a loaded summary so
+        // the dialog does not jump; afterwards the real text decides.
+        let mut stats = measure(ID_STATS, full);
+        if !state.loaded {
+            let digits: &dyn std::fmt::Display = &"88888";
+            let megabytes: &dyn std::fmt::Display = &"8888.8";
+            let loaded = stats_text([digits, digits, digits, digits, digits, megabytes]);
+            stats = stats.max(measure_text(hwnd, dpi, ID_STATS, &loaded, full));
+        }
+        place(hwnd, ID_STATS, (MARGIN, stats_top, full, stats), dpi);
+        let password_label = stats_top + stats + 14;
+        let password_label_height = measure(ID_PASSWORD_LABEL, full);
+        place(
+            hwnd,
+            ID_PASSWORD_LABEL,
+            (MARGIN, password_label, full, password_label_height),
+            dpi,
+        );
+        let password_top = password_label + password_label_height + 4;
+        place_framed(
+            hwnd,
+            ID_PASSWORD,
+            (MARGIN, password_top, full - 162, FIELD),
+            dpi,
+        );
         place(
             hwnd,
             ID_SAVE_PASSWORD,
-            (right - 150, top + 147, 150, ROW + 2),
+            (right - 150, password_top, 150, ROW + 2),
             dpi,
         );
-        place(hwnd, ID_REFRESH, (MARGIN, top + 200, 100, ROW + 2), dpi);
+        let actions = password_top + FIELD + 16;
+        place(hwnd, ID_REFRESH, (MARGIN, actions, 100, ROW + 2), dpi);
         place(
             hwnd,
             ID_UPDATE_WORKER,
-            (MARGIN + 108, top + 200, 150, ROW + 2),
+            (MARGIN + 108, actions, 150, ROW + 2),
             dpi,
         );
-        place(hwnd, ID_FORGET, (right - 170, top + 200, 170, ROW + 2), dpi);
-        let connection = top + 236;
-        // Limits
-        let mut y = top;
+        place(hwnd, ID_FORGET, (right - 170, actions, 170, ROW + 2), dpi);
+        let connection = actions + ROW + 2;
+        // Limits: two columns, each label above its field; the choice of what
+        // happens at the limit takes the cell after the last field.
+        let column = (full - GUTTER) / 2;
         for index in 0..LIMITS.len() as i32 {
+            let (x, y) = limit_cell(index, column);
             place(
                 hwnd,
                 ID_LIMIT_LABEL_FIRST + index,
-                (MARGIN, y + 6, full - 140, 20),
+                (x, y, column, LABEL),
                 dpi,
             );
-            place(
+            place_framed(
                 hwnd,
                 ID_LIMIT_FIRST + index,
-                (right - 120, y + 2, 120, 26),
+                (x, y + LABEL + LABEL_GAP, column, FIELD),
                 dpi,
             );
-            y += PITCH;
         }
-        place(hwnd, ID_MODE_LABEL, (MARGIN, y + 6, 140, 20), dpi);
-        place(hwnd, ID_MODE, (right - 240, y, 240, 200), dpi);
-        y += PITCH + 8;
-        place(hwnd, ID_COST_NOTE, (MARGIN, y, full - 176, 60), dpi);
-        place(hwnd, ID_SAVE_LIMITS, (right - 160, y, 160, ROW + 2), dpi);
-        let limits = y + 64;
+        let (x, y) = limit_cell(LIMITS.len() as i32, column);
+        place(hwnd, ID_MODE_LABEL, (x, y, column, LABEL), dpi);
+        place(hwnd, ID_MODE, (x, y + LABEL + LABEL_GAP, column, 200), dpi);
+        let note_width = full - SAVE_LIMITS_WIDTH - 16;
+        let note = measure(ID_COST_NOTE, note_width);
+        place(
+            hwnd,
+            ID_COST_NOTE,
+            (MARGIN, limits_note_top(), note_width, note),
+            dpi,
+        );
+        place(
+            hwnd,
+            ID_SAVE_LIMITS,
+            (
+                right - SAVE_LIMITS_WIDTH,
+                limits_note_top(),
+                SAVE_LIMITS_WIDTH,
+                ROW + 2,
+            ),
+            dpi,
+        );
+        let limits = limits_bottom(note);
         // Images
-        place(hwnd, ID_IMAGES_LABEL, (MARGIN, top, full, 20), dpi);
-        place(hwnd, ID_IMAGES, (MARGIN, top + 28, full, 230), dpi);
-        place(hwnd, ID_OPEN_IMAGE, (MARGIN, top + 268, 80, ROW + 2), dpi);
+        let header = measure(ID_IMAGES_LABEL, full);
+        place(hwnd, ID_IMAGES_LABEL, (MARGIN, top, full, header), dpi);
+        let list_top = top + header + 6;
+        place_framed(
+            hwnd,
+            ID_IMAGES,
+            (MARGIN, list_top, full, IMAGE_LIST_HEIGHT),
+            dpi,
+        );
+        // The empty-state text sits in the middle of the list.
+        let empty_width = full - 2 * EMPTY_INSET;
+        let empty = measure(ID_IMAGES_EMPTY, empty_width);
+        place(
+            hwnd,
+            ID_IMAGES_EMPTY,
+            (
+                MARGIN + EMPTY_INSET,
+                list_top + (IMAGE_LIST_HEIGHT - empty) / 2,
+                empty_width,
+                empty,
+            ),
+            dpi,
+        );
+        let image_actions = list_top + IMAGE_LIST_HEIGHT + 8;
+        place(
+            hwnd,
+            ID_OPEN_IMAGE,
+            (MARGIN, image_actions, 80, ROW + 2),
+            dpi,
+        );
         place(
             hwnd,
             ID_COPY_IMAGE,
-            (MARGIN + 88, top + 268, 150, ROW + 2),
+            (MARGIN + 88, image_actions, 150, ROW + 2),
             dpi,
         );
-        place(hwnd, ID_DELETE, (right - 150, top + 268, 150, ROW + 2), dpi);
-        let images = top + 304;
+        place(
+            hwnd,
+            ID_DELETE,
+            (right - 150, image_actions, 150, ROW + 2),
+            dpi,
+        );
+        let images = image_actions + ROW + 2;
         connection.max(limits).max(images)
     };
     let footer = bottom + 8;
     let button_y = footer + (FOOTER - ROW - 2) / 2;
     if !state.guided() {
-        place(hwnd, ID_STATUS, (MARGIN, footer + 10, full - 120, 40), dpi);
+        fit_status(hwnd, dpi, scale(footer, dpi));
     }
     place(hwnd, ID_CLOSE, (right - 100, button_y, 100, ROW + 2), dpi);
     unsafe {
         let _ = InvalidateRect(hwnd, None, true);
     }
     footer + FOOTER
+}
+
+/// Measures the text rows again and resizes the dialog to the new content
+/// height; for text that changed after the first layout.
+fn relayout(hwnd: HWND, state: &State) {
+    let (width, height) = window_size(state.dpi, layout(hwnd, state));
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            width,
+            height,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        // Children moved without repainting; the parent clips them.
+        let _ = RedrawWindow(
+            hwnd,
+            None,
+            None,
+            RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
+        );
+    }
 }
 
 /// Guided setup: step one (consent) or, after consent with several accounts,
@@ -441,8 +801,30 @@ fn account_controls(hwnd: HWND, visible: bool) {
         }
     }
 }
+/// Moves the guided page to the account step or back to consent, with the
+/// step's main button as default and its first control focused.
+fn show_step(hwnd: HWND, state: &mut State, account_step: bool) {
+    account_controls(hwnd, account_step);
+    let (button, first) = if account_step {
+        (ID_INSTALL, ID_ACCOUNT)
+    } else {
+        (ID_CONNECT, ID_CONNECT)
+    };
+    set_default(hwnd, state, button);
+    if let Some(child) = control(hwnd, first) {
+        unsafe {
+            let _ = SetFocus(child);
+        }
+    }
+}
 fn set_status(hwnd: HWND, text: &str) {
     set_text(hwnd, ID_STATUS, text);
+    // The footer status sits centred in its band; the guided page keeps a
+    // fixed three-line area.
+    if control(hwnd, ID_TAB_FIRST).is_some() {
+        let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+        fit_status(hwnd, dpi, footer_top(hwnd, dpi));
+    }
 }
 fn set_busy(hwnd: HWND, state: &mut State, busy: bool) {
     state.pending = busy;
@@ -452,13 +834,39 @@ fn set_busy(hwnd: HWND, state: &mut State, busy: bool) {
         ID_REFRESH,
         ID_SAVE_LIMITS,
         ID_SAVE_PASSWORD,
-        ID_DELETE,
         ID_FORGET,
         ID_UPDATE_WORKER,
     ] {
         if let Some(child) = control(hwnd, id) {
             unsafe {
                 let _ = EnableWindow(child, !busy);
+            }
+        }
+    }
+    sync_image_actions(hwnd, state);
+}
+/// Open, Copy link and Delete work on the selected image only.
+fn sync_image_actions(hwnd: HWND, state: &State) {
+    let enabled = !state.pending && selected_image(hwnd, state).is_some();
+    for id in [ID_OPEN_IMAGE, ID_COPY_IMAGE, ID_DELETE] {
+        if let Some(button) = control(hwnd, id) {
+            unsafe {
+                let _ = EnableWindow(button, enabled);
+            }
+        }
+    }
+}
+/// Makes `id` the push button Enter presses: its style and accent fill
+/// follow, as with `DM_SETDEFID` in a standard dialog.
+fn set_default(hwnd: HWND, state: &mut State, id: i32) {
+    if state.default_id == id {
+        return;
+    }
+    let previous = std::mem::replace(&mut state.default_id, id);
+    for (button, style) in [(previous, BS_PUSHBUTTON), (id, BS_DEFPUSHBUTTON)] {
+        if let Some(child) = control(hwnd, button) {
+            unsafe {
+                SendMessageW(child, BM_SETSTYLE, WPARAM(style as usize), LPARAM(1));
             }
         }
     }
@@ -608,20 +1016,8 @@ fn save_limits(hwnd: HWND, state: &mut State) {
 }
 fn show_stats(hwnd: HWND, state: &mut State, stats: &Value, images: &Value) {
     // Workers installed before versioning report nothing: treat them as 1.
-    let outdated = stats["worker_version"].as_u64().unwrap_or(1) < cloudflare_oauth::WORKER_VERSION;
-    if let Some(button) = control(hwnd, ID_UPDATE_WORKER) {
-        unsafe {
-            let _ = ShowWindow(
-                button,
-                if outdated && state.tab == 0 {
-                    SW_SHOW
-                } else {
-                    SW_HIDE
-                },
-            );
-        }
-    }
-    state.outdated = outdated;
+    state.outdated =
+        stats["worker_version"].as_u64().unwrap_or(1) < cloudflare_oauth::WORKER_VERSION;
     let count = |value: &Value, key: &str| value.get(key).and_then(Value::as_u64).unwrap_or(0);
     let daily = &stats["daily"];
     let monthly = &stats["monthly"];
@@ -630,17 +1026,14 @@ fn show_stats(hwnd: HWND, state: &mut State, stats: &Value, images: &Value) {
     set_text(
         hwnd,
         ID_STATS,
-        &crate::i18n::tf(
-            "Today: uploads {} · views {}\r\nThis month: uploads {} · views {}\r\nActive images: {} · {} MB\r\nWatch your Cloudflare account's overall usage in its dashboard.",
-            &[
-                &count(daily, "uploads"),
-                &count(daily, "views"),
-                &count(monthly, "uploads"),
-                &count(monthly, "views"),
-                &count(stored, "active"),
-                &format!("{:.1}", usage as f64 / 1_048_576.0),
-            ],
-        ),
+        &stats_text([
+            &count(daily, "uploads"),
+            &count(daily, "views"),
+            &count(monthly, "uploads"),
+            &count(monthly, "views"),
+            &count(stored, "active"),
+            &format!("{:.1}", usage as f64 / 1_048_576.0),
+        ]),
     );
     for (index, (field, multiplier)) in LIMITS.iter().enumerate() {
         if let Some(number) = stats["settings"][field].as_u64() {
@@ -717,6 +1110,11 @@ fn show_stats(hwnd: HWND, state: &mut State, stats: &Value, images: &Value) {
             }
         }
     }
+    // The summary may wrap differently now that the numbers are known.
+    relayout(hwnd, state);
+    // The Update Worker button and the empty-list text depend on what loaded.
+    show_tab(hwnd, state);
+    sync_image_actions(hwnd, state);
     set_status(
         hwnd,
         if state.outdated {
@@ -810,10 +1208,12 @@ fn delete_image(hwnd: HWND, state: &mut State) {
         );
         return;
     };
-    if !crate::ui::confirm(
+    if !crate::ui::confirm_action(
         hwnd,
         crate::i18n::t("Delete image"),
         crate::i18n::t("The link will stop working permanently. Continue?"),
+        crate::i18n::t("Delete"),
+        true,
     ) {
         return;
     }
@@ -865,18 +1265,20 @@ fn save_password(hwnd: HWND, state: &mut State) {
     }
 }
 fn disconnect(hwnd: HWND, state: &mut State) {
-    if !crate::ui::confirm(
+    if !crate::ui::confirm_action(
         hwnd,
         crate::i18n::t("Disconnect"),
         crate::i18n::t(
             "Only this computer's Cloudflare connection is removed; the Worker and images in the cloud stay. Continue?",
         ),
+        crate::i18n::t("Disconnect"),
+        true,
     ) {
         return;
     }
-    let mut changed = state.settings.clone();
-    changed.cloud_url = None;
-    if let Err(error) = changed.save() {
+    // Only the address is persisted: the settings held here may carry edits
+    // the owner has not saved yet.
+    if let Err(error) = Settings::save_cloud_url(None) {
         crate::ui::error(
             hwnd,
             crate::i18n::t("Could not save settings"),
@@ -892,7 +1294,7 @@ fn disconnect(hwnd: HWND, state: &mut State) {
         );
         return;
     }
-    state.settings = changed;
+    state.settings.cloud_url = None;
     state.saved = true;
     unsafe {
         let _ = DestroyWindow(hwnd);
@@ -974,11 +1376,101 @@ fn in_footer(id: i32, state: &State) -> bool {
     id == ID_CLOSE || (id == ID_STATUS && !state.guided())
 }
 
+/// The text-box frame around a visible input, in client coordinates. The
+/// input sits inset in it (see [`place_framed`]), so the frame is its window
+/// rectangle grown by the padding.
+fn input_frame(hwnd: HWND, dpi: u32, id: i32) -> Option<RECT> {
+    let child = control(hwnd, id)?;
+    if !unsafe { IsWindowVisible(child) }.as_bool() {
+        return None;
+    }
+    let mut rect = RECT::default();
+    unsafe { GetWindowRect(child, &mut rect) }.ok()?;
+    let mut corners = [
+        POINT {
+            x: rect.left,
+            y: rect.top,
+        },
+        POINT {
+            x: rect.right,
+            y: rect.bottom,
+        },
+    ];
+    // A null source window maps from screen coordinates.
+    unsafe { MapWindowPoints(HWND::default(), hwnd, &mut corners) };
+    let (pad_x, pad_y) = frame_padding(id);
+    Some(RECT {
+        left: corners[0].x - scale(pad_x, dpi),
+        top: corners[0].y - scale(pad_y, dpi),
+        right: corners[1].x + scale(pad_x, dpi),
+        bottom: corners[1].y + scale(pad_y, dpi),
+    })
+}
+
+fn framed_ids() -> impl Iterator<Item = i32> {
+    [ID_PASSWORD, ID_IMAGES]
+        .into_iter()
+        .chain(ID_LIMIT_FIRST..ID_LIMIT_FIRST + LIMITS.len() as i32)
+}
+
+/// Windows 11 text boxes: a rounded `stroke` frame on the input fill, and
+/// while an edit has the focus a 2 px accent line along its bottom edge.
+fn paint_input_frames(hwnd: HWND, state: &State, hdc: HDC) {
+    let tokens = crate::theme::tokens();
+    let focus = unsafe { GetFocus() };
+    let diameter = crate::drawing::corner_diameter(crate::theme::RADIUS_CONTROL, state.dpi);
+    for id in framed_ids() {
+        let Some(frame) = input_frame(hwnd, state.dpi, id) else {
+            continue;
+        };
+        // A partial repaint (one focus change) redraws only the frames it touches.
+        if !unsafe { RectVisible(hdc, &frame) }.as_bool() {
+            continue;
+        }
+        crate::drawing::rounded(
+            hdc,
+            crate::capture::Rect::new(frame.left, frame.top, frame.right, frame.bottom),
+            diameter,
+            tokens.control_fill,
+            tokens.stroke,
+        );
+        if id != ID_IMAGES && control(hwnd, id) == Some(focus) {
+            // Between the corner arcs, over the bottom stroke.
+            let line = RECT {
+                left: frame.left + diameter / 2,
+                top: frame.bottom - scale(2, state.dpi).max(1),
+                right: frame.right - diameter / 2,
+                bottom: frame.bottom,
+            };
+            // The shared brush cache keeps this paint free of GDI allocations.
+            crate::drawing::with_brush(hdc, tokens.accent_ink, || unsafe {
+                let _ = PatBlt(
+                    hdc,
+                    line.left,
+                    line.top,
+                    line.right - line.left,
+                    line.bottom - line.top,
+                    PATCOPY,
+                );
+            });
+        }
+    }
+}
+
+/// Repaints the frame of input `id` after it gained or lost the focus.
+fn invalidate_input_frame(hwnd: HWND, state: &State, id: i32) {
+    if let Some(frame) = input_frame(hwnd, state.dpi, id) {
+        unsafe {
+            let _ = InvalidateRect(hwnd, Some(&frame), false);
+        }
+    }
+}
+
 fn paint_surface(hwnd: HWND, state: &State, hdc: HDC) {
     let mut client = RECT::default();
     unsafe {
         let _ = GetClientRect(hwnd, &mut client);
-        let _ = FillRect(hdc, &client, state.page_brush);
+        let _ = FillRect(hdc, &client, state.content_brush);
     }
     let top = footer_top(hwnd, state.dpi);
     unsafe {
@@ -1011,19 +1503,134 @@ fn paint_surface(hwnd: HWND, state: &State, hdc: HDC) {
             );
         }
     });
+    paint_input_frames(hwnd, state, hdc);
+}
+
+/// Parts of an image row, in device pixels, for the row rectangle `row`:
+/// the selection background, the accent pill at its left edge and the text
+/// area.
+struct RowParts {
+    background: RECT,
+    pill: RECT,
+    text: RECT,
+}
+
+fn image_row_parts(row: RECT, dpi: u32) -> RowParts {
+    // The vertical inset leaves room for the focus ring around the background.
+    let background = RECT {
+        left: row.left + scale(4, dpi),
+        top: row.top + scale(3, dpi),
+        right: row.right - scale(4, dpi),
+        bottom: row.bottom - scale(3, dpi),
+    };
+    let pill_height = scale(16, dpi);
+    let pill_top = (background.top + background.bottom - pill_height) / 2;
+    RowParts {
+        background,
+        pill: RECT {
+            left: background.left,
+            top: pill_top,
+            right: background.left + scale(3, dpi),
+            bottom: pill_top + pill_height,
+        },
+        text: RECT {
+            left: row.left + scale(16, dpi),
+            top: row.top,
+            right: row.right - scale(12, dpi),
+            bottom: row.bottom,
+        },
+    }
+}
+
+/// Windows 11 list item for `WM_DRAWITEM` of the image list: text on the
+/// list's fill, a selected row on a rounded `subtle_hover` background with
+/// an accent pill, and the focus visual only while the list has the keyboard
+/// focus.
+fn draw_image_row(draw: &DRAWITEMSTRUCT, state: &State) {
+    let tokens = crate::theme::tokens();
+    let dpi = state.dpi;
+    let hdc = draw.hDC;
+    unsafe {
+        let _ = FillRect(hdc, &draw.rcItem, state.input_brush);
+    }
+    // An empty list asks for its focus rectangle with no item.
+    if draw.itemID == u32::MAX {
+        return;
+    }
+    let parts = image_row_parts(draw.rcItem, dpi);
+    let selected = draw.itemState.0 & ODS_SELECTED.0 != 0;
+    if selected {
+        crate::drawing::rounded(
+            hdc,
+            crate::capture::Rect::new(
+                parts.background.left,
+                parts.background.top,
+                parts.background.right,
+                parts.background.bottom,
+            ),
+            crate::drawing::corner_diameter(crate::theme::RADIUS_CONTROL, dpi),
+            tokens.subtle_hover,
+            tokens.subtle_hover,
+        );
+        crate::drawing::rounded(
+            hdc,
+            crate::capture::Rect::new(
+                parts.pill.left,
+                parts.pill.top,
+                parts.pill.right,
+                parts.pill.bottom,
+            ),
+            scale(3, dpi),
+            tokens.accent_ink,
+            tokens.accent_ink,
+        );
+    }
+    let item = WPARAM(draw.itemID as usize);
+    let length = unsafe { SendMessageW(draw.hwndItem, LB_GETTEXTLEN, item, LPARAM(0)) }.0;
+    if let Ok(length) = usize::try_from(length) {
+        let mut text = vec![0u16; length + 1];
+        let copied = unsafe {
+            SendMessageW(
+                draw.hwndItem,
+                LB_GETTEXT,
+                item,
+                LPARAM(text.as_mut_ptr() as isize),
+            )
+        }
+        .0;
+        text.truncate(usize::try_from(copied).unwrap_or(0));
+        let mut area = parts.text;
+        crate::drawing::ui_text(
+            hdc,
+            &mut text,
+            &mut area,
+            dpi,
+            tokens.text,
+            crate::drawing::Align::Left,
+        );
+    }
+    let cues = draw.itemState.0 & ODS_FOCUS.0 != 0 && draw.itemState.0 & ODS_NOFOCUSRECT.0 == 0;
+    if cues && unsafe { GetFocus() } == draw.hwndItem {
+        crate::drawing::focus_ring(
+            hdc,
+            parts.background,
+            scale(crate::theme::RADIUS_CONTROL, dpi),
+            dpi,
+        );
+    }
 }
 
 fn draw_cloud_button(draw: &NMCUSTOMDRAW, state: &State) {
     use crate::drawing::{Look, fluent_button, fluent_tab};
     let id = draw.hdr.idFrom as i32;
     let look = Look {
-        primary: matches!(id, ID_CONNECT | ID_INSTALL | ID_SAVE_LIMITS),
+        primary: id == state.default_id,
         ..Look::from_custom_draw(draw)
     };
     let background = if in_footer(id, state) {
         state.footer_brush
     } else {
-        state.page_brush
+        state.content_brush
     };
     let mut rect = RECT::default();
     let mut label = [0u16; 128];
@@ -1050,6 +1657,31 @@ fn draw_cloud_button(draw: &NMCUSTOMDRAW, state: &State) {
             look,
             background,
         );
+    }
+}
+
+/// Focus changes and selections of the inputs. Enter presses the button of
+/// the section that has the focus; leaving the section restores Close.
+fn input_event(hwnd: HWND, state: &mut State, id: i32, code: u32) {
+    let (gained, lost) = match id {
+        ID_MODE => (CBN_SETFOCUS, CBN_KILLFOCUS),
+        ID_IMAGES => (LBN_SETFOCUS, LBN_KILLFOCUS),
+        _ => (EN_SETFOCUS, EN_KILLFOCUS),
+    };
+    if code == gained || code == lost {
+        let target = if code == gained {
+            default_for(id)
+        } else {
+            ID_CLOSE
+        };
+        set_default(hwnd, state, target);
+        if id != ID_MODE {
+            invalidate_input_frame(hwnd, state, id);
+        }
+    } else if id == ID_IMAGES && code == LBN_SELCHANGE {
+        sync_image_actions(hwnd, state);
+    } else if id == ID_IMAGES && code == LBN_DBLCLK {
+        open_image(hwnd, state);
     }
 }
 
@@ -1082,6 +1714,17 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
+        WM_MEASUREITEM if !pointer.is_null() && wparam.0 as i32 == ID_IMAGES => {
+            let state = unsafe { &*pointer };
+            let item = unsafe { &mut *(lparam.0 as *mut MEASUREITEMSTRUCT) };
+            item.itemHeight = scale(IMAGE_ROW, state.dpi) as u32;
+            LRESULT(1)
+        }
+        WM_DRAWITEM if !pointer.is_null() && wparam.0 as i32 == ID_IMAGES => {
+            let draw = unsafe { &*(lparam.0 as *const DRAWITEMSTRUCT) };
+            draw_image_row(draw, unsafe { &*pointer });
+            LRESULT(1)
+        }
         WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX if !pointer.is_null() => {
             let state = unsafe { &*pointer };
             let tokens = crate::theme::tokens();
@@ -1098,8 +1741,10 @@ unsafe extern "system" fn wnd_proc(
             let id = unsafe { GetDlgCtrlID(child) };
             let hdc = HDC(wparam.0 as *mut _);
             let tokens = crate::theme::tokens();
-            let secondary = matches!(id, ID_CONSENT_NOTE | ID_COST_NOTE | ID_STATUS)
-                || (id == ID_INTRO && !state.guided());
+            let secondary = matches!(
+                id,
+                ID_CONSENT_NOTE | ID_COST_NOTE | ID_STATUS | ID_IMAGES_EMPTY
+            ) || (id == ID_INTRO && !state.guided());
             unsafe {
                 let _ = SetBkMode(hdc, TRANSPARENT);
                 let _ = SetTextColor(
@@ -1113,10 +1758,13 @@ unsafe extern "system" fn wnd_proc(
                     },
                 );
             }
-            LRESULT(if in_footer(id, state) {
+            LRESULT(if id == ID_IMAGES_EMPTY {
+                // Lies on the list, so it takes the list's fill.
+                state.input_brush.0 as isize
+            } else if in_footer(id, state) {
                 state.footer_brush.0 as isize
             } else {
-                state.page_brush.0 as isize
+                state.content_brush.0 as isize
             })
         }
         WM_SETTINGCHANGE if !pointer.is_null() => {
@@ -1133,9 +1781,7 @@ unsafe extern "system" fn wnd_proc(
                     hwnd,
                     None,
                     None,
-                    windows::Win32::Graphics::Gdi::RDW_INVALIDATE
-                        | windows::Win32::Graphics::Gdi::RDW_ERASE
-                        | windows::Win32::Graphics::Gdi::RDW_ALLCHILDREN,
+                    RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN,
                 );
             }
             LRESULT(0)
@@ -1146,7 +1792,16 @@ unsafe extern "system" fn wnd_proc(
             state.refresh_fonts(hwnd);
             let height = layout(hwnd, state);
             let (width, height) = window_size(state.dpi, height);
-            if lparam.0 != 0 {
+            if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+                // Still being set up: centre at the new size on the target monitor.
+                position(
+                    hwnd,
+                    state.owner,
+                    target_monitor(state.owner),
+                    width,
+                    height,
+                );
+            } else if lparam.0 != 0 {
                 let rect = unsafe { &*(lparam.0 as *const RECT) };
                 unsafe {
                     let _ = SetWindowPos(
@@ -1160,7 +1815,37 @@ unsafe extern "system" fn wnd_proc(
                     );
                 }
             }
+            unsafe {
+                // Children moved without repainting; the parent clips them.
+                let _ = RedrawWindow(
+                    hwnd,
+                    None,
+                    None,
+                    RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
+                );
+            }
             LRESULT(0)
+        }
+        crate::ui::WM_SWITCH_TAB if !pointer.is_null() => {
+            let state = unsafe { &mut *pointer };
+            if !state.guided() {
+                state.tab = crate::ui::next_tab(state.tab, TAB_COUNT, wparam);
+                show_tab(hwnd, state);
+                if let Some(tab) = control(hwnd, ID_TAB_FIRST + state.tab as i32) {
+                    unsafe {
+                        let _ = SetFocus(tab);
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+        DM_GETDEFID if !pointer.is_null() => {
+            let state = unsafe { &*pointer };
+            LRESULT(((DC_HASDEFID << 16) | state.default_id as u32) as isize)
+        }
+        DM_SETDEFID if !pointer.is_null() => {
+            set_default(hwnd, unsafe { &mut *pointer }, wparam.0 as i32);
+            LRESULT(1)
         }
         WM_CLOUD_RESULT if !pointer.is_null() => {
             let state = unsafe { &mut *pointer };
@@ -1264,7 +1949,7 @@ unsafe extern "system" fn wnd_proc(
                             begin_install(hwnd, state, account);
                         }
                     } else {
-                        account_controls(hwnd, true);
+                        show_step(hwnd, state, true);
                         set_status(
                             hwnd,
                             crate::i18n::t(
@@ -1275,10 +1960,13 @@ unsafe extern "system" fn wnd_proc(
                 }
                 Some(Completion::Install(Ok(installed))) => {
                     let credentials = installed.credentials;
-                    let mut updated = state.settings.clone();
-                    updated.cloud_url = Some(credentials.origin.clone());
-                    if let Err(error) = cloudflare_setup::save_credentials(&credentials)
-                        .and_then(|()| updated.save().map_err(|error| error.to_string()))
+                    // Only the address is persisted: the settings held here may
+                    // carry edits the owner has not saved yet.
+                    if let Err(error) =
+                        cloudflare_setup::save_credentials(&credentials).and_then(|()| {
+                            Settings::save_cloud_url(Some(credentials.origin.clone()))
+                                .map_err(|error| error.to_string())
+                        })
                     {
                         set_status(
                             hwnd,
@@ -1288,7 +1976,7 @@ unsafe extern "system" fn wnd_proc(
                         );
                         crate::ui::error(hwnd, crate::i18n::t("Could not save the setup"), &error);
                     } else {
-                        state.settings = updated;
+                        state.settings.cloud_url = Some(credentials.origin);
                         state.saved = true;
                         let message = match (installed.ready, state.for_upload) {
                             (true, true) => {
@@ -1320,7 +2008,7 @@ unsafe extern "system" fn wnd_proc(
                     refresh(hwnd, state);
                 }
                 Some(Completion::Install(Err(error))) => {
-                    account_controls(hwnd, false);
+                    show_step(hwnd, state, false);
                     set_status(
                         hwnd,
                         crate::i18n::t(
@@ -1357,11 +2045,13 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
-        WM_COMMAND if !pointer.is_null() && (wparam.0 & 0xffff) as i32 == ID_IMAGES => {
-            const LBN_DBLCLK: usize = 2;
-            if wparam.0 >> 16 == LBN_DBLCLK {
-                open_image(hwnd, unsafe { &*pointer });
-            }
+        WM_COMMAND if !pointer.is_null() && is_input((wparam.0 & 0xffff) as i32) => {
+            input_event(
+                hwnd,
+                unsafe { &mut *pointer },
+                (wparam.0 & 0xffff) as i32,
+                (wparam.0 >> 16) as u32,
+            );
             LRESULT(0)
         }
         WM_COMMAND if !pointer.is_null() && wparam.0 >> 16 == 0 => {
@@ -1431,7 +2121,7 @@ fn build_controls(hwnd: HWND, state: &State) -> Result<()> {
                 "The consent page opens in the browser. After granting permission, come back to this window; setup finishes here.",
             ),
         )?;
-        button(hwnd, ID_CONNECT, crate::i18n::t("Continue with Cloudflare"))?;
+        default_button(hwnd, ID_CONNECT, crate::i18n::t("Continue with Cloudflare"))?;
         label(
             hwnd,
             ID_STEP_ACCOUNT,
@@ -1468,7 +2158,7 @@ fn build_controls(hwnd: HWND, state: &State) -> Result<()> {
             ),
         )?;
     }
-    label(
+    single_line_label(
         hwnd,
         ID_INTRO,
         state
@@ -1484,16 +2174,16 @@ fn build_controls(hwnd: HWND, state: &State) -> Result<()> {
         ID_PASSWORD_LABEL,
         crate::i18n::t("Image password for new uploads (empty: none)"),
     )?;
-    edit(hwnd, ID_PASSWORD, true)?;
+    edit(hwnd, ID_PASSWORD, ES_PASSWORD)?;
     button(hwnd, ID_SAVE_PASSWORD, crate::i18n::t("Save password"))?;
     button(hwnd, ID_REFRESH, crate::i18n::t("Refresh"))?;
     button(hwnd, ID_UPDATE_WORKER, crate::i18n::t("Update Worker"))?;
     button(hwnd, ID_FORGET, crate::i18n::t("Disconnect"))?;
     for (index, name) in limit_labels().iter().enumerate() {
-        label(hwnd, ID_LIMIT_LABEL_FIRST + index as i32, name)?;
-        edit(hwnd, ID_LIMIT_FIRST + index as i32, false)?;
+        single_line_label(hwnd, ID_LIMIT_LABEL_FIRST + index as i32, name)?;
+        edit(hwnd, ID_LIMIT_FIRST + index as i32, ES_NUMBER)?;
     }
-    label(hwnd, ID_MODE_LABEL, crate::i18n::t("At the limit"))?;
+    single_line_label(hwnd, ID_MODE_LABEL, crate::i18n::t("At the limit"))?;
     let combo = create(
         hwnd,
         w!("COMBOBOX"),
@@ -1526,20 +2216,34 @@ fn build_controls(hwnd: HWND, state: &State) -> Result<()> {
     label(
         hwnd,
         ID_IMAGES_LABEL,
-        crate::i18n::t("Recent images · Double-click to open; deleted links stop at once"),
+        crate::i18n::t("Recent images · Double-click to open"),
     )?;
     create(
         hwnd,
         w!("LISTBOX"),
         ID_IMAGES,
         "",
-        WINDOW_STYLE(WS_TABSTOP.0 | WS_VSCROLL.0 | LBS_NOTIFY as u32),
+        WINDOW_STYLE(
+            WS_TABSTOP.0
+                | WS_VSCROLL.0
+                | LBS_NOTIFY as u32
+                | LBS_OWNERDRAWFIXED as u32
+                | LBS_HASSTRINGS as u32,
+        ),
+    )?;
+    // Created after the list so it lies on top of it.
+    create(
+        hwnd,
+        w!("STATIC"),
+        ID_IMAGES_EMPTY,
+        crate::i18n::t("No uploads yet. Use Upload in the editor to share a screenshot."),
+        WINDOW_STYLE(SS_CENTER | SS_NOPREFIX),
     )?;
     button(hwnd, ID_OPEN_IMAGE, crate::i18n::t("Open"))?;
     button(hwnd, ID_COPY_IMAGE, crate::i18n::t("Copy link"))?;
     button(hwnd, ID_DELETE, crate::i18n::t("Delete"))?;
     label(hwnd, ID_STATUS, crate::i18n::t("Connected"))?;
-    button(hwnd, ID_CLOSE, crate::i18n::t("Close"))?;
+    default_button(hwnd, ID_CLOSE, crate::i18n::t("Close"))?;
     if let Some(origin) = state.settings.cloud_url.as_deref()
         && let Ok(credentials) = cloudflare_setup::load_credentials(origin)
     {
@@ -1592,12 +2296,9 @@ fn window_size(dpi: u32, client_height: i32) -> (i32, i32) {
     (rect.right - rect.left, rect.bottom - rect.top)
 }
 
-/// Centres the dialog on its owner, or on the monitor under the cursor.
-fn position(hwnd: HWND, owner: Option<HWND>, width: i32, height: i32) {
-    use windows::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, MonitorFromWindow,
-    };
-    let monitor = match owner {
+/// The monitor the dialog opens on: the owner's, or the one under the cursor.
+fn target_monitor(owner: Option<HWND>) -> HMONITOR {
+    match owner {
         Some(owner) => unsafe { MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST) },
         None => {
             let mut cursor = POINT::default();
@@ -1606,16 +2307,32 @@ fn position(hwnd: HWND, owner: Option<HWND>, width: i32, height: i32) {
                 MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST)
             }
         }
-    };
+    }
+}
+
+fn monitor_dpi(monitor: HMONITOR) -> Option<u32> {
+    let (mut x, mut y) = (0, 0);
+    unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut x, &mut y) }
+        .ok()
+        .map(|()| x)
+}
+
+fn work_area(monitor: HMONITOR) -> Option<RECT> {
     let mut info = MONITORINFO {
         cbSize: std::mem::size_of::<MONITORINFO>() as u32,
         ..Default::default()
     };
-    if !unsafe { GetMonitorInfoW(monitor, &mut info).as_bool() } {
+    unsafe { GetMonitorInfoW(monitor, &mut info) }
+        .as_bool()
+        .then_some(info.rcWork)
+}
+
+/// Centres the dialog on its owner, or on the monitor under the cursor.
+fn position(hwnd: HWND, owner: Option<HWND>, monitor: HMONITOR, width: i32, height: i32) {
+    let Some(work) = work_area(monitor) else {
         crate::diagnostics::record("cloudflare view", "Could not measure the work area.");
         return;
-    }
-    let work = info.rcWork;
+    };
     let mut anchor = work;
     if let Some(owner) = owner
         && unsafe { GetWindowRect(owner, &mut anchor) }.is_err()
@@ -1665,13 +2382,23 @@ fn show_impl(
         images: Vec::new(),
         response: Arc::new(Mutex::new(None)),
         dpi: 96,
+        owner,
+        default_id: if current.cloud_url.is_none() {
+            ID_CONNECT
+        } else {
+            ID_CLOSE
+        },
         font: HFONT::default(),
         heading_font: HFONT::default(),
-        page_brush: HBRUSH::default(),
+        content_brush: HBRUSH::default(),
         footer_brush: HBRUSH::default(),
         input_brush: HBRUSH::default(),
     });
     state.refresh_brushes();
+    // Created on the monitor it will be shown on, so the window starts with
+    // that monitor's DPI and is laid out once at the right scale.
+    let monitor = target_monitor(owner);
+    let origin = work_area(monitor).map(|work| (work.left, work.top));
     let hwnd = unsafe {
         CreateWindowExW(
             // A taskbar button even when owned by the Settings window.
@@ -1679,8 +2406,8 @@ fn show_impl(
             CLASS,
             w!("isolmaSS Cloudflare"),
             STYLE,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
+            origin.map_or(CW_USEDEFAULT, |(left, _)| left),
+            origin.map_or(CW_USEDEFAULT, |(_, top)| top),
             WIDTH,
             400,
             owner.unwrap_or_default(),
@@ -1700,7 +2427,9 @@ fn show_impl(
     unsafe {
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, state.as_mut() as *mut State as isize);
     }
-    state.dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd) }.max(96);
+    state.dpi = monitor_dpi(monitor)
+        .unwrap_or_else(|| unsafe { GetDpiForWindow(hwnd) })
+        .max(96);
     build_controls(hwnd, &state)?;
     state.refresh_fonts(hwnd);
     unsafe {
@@ -1712,12 +2441,24 @@ fn show_impl(
     }
     let height = layout(hwnd, &state);
     show_tab(hwnd, &state);
+    sync_image_actions(hwnd, &state);
     let (width, height) = window_size(state.dpi, height);
-    position(hwnd, owner, width, height);
+    position(hwnd, owner, monitor, width, height);
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOW);
     }
     crate::ui::bring_to_front(hwnd);
+    // The consent button of the guided page, or the selected tab.
+    let first = if state.guided() {
+        ID_CONNECT
+    } else {
+        ID_TAB_FIRST + state.tab as i32
+    };
+    if let Some(child) = control(hwnd, first) {
+        unsafe {
+            let _ = SetFocus(child);
+        }
+    }
     if !state.guided() {
         // Load current statistics, limits and images right away.
         refresh(hwnd, &mut state);
@@ -1727,5 +2468,113 @@ fn show_impl(
         Ok(Some(state.settings.clone()))
     } else {
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 1920×1080 display at 200 %: 984 px of work area (96 px taskbar)
+    /// minus about 74 px of window frame, in design pixels.
+    const CLIENT_BUDGET: i32 = (984 - 74) / 2;
+
+    #[test]
+    fn limits_tab_fits_a_1080p_work_area_at_200_percent() {
+        // The cost note wraps fully; a translation may need a fourth line.
+        for note in [LABEL, 2 * LABEL, 3 * LABEL, 4 * LABEL] {
+            let client = limits_bottom(note) + 8 + FOOTER;
+            assert!(client <= CLIENT_BUDGET, "{client} > {CLIENT_BUDGET}");
+        }
+    }
+
+    #[test]
+    fn image_row_has_an_inset_background_and_a_left_edge_pill() {
+        for dpi in [96, 192] {
+            let row = RECT {
+                left: 0,
+                top: 100,
+                right: 400,
+                bottom: 100 + scale(IMAGE_ROW, dpi),
+            };
+            let parts = image_row_parts(row, dpi);
+            assert_eq!(parts.background.left, scale(4, dpi));
+            assert_eq!(row.right - parts.background.right, scale(4, dpi));
+            assert_eq!(parts.pill.left, parts.background.left);
+            assert_eq!(parts.pill.right - parts.pill.left, scale(3, dpi));
+            assert_eq!(parts.pill.bottom - parts.pill.top, scale(16, dpi));
+            // Centred in the background, which leaves room for the focus ring.
+            assert_eq!(
+                parts.pill.top - parts.background.top,
+                parts.background.bottom - parts.pill.bottom
+            );
+            assert!(parts.background.top >= row.top + scale(3, dpi));
+            assert!(parts.background.bottom <= row.bottom - scale(3, dpi));
+            assert!(parts.text.left > parts.pill.right);
+        }
+    }
+
+    #[test]
+    fn limit_cells_form_two_columns_that_neither_overlap_nor_leave_the_dialog() {
+        let column = (WIDTH - 2 * MARGIN - GUTTER) / 2;
+        let cells: Vec<(i32, i32)> = (0..=LIMITS.len() as i32)
+            .map(|index| limit_cell(index, column))
+            .collect();
+        let mut columns: Vec<i32> = cells.iter().map(|cell| cell.0).collect();
+        columns.sort_unstable();
+        columns.dedup();
+        assert_eq!(columns.len(), 2);
+        assert!(columns[0] + column + GUTTER <= columns[1]);
+        assert!(columns[1] + column <= WIDTH - MARGIN);
+        for (index, (x, y)) in cells.iter().enumerate() {
+            for (other_x, other_y) in &cells[index + 1..] {
+                assert!(
+                    x != other_x || other_y >= &(y + CELL_HEIGHT),
+                    "cells in one column overlap"
+                );
+            }
+            assert!(y + CELL_HEIGHT <= limits_note_top());
+        }
+    }
+
+    #[test]
+    fn framed_edit_keeps_room_for_a_line_of_text() {
+        // The 14 px body font needs about 19 px of height at 96 DPI.
+        assert!(FIELD - 2 * EDIT_PAD.1 >= 19);
+        assert!(EDIT_PAD.0 + EDIT_MARGIN > 2);
+    }
+
+    #[test]
+    fn measured_heights_round_up_to_design_pixels() {
+        assert_eq!(design(19, 96), 19);
+        // 18.5 design pixels at 200 %.
+        assert_eq!(design(37, 192), 19);
+        assert_eq!(design(39, 192), 20);
+        assert_eq!(design(24, 120), 20);
+        assert_eq!(design(25, 120), 20);
+    }
+
+    #[test]
+    fn enter_applies_the_section_that_has_the_focus() {
+        assert_eq!(default_for(ID_PASSWORD), ID_SAVE_PASSWORD);
+        assert_eq!(default_for(ID_LIMIT_FIRST), ID_SAVE_LIMITS);
+        assert_eq!(
+            default_for(ID_LIMIT_FIRST + LIMITS.len() as i32 - 1),
+            ID_SAVE_LIMITS
+        );
+        assert_eq!(default_for(ID_MODE), ID_SAVE_LIMITS);
+        assert_eq!(default_for(ID_IMAGES), ID_OPEN_IMAGE);
+        assert_eq!(default_for(ID_REFRESH), ID_CLOSE);
+        assert_eq!(default_for(ID_TAB_FIRST), ID_CLOSE);
+    }
+
+    #[test]
+    fn every_input_reports_through_wm_command_and_lives_on_a_tab() {
+        for id in framed_ids().chain([ID_MODE]) {
+            assert!(is_input(id), "{id}");
+            assert!(tab_of(id).is_some(), "{id}");
+        }
+        assert_eq!(tab_of(ID_IMAGES_EMPTY), tab_of(ID_IMAGES));
+        assert!(!is_input(ID_SAVE_LIMITS));
     }
 }

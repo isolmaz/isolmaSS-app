@@ -859,6 +859,7 @@ pub fn install(token: &str, account: &Account, cancel: &AtomicBool) -> Result<In
             None,
             None,
             RequestBody::Bytes(&[]),
+            None,
         ) && let Ok(value) = serde_json::from_slice::<Value>(&reply)
             && value["status"] == "ready"
             && value["origin"] == origin
@@ -979,6 +980,7 @@ pub fn update_worker(
             None,
             None,
             RequestBody::Bytes(&[]),
+            None,
         ) && serde_json::from_slice::<Value>(&reply)
             .is_ok_and(|value| value["version"].as_u64() == Some(WORKER_VERSION))
         {

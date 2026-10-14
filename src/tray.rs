@@ -8,9 +8,9 @@ use windows::Win32::Foundation::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{_LI_METRIC, LIM_LARGE, LIM_SMALL, LoadIconMetric};
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIIF_RESPECT_QUIET_TIME, NIM_ADD,
-    NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT, NOTIFYICON_VERSION_4, NOTIFYICONDATAW,
-    Shell_NotifyIconW,
+    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO, NIIF_RESPECT_QUIET_TIME,
+    NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT, NOTIFYICON_VERSION_4,
+    NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
@@ -42,6 +42,48 @@ pub fn set_active_hotkey(description: &str) {
     *ACTIVE_HOTKEY
         .lock()
         .unwrap_or_else(|error| error.into_inner()) = Some(description.to_owned());
+    apply_tooltip();
+}
+
+/// Temporary status text (update check/download) that replaces the base tooltip.
+static UPDATE_ACTIVITY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn current_tooltip() -> String {
+    if let Some(activity) = UPDATE_ACTIVITY
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+    {
+        return activity;
+    }
+    let hotkey = ACTIVE_HOTKEY
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+        .filter(|description| !description.is_empty());
+    match hotkey {
+        Some(description) => crate::i18n::tf("isolmaSS — {} to capture", &[&description]),
+        None => crate::i18n::t("isolmaSS — click to capture").to_owned(),
+    }
+}
+
+/// Pushes the current tooltip text to the shell icon, if the icon exists.
+fn apply_tooltip() {
+    let raw = TRAY_HWND.load(Ordering::SeqCst);
+    if raw == 0 {
+        return;
+    }
+    let mut data = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: HWND(raw as *mut _),
+        uID: TRAY_ICON_ID,
+        uFlags: NIF_TIP | NIF_SHOWTIP,
+        ..Default::default()
+    };
+    copy_wide(&mut data.szTip, &current_tooltip());
+    if !unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) }.as_bool() {
+        crate::diagnostics::record("tray tooltip", "Could not update the tray tooltip.");
+    }
 }
 pub fn refresh_preferences(settings: &Settings) {
     *PREFERENCES
@@ -164,12 +206,12 @@ fn base_notify_data(hwnd: HWND) -> NOTIFYICONDATAW {
         cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: hwnd,
         uID: TRAY_ICON_ID,
-        uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
+        uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP,
         uCallbackMessage: WM_TRAYICON,
         hIcon: app_icon_small(),
         ..Default::default()
     };
-    copy_wide(&mut data.szTip, "isolmaSS - Screenshot Utility");
+    copy_wide(&mut data.szTip, &current_tooltip());
     data
 }
 
@@ -266,7 +308,7 @@ unsafe extern "system" fn tray_wnd_proc(
 
     match msg {
         WM_SHOW_EXISTING => {
-            queue_command(TrayCommand::Settings);
+            request_settings();
             LRESULT(0)
         }
         WM_TRAYICON => {
@@ -289,6 +331,9 @@ unsafe extern "system" fn tray_wnd_proc(
         }
         WM_SETTINGCHANGE => {
             crate::theme::invalidate_theme_cache();
+            if crate::theme::is_color_setting_change(lparam) {
+                crate::theme::refresh_native_menus();
+            }
             LRESULT(0)
         }
         WM_CLOSE => {
@@ -303,6 +348,11 @@ unsafe extern "system" fn tray_wnd_proc(
                         "isolmaSS will quit after the current capture or window closes.",
                     ),
                 );
+            } else if crate::toast::upload_in_flight() {
+                show_notification(
+                    crate::i18n::t("Quit requested"),
+                    crate::i18n::t("isolmaSS will quit after the upload finishes."),
+                );
             }
             LRESULT(0)
         }
@@ -315,6 +365,21 @@ unsafe extern "system" fn tray_wnd_proc(
 }
 
 pub(crate) mod menu;
+
+/// Opens Settings, or raises it when it is already open. The daemon loop is
+/// blocked inside the open window, so a queued command would only fire after
+/// the user closed it. The Cloudflare window sits on top of Settings.
+fn request_settings() {
+    for class in [w!("isolmaSS_CloudSettings"), w!("isolmaSS_SettingsClass")] {
+        if let Ok(window) = unsafe { FindWindowW(class, None) }
+            && !window.is_invalid()
+        {
+            crate::ui::bring_to_front(window);
+            return;
+        }
+    }
+    queue_command(TrayCommand::Settings);
+}
 
 static MENU_OPEN: AtomicBool = AtomicBool::new(false);
 
@@ -351,6 +416,7 @@ fn show_context_menu(hwnd: HWND, anchor: Option<POINT>) {
         .unwrap_or(preferences.hotkey.description);
     match menu::show(hwnd, point, crate::save::recent::list(), &active_hotkey) {
         Ok(Some(TrayCommand::Capture(triggered))) => queue_capture(triggered),
+        Ok(Some(TrayCommand::Settings)) => request_settings(),
         Ok(Some(command)) => queue_command(command),
         Ok(None) => {}
         Err(error) => crate::ui::error(
@@ -434,24 +500,10 @@ impl Drop for TrayManager {
 }
 
 pub fn set_update_activity(message: Option<&str>) {
-    let raw = TRAY_HWND.load(Ordering::SeqCst);
-    if raw == 0 {
-        return;
-    }
-    let mut data = NOTIFYICONDATAW {
-        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
-        hWnd: HWND(raw as *mut _),
-        uID: TRAY_ICON_ID,
-        uFlags: NIF_TIP,
-        ..Default::default()
-    };
-    copy_wide(
-        &mut data.szTip,
-        message.unwrap_or("isolmaSS - Screenshot Utility"),
-    );
-    if !unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) }.as_bool() {
-        crate::diagnostics::record("tray update status", "Could not update the tray tooltip.");
-    }
+    *UPDATE_ACTIVITY
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = message.map(str::to_owned);
+    apply_tooltip();
 }
 
 pub fn show_notification(title: &str, message: &str) {

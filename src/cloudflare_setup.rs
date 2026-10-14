@@ -292,8 +292,12 @@ pub enum RequestBody<'a> {
     File(&'a Path),
 }
 
+/// Receives `(bytes sent, total bytes)` while a file body is being written.
+pub type UploadProgress<'a> = Option<&'a (dyn Fn(u64, u64) + Sync)>;
+
 /// Performs one HTTPS request to exactly the configured Worker origin; redirects
 /// and credential forwarding to other hosts are forbidden.
+#[allow(clippy::too_many_arguments)]
 pub fn api_request(
     origin: &str,
     path: &str,
@@ -302,6 +306,7 @@ pub fn api_request(
     content_type: Option<&str>,
     password: Option<&str>,
     body: RequestBody<'_>,
+    progress: UploadProgress<'_>,
 ) -> Result<(u32, Vec<u8>), String> {
     if !valid_cloud_origin(origin)
         || !path.starts_with("/api/")
@@ -325,6 +330,7 @@ pub fn api_request(
         content_type,
         password,
         body,
+        progress,
     )
 }
 
@@ -354,7 +360,7 @@ pub fn control_request(
     {
         return Err(crate::i18n::t("Invalid Cloudflare API target or access token.").to_string());
     }
-    https_request(host, path, method, bearer, content_type, None, body)
+    https_request(host, path, method, bearer, content_type, None, body, None)
 }
 
 /// A failed attempt; `retryable` marks transport failures where repeating the
@@ -399,6 +405,7 @@ fn transient(error: &windows::core::Error) -> bool {
     .any(|&code| error.code() == windows::core::HRESULT::from_win32(code))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn https_request(
     host: &str,
     path: &str,
@@ -407,11 +414,21 @@ fn https_request(
     content_type: Option<&str>,
     password: Option<&str>,
     body: RequestBody<'_>,
+    progress: UploadProgress<'_>,
 ) -> Result<(u32, Vec<u8>), String> {
     const ATTEMPTS: u32 = 4;
     let mut attempt = 1;
     loop {
-        match https_attempt(host, path, method, bearer, content_type, password, body) {
+        match https_attempt(
+            host,
+            path,
+            method,
+            bearer,
+            content_type,
+            password,
+            body,
+            progress,
+        ) {
             Ok(response) => return Ok(response),
             Err(failure) if failure.retryable && attempt < ATTEMPTS => {
                 crate::diagnostics::record(
@@ -509,6 +526,7 @@ fn session() -> Result<*mut c_void, String> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn https_attempt(
     host: &str,
     path: &str,
@@ -517,6 +535,7 @@ fn https_attempt(
     content_type: Option<&str>,
     password: Option<&str>,
     body: RequestBody<'_>,
+    progress: UploadProgress<'_>,
 ) -> Result<(u32, Vec<u8>), Failure> {
     let mut file = match body {
         RequestBody::File(path) => Some(std::fs::File::open(path).map_err(|error| {
@@ -531,11 +550,16 @@ fn https_attempt(
         RequestBody::Bytes(bytes) => bytes.len() as u64,
     };
     if size > 10 * 1024 * 1024 {
-        return Err(
-            crate::i18n::t("The screenshot or setup request exceeds the allowed size.")
-                .to_string()
-                .into(),
-        );
+        return Err(match body {
+            RequestBody::File(_) => {
+                worker_failure_message(WorkerFailure::TooLarge(size), local_reset_time)
+            }
+            RequestBody::Bytes(_) => {
+                crate::i18n::t("The screenshot or setup request exceeds the allowed size.")
+                    .to_string()
+            }
+        }
+        .into());
     }
     let session = session()?;
     let host_wide = wide(host);
@@ -677,6 +701,8 @@ fn https_attempt(
         }
         RequestBody::File(_) => {
             let source = file.as_mut().expect("file body opened above");
+            let mut reporter = ProgressReporter::new(progress, size);
+            let mut sent = 0u64;
             loop {
                 let count = source.read(&mut buffer).map_err(|error| {
                     crate::i18n::tf("Could not read the screenshot file: {}", &[&error])
@@ -701,6 +727,8 @@ fn https_attempt(
                     .to_string()
                     .into());
                 }
+                sent += count as u64;
+                reporter.sent(sent);
             }
         }
     }
@@ -797,18 +825,193 @@ pub fn admin_json(
         value.map(|_| "application/json"),
         None,
         RequestBody::Bytes(encoded.as_deref().unwrap_or_default()),
+        None,
     )?;
-    let response: serde_json::Value = serde_json::from_slice(&body).map_err(|_| {
-        crate::i18n::tf("Cloudflare sent an invalid response (HTTP {}).", &[&status])
-    })?;
     if !(200..300).contains(&status) {
-        return Err(response
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or(crate::i18n::t("Cloudflare rejected the request."))
-            .to_string());
+        return Err(rejection(status, &body, None));
     }
-    Ok(response)
+    serde_json::from_slice(&body)
+        .map_err(|_| crate::i18n::tf("Cloudflare sent an invalid response (HTTP {}).", &[&status]))
+}
+
+/// Hands the number of bytes written so far to the caller of a file upload, at
+/// most about every 100 ms or percent of the body, and always for the last byte.
+struct ProgressReporter<'a> {
+    callback: UploadProgress<'a>,
+    total: u64,
+    reported: u64,
+    last: std::time::Instant,
+}
+
+impl<'a> ProgressReporter<'a> {
+    fn new(callback: UploadProgress<'a>, total: u64) -> Self {
+        Self {
+            callback,
+            total,
+            reported: 0,
+            last: std::time::Instant::now(),
+        }
+    }
+
+    fn sent(&mut self, sent: u64) {
+        let Some(callback) = self.callback else {
+            return;
+        };
+        if progress_due(sent, self.reported, self.total, self.last.elapsed()) {
+            callback(sent, self.total);
+            self.reported = sent;
+            self.last = std::time::Instant::now();
+        }
+    }
+}
+
+fn progress_due(sent: u64, reported: u64, total: u64, elapsed: std::time::Duration) -> bool {
+    sent >= total
+        || elapsed >= std::time::Duration::from_millis(100)
+        || (sent - reported) * 100 >= total
+}
+
+/// What a Worker's error response means for the user.
+#[derive(Debug, PartialEq, Eq)]
+pub enum WorkerFailure {
+    /// The Worker no longer accepts this computer's key (401).
+    Reconnect,
+    /// The capture, of this many bytes, is over the Worker's per-image limit.
+    TooLarge(u64),
+    /// The daily upload limit is used up.
+    DailyLimit,
+    /// The Worker's storage is full (507).
+    StorageFull,
+    /// A server error, or an answer that is not the Worker's JSON.
+    Unavailable,
+    /// An error the app has no wording for: the server's own text.
+    Other(String),
+}
+
+/// Sorts a non-success answer. `upload_bytes` is the size of the capture when
+/// the request was an upload; size and limit statuses only mean that there.
+pub fn classify_worker_failure(
+    status: u32,
+    body: &[u8],
+    upload_bytes: Option<u64>,
+) -> WorkerFailure {
+    let text = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("error")
+                .and_then(|text| text.as_str())
+                .map(|text| {
+                    text.chars()
+                        .filter(|character| !character.is_control())
+                        .take(240)
+                        .collect::<String>()
+                })
+        })
+        .filter(|text| !text.is_empty());
+    let size_message = |text: &str| {
+        let text = text.to_ascii_lowercase();
+        ["exceeds", "too large", "size limit"]
+            .iter()
+            .any(|word| text.contains(word))
+    };
+    match (status, upload_bytes) {
+        (401, _) => WorkerFailure::Reconnect,
+        (507, _) => WorkerFailure::StorageFull,
+        (413, Some(bytes)) => WorkerFailure::TooLarge(bytes),
+        (400, Some(bytes)) if text.as_deref().is_some_and(size_message) => {
+            WorkerFailure::TooLarge(bytes)
+        }
+        (429, Some(_)) => WorkerFailure::DailyLimit,
+        (500..=599, _) => WorkerFailure::Unavailable,
+        _ => text.map_or(WorkerFailure::Unavailable, WorkerFailure::Other),
+    }
+}
+
+/// The localized, actionable text for `failure`. `reset` formats the local time
+/// at which the daily upload counter restarts; it is only called when needed.
+pub fn worker_failure_message(failure: WorkerFailure, reset: impl FnOnce() -> String) -> String {
+    match failure {
+        WorkerFailure::Reconnect => crate::i18n::t(
+            "This computer's access key no longer matches your Worker. Reconnect in Settings › Sharing.",
+        )
+        .to_string(),
+        WorkerFailure::TooLarge(bytes) => {
+            let separator = if crate::i18n::current() == crate::i18n::Language::Turkish {
+                ','
+            } else {
+                '.'
+            };
+            crate::i18n::tf(
+                "This capture ({} MB) is larger than your Worker's per-image limit. Switch to JPEG in Settings › Saving or raise the limit in Cloudflare › Limits.",
+                &[&megabytes(bytes, separator)],
+            )
+        }
+        WorkerFailure::DailyLimit => crate::i18n::tf(
+            "Today's upload limit is reached. It resets at {}, or raise it in Cloudflare › Limits.",
+            &[&reset()],
+        ),
+        WorkerFailure::StorageFull => crate::i18n::t(
+            "Your Worker's storage is full. Delete images in Cloudflare › Images or shorten retention.",
+        )
+        .to_string(),
+        WorkerFailure::Unavailable => {
+            crate::i18n::t("Cloudflare is temporarily unavailable. Try again in a minute.")
+                .to_string()
+        }
+        WorkerFailure::Other(text) => text,
+    }
+}
+
+/// The message for a non-success answer; the status stays in the diagnostics
+/// log because most answers are shown without it.
+pub fn rejection(status: u32, body: &[u8], upload_bytes: Option<u64>) -> String {
+    crate::diagnostics::record("cloudflare response", &format!("HTTP {status}"));
+    worker_failure_message(
+        classify_worker_failure(status, body, upload_bytes),
+        local_reset_time,
+    )
+}
+
+/// Rounded up to a tenth of a MiB, so a capture never reads as smaller than it is.
+fn megabytes(bytes: u64, separator: char) -> String {
+    let tenths = (bytes * 10).div_ceil(1024 * 1024).max(1);
+    format!("{}{separator}{}", tenths / 10, tenths % 10)
+}
+
+/// The next 00:00 UTC after `now` (Unix seconds), when the Worker's daily counters restart.
+fn next_utc_midnight(now: u64) -> u64 {
+    (now / 86_400 + 1) * 86_400
+}
+
+/// The next daily reset as a local `HH:MM` clock time.
+fn local_reset_time() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    local_clock_time(next_utc_midnight(now))
+}
+
+fn local_clock_time(unix_seconds: u64) -> String {
+    use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
+    // FILETIME counts 100 ns intervals since 1601-01-01.
+    let ticks = (unix_seconds + 11_644_473_600) * 10_000_000;
+    let file_time = FILETIME {
+        dwLowDateTime: ticks as u32,
+        dwHighDateTime: (ticks >> 32) as u32,
+    };
+    let mut universal = SYSTEMTIME::default();
+    let mut local = SYSTEMTIME::default();
+    let converted = unsafe {
+        FileTimeToSystemTime(&file_time, &mut universal).is_ok()
+            && SystemTimeToTzSpecificLocalTime(None, &universal, &mut local).is_ok()
+    };
+    if converted {
+        format!("{:02}:{:02}", local.wHour, local.wMinute)
+    } else {
+        "00:00 UTC".to_string()
+    }
 }
 
 #[cfg(test)]
@@ -829,5 +1032,157 @@ mod tests {
             unprotect(&sealed).expect("Windows DPAPI decryption"),
             plain.as_bytes()
         );
+    }
+
+    fn failure(status: u32, body: &str, upload_bytes: Option<u64>) -> WorkerFailure {
+        classify_worker_failure(status, body.as_bytes(), upload_bytes)
+    }
+
+    #[test]
+    fn worker_statuses_map_to_actionable_failures() {
+        let sized = r#"{"error":"Image exceeds the configured size limit."}"#;
+        assert_eq!(
+            failure(401, r#"{"error":"Upload token required."}"#, Some(5)),
+            WorkerFailure::Reconnect
+        );
+        assert_eq!(
+            failure(401, r#"{"error":"Administrator token required."}"#, None),
+            WorkerFailure::Reconnect
+        );
+        assert_eq!(failure(413, sized, Some(7)), WorkerFailure::TooLarge(7));
+        assert_eq!(failure(400, sized, Some(7)), WorkerFailure::TooLarge(7));
+        assert_eq!(
+            failure(400, r#"{"error":"Invalid PNG image."}"#, Some(7)),
+            WorkerFailure::Other("Invalid PNG image.".into())
+        );
+        assert_eq!(
+            failure(429, r#"{"error":"Upload limit reached."}"#, Some(7)),
+            WorkerFailure::DailyLimit
+        );
+        assert_eq!(
+            failure(507, r#"{"error":"Free storage is full."}"#, Some(7)),
+            WorkerFailure::StorageFull
+        );
+        assert_eq!(
+            failure(
+                503,
+                r#"{"error":"Service temporarily unavailable."}"#,
+                Some(7)
+            ),
+            WorkerFailure::Unavailable
+        );
+        assert_eq!(
+            failure(502, "<html>Bad gateway</html>", Some(7)),
+            WorkerFailure::Unavailable
+        );
+        assert_eq!(
+            failure(404, "<html>Not found</html>", None),
+            WorkerFailure::Unavailable
+        );
+        assert_eq!(failure(418, "{}", None), WorkerFailure::Unavailable);
+    }
+
+    #[test]
+    fn size_and_limit_statuses_only_apply_to_uploads() {
+        let sized = r#"{"error":"Request body is too large."}"#;
+        assert_eq!(
+            failure(413, sized, None),
+            WorkerFailure::Other("Request body is too large.".into())
+        );
+        assert_eq!(
+            failure(400, sized, None),
+            WorkerFailure::Other("Request body is too large.".into())
+        );
+        assert_eq!(
+            failure(429, r#"{"error":"Slow down."}"#, None),
+            WorkerFailure::Other("Slow down.".into())
+        );
+    }
+
+    #[test]
+    fn server_text_loses_control_characters_and_is_capped() {
+        let body = format!(r#"{{"error":"a\nb{}"}}"#, "x".repeat(300));
+        let WorkerFailure::Other(text) = failure(418, &body, None) else {
+            panic!("an unknown status keeps the server text");
+        };
+        assert!(text.starts_with("ab"));
+        assert_eq!(text.chars().count(), 240);
+    }
+
+    #[test]
+    fn messages_carry_the_capture_size_and_the_injected_reset_time() {
+        let asked = std::cell::Cell::new(false);
+        let _lock = crate::i18n::TEST_LANGUAGE_LOCK.lock().unwrap();
+        crate::i18n::set_preference(crate::i18n::LanguagePreference::English);
+        let limit = worker_failure_message(WorkerFailure::DailyLimit, || "03:00".to_string());
+        let large = worker_failure_message(WorkerFailure::TooLarge(7_759_462), || {
+            asked.set(true);
+            String::new()
+        });
+        let reconnect = worker_failure_message(WorkerFailure::Reconnect, || {
+            asked.set(true);
+            String::new()
+        });
+        let other = worker_failure_message(WorkerFailure::Other("Nope.".into()), String::new);
+        crate::i18n::set_preference(crate::i18n::LanguagePreference::System);
+        assert!(limit.contains("03:00"), "{limit}");
+        assert!(large.contains("(7.4 MB)"), "{large}");
+        assert!(reconnect.contains("Settings › Sharing"), "{reconnect}");
+        assert_eq!(other, "Nope.");
+        assert!(!asked.get(), "only the daily limit needs the reset time");
+    }
+
+    #[test]
+    fn megabytes_round_up_to_a_tenth() {
+        assert_eq!(megabytes(1, '.'), "0.1");
+        assert_eq!(megabytes(1024 * 1024, ','), "1,0");
+        assert_eq!(megabytes(1024 * 1024 + 1, '.'), "1.1");
+        assert_eq!(megabytes(10 * 1024 * 1024, '.'), "10.0");
+    }
+
+    #[test]
+    fn the_daily_reset_is_the_next_utc_midnight() {
+        // 2023-11-14 22:13:20 UTC.
+        assert_eq!(next_utc_midnight(1_700_000_000), 1_700_006_400);
+        // Exactly at midnight the next reset is a full day away.
+        assert_eq!(next_utc_midnight(1_700_006_400), 1_700_092_800);
+        assert_eq!(next_utc_midnight(0), 86_400);
+    }
+
+    #[test]
+    fn progress_is_due_by_time_percent_or_the_last_byte() {
+        use std::time::Duration;
+        let total = 10 * 1024 * 1024;
+        let quick = Duration::from_millis(1);
+        assert!(!progress_due(65_536, 0, total, quick));
+        assert!(!progress_due(104_857, 0, total, quick));
+        assert!(progress_due(104_858, 0, total, quick));
+        assert!(!progress_due(65_536, 0, total, Duration::from_millis(99)));
+        assert!(progress_due(65_536, 0, total, Duration::from_millis(100)));
+        assert!(progress_due(total, total - 1, total, quick));
+    }
+
+    #[test]
+    fn reporter_throttles_file_progress_and_ends_with_the_total() {
+        use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+        let total = 10 * 1024 * 1024u64;
+        let (reports, last_sent, last_total) =
+            (AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0));
+        let callback = |sent: u64, of: u64| {
+            reports.fetch_add(1, Relaxed);
+            last_sent.store(sent, Relaxed);
+            last_total.store(of, Relaxed);
+        };
+        let mut reporter = ProgressReporter::new(Some(&callback), total);
+        for chunk in 1..=160u64 {
+            reporter.sent(chunk * 64 * 1024);
+        }
+        assert!(
+            reports.load(Relaxed) < 160,
+            "{} reports",
+            reports.load(Relaxed)
+        );
+        assert_eq!(last_sent.load(Relaxed), total);
+        assert_eq!(last_total.load(Relaxed), total);
     }
 }

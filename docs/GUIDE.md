@@ -40,15 +40,15 @@ While editing text, Enter commits; Ctrl+C, Ctrl+S and Ctrl+U commit before expor
 
 Settings is a compact Windows 11 dialog with tabs on top and its own taskbar button, like the Cloudflare window:
 
-- **General** — capture shortcut, delay, theme (system, light, dark), language (system, English, Türkçe), start with Windows, save notification.
+- **General** — capture shortcut, delay, theme (system, light, dark), language (Windows language, English, Türkçe), start with Windows, save notification.
 - **Saving** — folder, PNG or JPEG, JPEG quality.
 - **Editor** — a 20-color palette plus a custom color, line width 1–64 px, window snapping, close after an action.
 - **Sharing** — Cloudflare connection status and the Cloudflare window.
 - **Updates** — automatic checks and a manual check with inline progress.
 
-Record a shortcut with Ctrl/Alt/Shift/Win plus a letter, digit, F1–F24 or PrintScreen; bare PrintScreen also works. A combination already taken by Windows or another app is reported and the current shortcut is kept. If the shortcut is unavailable at startup, the app offers Ctrl+Shift+S for that session. Controls, scroll bars and menus follow the light or dark theme.
+Record a shortcut with Ctrl/Alt/Shift/Win plus a letter, digit, F1–F24 or PrintScreen; bare PrintScreen also works. Recording ends when you click elsewhere; Tab and Enter keep working. A combination already taken by Windows or another app, or one reserved for editing (Alt+F4, Ctrl+C/V/X/Z/Y/A/S, Ctrl+Alt+letter), is reported under the button and the current shortcut is kept. If the shortcut is unavailable at startup, the app offers Ctrl+Shift+S for that session. Controls, scroll bars and menus follow the light or dark theme.
 
-A language change applies after **Save**. The tray menu offers **Take screenshot**, **Settings**, **Screenshots folder**, **Check for updates**, recent captures and **Quit isolmaSS**.
+A language change applies after **Save** when Settings is opened again. Ctrl+Tab and Ctrl+Shift+Tab switch tabs in Settings and in the Cloudflare window. The tray icon's tooltip shows the capture shortcut. The tray menu offers **Take screenshot** (the default, also on left-click), **Settings**, **Screenshots folder**, **Check for updates**, recent captures and **Quit isolmaSS**; opening Settings while it is already open brings that window forward.
 
 ## Updates
 

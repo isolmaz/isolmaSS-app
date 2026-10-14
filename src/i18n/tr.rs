@@ -72,7 +72,6 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Capturing in {} s. Press Esc to cancel.",
         "{} saniye sonra yakalanacak. İptal için Esc tuşuna basın.",
     ),
-    ("Check for updates", "Güncellemeleri denetle"),
     (
         "Check for updates automatically",
         "Güncellemeleri otomatik denetle",
@@ -87,7 +86,6 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "En yeni imzalı sürüm denetleniyor…",
     ),
     ("Checking for updates", "Güncellemeler denetleniyor"),
-    ("Checking for updates…", "Güncellemeler denetleniyor…"),
     (
         "Choose an account; a new Worker is created only in the account you choose.",
         "Hesabı seçin; yalnızca seçilen hesabınızda yeni Worker oluşturulur.",
@@ -168,10 +166,6 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     (
         "Cloudflare rejected the Worker upload ({}).",
         "Cloudflare Worker yüklemesini reddetti ({}).",
-    ),
-    (
-        "Cloudflare rejected the request.",
-        "Cloudflare isteği reddetti.",
     ),
     (
         "Cloudflare returned a link that does not belong to this installation.",
@@ -603,7 +597,6 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     ("Invalid image password.", "Geçersiz resim şifresi."),
     ("Invalid limit", "Geçersiz sınır"),
-    ("Invalid line width", "Geçersiz çizgi kalınlığı"),
     ("Invalid link.", "Geçersiz bağlantı."),
     (
         "Invalid redirect encoding",
@@ -716,12 +709,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Pink", "Pembe"),
     ("Press keys · Esc cancels", "Tuşlara basın · Esc iptal"),
     ("Purple", "Mor"),
-    ("Quit isolmaSS", "isolmaSS uygulamasından çık"),
     ("Quit requested", "Çıkış istendi"),
-    (
-        "Recent images · Double-click to open; deleted links stop at once",
-        "Son resimler · Çift tıklayarak açın; silinen bağlantılar hemen kapanır",
-    ),
     ("Recent screenshots", "Son görüntüler"),
     ("Record shortcut", "Kısayolu kaydet"),
     ("Red", "Kırmızı"),
@@ -746,7 +734,6 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Saving", "Kaydetme"),
     ("Saving limits…", "Sınırlar kaydediliyor…"),
     ("Screenshot saved", "Görüntü kaydedildi"),
-    ("Screenshots folder", "Ekran görüntüsü klasörü"),
     (
         "Select a screen region first.",
         "Önce bir ekran bölgesi seçin.",
@@ -797,7 +784,6 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Stop new uploads", "Yeni yüklemeleri durdur"),
     ("Stopped", "İşlem durdu"),
     ("System", "Sistem"),
-    ("Take screenshot", "Ekran görüntüsü al"),
     ("Teal", "Camgöbeği"),
     ("Text", "Metin"),
     (
@@ -1054,10 +1040,6 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Güncelleme imzası sabitlenmiş yayıncı anahtarıyla eşleşmiyor.",
     ),
     (
-        "The upload failed (HTTP {}).",
-        "Yükleme başarısız oldu (HTTP {}).",
-    ),
-    (
         "The virtual screen exceeds the supported pixel-buffer size.",
         "Sanal ekran desteklenen piksel arabelleği boyutunu aşıyor.",
     ),
@@ -1253,7 +1235,6 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "{}\nUse {} instead for this session?",
         "{}\nBu oturumda bunun yerine {} kullanılsın mı?",
     ),
-    ("{}  ·  Change", "{}  ·  Değiştir"),
     (
         "{} Capture from the tray or choose another shortcut in Settings.",
         "{} Tepsiden yakalayın veya Ayarlar'dan başka bir kısayol seçin.",
@@ -1274,4 +1255,63 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("{} · {} KB · {} views{}", "{} · {} KB · {} görüntülenme{}"),
     ("{} · {} KB · {} view{}", "{} · {} KB · {} görüntülenme{}"),
     ("{}%", "%{}"),
+    ("&Take screenshot", "&Ekran görüntüsü al"),
+    ("&Settings", "&Ayarlar"),
+    ("Screenshots &folder", "Ekran görüntüsü &klasörü"),
+    ("Check for &updates", "Güncellemeleri &denetle"),
+    ("Checking for &updates…", "Güncellemeler &denetleniyor…"),
+    ("&Quit isolmaSS", "isolmaSS uygulamasından &çık"),
+    (
+        "isolmaSS — {} to capture",
+        "isolmaSS — {} ile ekran görüntüsü alın",
+    ),
+    (
+        "isolmaSS — click to capture",
+        "isolmaSS — ekran görüntüsü için tıklayın",
+    ),
+    (
+        "isolmaSS will quit after the upload finishes.",
+        "Yükleme tamamlandıktan sonra isolmaSS sonlanacak.",
+    ),
+    ("Windows language", "Windows dili"),
+    (
+        "Applies after you save and reopen Settings.",
+        "Kaydedip yeniden açınca uygulanır.",
+    ),
+    (
+        "{} is reserved. Choose another shortcut.",
+        "{} ayrılmıştır. Başka bir kısayol seçin.",
+    ),
+    ("{} · Change", "{} · Değiştir"),
+    (
+        "No uploads yet. Use Upload in the editor to share a screenshot.",
+        "Henüz yüklenen görsel yok. Ekran görüntüsünü paylaşmak için düzenleyicide Yükle'yi kullanın.",
+    ),
+    (
+        "Recent images · Double-click to open",
+        "Son görseller · Açmak için çift tıklayın",
+    ),
+    ("Uploading… {}%", "Yükleniyor… %{}"),
+    ("Finishing…", "Tamamlanıyor…"),
+    ("Copied", "Kopyalandı"),
+    (
+        "This computer's access key no longer matches your Worker. Reconnect in Settings › Sharing.",
+        "Bu bilgisayarın erişim anahtarı artık Worker'ınızla eşleşmiyor. Ayarlar › Paylaşım bölümünden yeniden bağlanın.",
+    ),
+    (
+        "This capture ({} MB) is larger than your Worker's per-image limit. Switch to JPEG in Settings › Saving or raise the limit in Cloudflare › Limits.",
+        "Bu ekran görüntüsü ({} MB), Worker'ınızın görsel başına sınırından büyük. Ayarlar › Kaydetme bölümünde JPEG'e geçin veya Cloudflare › Sınırlar bölümünden sınırı artırın.",
+    ),
+    (
+        "Today's upload limit is reached. It resets at {}, or raise it in Cloudflare › Limits.",
+        "Bugünkü yükleme sınırına ulaşıldı. Sınır saat {} itibarıyla sıfırlanır; dilerseniz Cloudflare › Sınırlar bölümünden artırabilirsiniz.",
+    ),
+    (
+        "Your Worker's storage is full. Delete images in Cloudflare › Images or shorten retention.",
+        "Worker'ınızın depolama alanı dolu. Cloudflare › Görseller bölümünden görselleri silin veya saklama süresini kısaltın.",
+    ),
+    (
+        "Cloudflare is temporarily unavailable. Try again in a minute.",
+        "Cloudflare geçici olarak kullanılamıyor. Bir dakika sonra yeniden deneyin.",
+    ),
 ];

@@ -320,6 +320,26 @@ impl Settings {
         latest.save_to_path(&path)
     }
 
+    /// A Cloudflare connection change merges into the latest on-disk preferences under
+    /// the settings lock, so edits still pending in an open Settings window never reach
+    /// the file.
+    pub fn save_cloud_url(url: Option<String>) -> std::io::Result<()> {
+        let _lock = crate::instance::SettingsLock::acquire()?;
+        let path =
+            Self::config_path().ok_or_else(|| std::io::Error::other("APPDATA is unavailable"))?;
+        Self::set_cloud_url_at(&path, url)
+    }
+
+    fn set_cloud_url_at(path: &Path, url: Option<String>) -> std::io::Result<()> {
+        let mut latest = match Self::load_from_path(path) {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(error) => return Err(error),
+        };
+        latest.cloud_url = url;
+        latest.save_to_path(path)
+    }
+
     fn save_to_config_path(&self, path: Option<&std::path::Path>) -> std::io::Result<()> {
         let path = path.ok_or_else(|| {
             std::io::Error::new(
@@ -392,6 +412,62 @@ mod tests {
             settings.cloud_url = Some(origin.into());
             assert!(settings.validate().is_err(), "invalid origin: {origin}");
         }
+    }
+
+    #[test]
+    fn cloud_url_change_keeps_every_other_stored_value() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after the Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "isolmass_unit_test_cloud_url_{}_{unique}",
+            std::process::id()
+        ));
+        let path = root.join("settings.json");
+
+        // A fresh installation gets defaults plus the new address.
+        let origin = "https://screens.example.workers.dev".to_string();
+        Settings::set_cloud_url_at(&path, Some(origin.clone())).expect("create settings");
+        assert_eq!(
+            Settings::load_from_path(&path).unwrap().cloud_url,
+            Some(origin.clone())
+        );
+
+        let stored = Settings {
+            hotkey: HotkeyConfig::from_str("Ctrl+Shift+K").expect("supported shortcut"),
+            default_thickness: 9,
+            start_with_windows: true,
+            skipped_update_version: Some("1.2.3".into()),
+            cloud_url: Some(origin.clone()),
+            ..Settings::default()
+        };
+        stored.save_to_path(&path).expect("store settings");
+
+        // Connecting a different Worker and disconnecting both leave the rest untouched.
+        let other = "https://other.example.workers.dev".to_string();
+        Settings::set_cloud_url_at(&path, Some(other.clone())).expect("switch Worker");
+        let switched = Settings::load_from_path(&path).unwrap();
+        assert_eq!(switched.cloud_url, Some(other));
+        assert_eq!(
+            Settings {
+                cloud_url: stored.cloud_url.clone(),
+                ..switched
+            },
+            stored
+        );
+
+        Settings::set_cloud_url_at(&path, None).expect("disconnect");
+        let disconnected = Settings::load_from_path(&path).unwrap();
+        assert_eq!(disconnected.cloud_url, None);
+        assert_eq!(
+            Settings {
+                cloud_url: stored.cloud_url.clone(),
+                ..disconnected
+            },
+            stored
+        );
+        std::fs::remove_dir_all(&root).expect("remove settings test directory");
     }
 
     #[test]
