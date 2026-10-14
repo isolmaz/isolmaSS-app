@@ -1053,23 +1053,19 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         capture::SelectionHitZone::BottomRightCorner
     );
 
-    // Border edge bands (centered on each border, excluding corners)
-    assert_eq!(
-        sel.hit_test_selection((200, 100), 4, 8),
-        capture::SelectionHitZone::BorderEdge
-    );
-    assert_eq!(
-        sel.hit_test_selection((100, 150), 4, 8),
-        capture::SelectionHitZone::BorderEdge
-    );
-    assert_eq!(
-        sel.hit_test_selection((300, 150), 4, 8),
-        capture::SelectionHitZone::BorderEdge
-    );
-    assert_eq!(
-        sel.hit_test_selection((200, 200), 4, 8),
-        capture::SelectionHitZone::BorderEdge
-    );
+    // Midpoint grips resize one dimension; the rest of each border band moves the region.
+    for (point, zone) in [
+        ((200, 100), capture::SelectionHitZone::TopEdge),
+        ((100, 150), capture::SelectionHitZone::LeftEdge),
+        ((300, 150), capture::SelectionHitZone::RightEdge),
+        ((200, 200), capture::SelectionHitZone::BottomEdge),
+        ((150, 100), capture::SelectionHitZone::BorderEdge),
+        ((100, 125), capture::SelectionHitZone::BorderEdge),
+        ((300, 175), capture::SelectionHitZone::BorderEdge),
+        ((250, 200), capture::SelectionHitZone::BorderEdge),
+    ] {
+        assert_eq!(sel.hit_test_selection(point, 4, 8), zone, "{point:?}");
+    }
 
     // Interior
     assert_eq!(
