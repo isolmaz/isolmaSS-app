@@ -56,11 +56,11 @@ Blur is only a visual effect. For secrets use **Redact** (M): it replaces pixels
 
 ![Blurring an email address and redacting an API key](docs/media/redact.gif)
 
-**Ctrl+Shift+R** finds email addresses and phone numbers in the selection and covers each with a Redact box, as one undo step. Check the result: text recognition can miss what it cannot read.
+**Ctrl+Shift+R** finds email addresses and phone numbers in the selection and covers each with a Redact box, as one undo step. It errs on the side of privacy and also covers other long digit sequences that look like phone numbers, such as order numbers; Ctrl+Z undoes it, or delete a single box. Check the result: text recognition can miss what it cannot read.
 
 ## Copy text from an image
 
-**Ctrl+Shift+C** reads the text in the selection and copies it to the clipboard. Recognition runs on your computer with Windows' built-in text recognition, so nothing is sent anywhere; Windows needs a recognition language installed. It reads the image as exported, so redactions you already drew stay hidden.
+**Ctrl+Shift+C** reads the text in the selection and copies it to the clipboard. Recognition runs on your computer with Windows' built-in text recognition, so nothing is sent anywhere; Windows needs a recognition language installed. A notice in the editor confirms the copy (the editor closes afterwards if **Close after an action** is on). It reads the image as exported, so redactions you already drew stay hidden.
 
 ## Pin to screen
 
