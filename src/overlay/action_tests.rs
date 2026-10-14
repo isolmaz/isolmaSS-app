@@ -425,6 +425,20 @@ fn finishing_an_upload_reports_a_window_that_is_already_gone() {
     assert!(state.committed_result, "the upload itself had started");
 }
 
+#[test]
+fn an_upload_that_cannot_reach_its_window_does_not_wait_for_setup() {
+    let window = TestWindow::new();
+    let mut state = state_with_rectangle();
+    unsafe {
+        DestroyWindow(window.0).expect("the test window closes");
+    }
+    let error = state
+        .begin_upload(window.0)
+        .expect_err("the setup request cannot be posted");
+    assert!(!error.is_empty());
+    assert!(!state.setup_pending, "a failed request is not pending");
+}
+
 // ---- command menu -------------------------------------------------------------------
 
 fn state_with_toolbar() -> OverlayState {
