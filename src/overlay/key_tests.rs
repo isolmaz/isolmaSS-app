@@ -815,3 +815,36 @@ fn characters_without_a_text_box_are_ignored() {
     assert_eq!(state.handle_char(window.0, 'a' as u32).0, 0);
     assert!(!state.scene_dirty);
 }
+
+#[test]
+fn an_object_taller_than_the_selection_does_not_nudge_vertically() {
+    let window = TestWindow::new();
+    let mut state = state_with_rectangle();
+    state.objects[0].kind = AnnotationKind::Rectangle {
+        rect: Rect::new(150, 90, 200, 420),
+        color: [1, 2, 3, 255],
+        thickness: 2,
+    };
+    let id = state.objects[0].id;
+    state.set_selected_id(Some(id));
+    press(&mut state, &window, DOWN, 0);
+    assert_eq!(
+        rectangle_of(&state.objects[0]),
+        Rect::new(150, 90, 200, 420)
+    );
+    press(&mut state, &window, RIGHT, 0);
+    assert_eq!(
+        rectangle_of(&state.objects[0]),
+        Rect::new(151, 90, 201, 420)
+    );
+}
+
+#[test]
+fn arrows_with_a_selection_mode_but_no_region_change_nothing() {
+    let window = TestWindow::new();
+    let mut state = plain_state();
+    state.mode = OverlayMode::SelectionActive;
+    press(&mut state, &window, LEFT, 0);
+    assert_eq!(state.committed_selection(), None);
+    assert!(state.scene_dirty);
+}

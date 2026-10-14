@@ -652,4 +652,601 @@ mod tests {
         assert!(count_color(&state, Rect::new(100, 90, 300, 170), RED) > 0);
         assert_eq!(count_color(&state, Rect::new(54, 100, 66, 160), RED), 0);
     }
+
+    use windows::Win32::Graphics::Gdi::{CreateSolidBrush, FillRect};
+
+    const INK: [u8; 3] = [0x13, 0x14, 0x14];
+    const GREEN: [u8; 4] = [10, 200, 10, 255];
+    const PLUM: [u8; 4] = [200, 30, 30, 255];
+
+    fn bgr(color: COLORREF) -> [u8; 3] {
+        [(color.0 >> 16) as u8, (color.0 >> 8) as u8, color.0 as u8]
+    }
+
+    fn dimmed_rgb() -> [u8; 3] {
+        [DIMMED[0], DIMMED[1], DIMMED[2]]
+    }
+
+    fn solid(state: &OverlayState, value: u8) -> Vec<u8> {
+        vec![value; state.capture.width as usize * state.capture.height as usize * 4]
+    }
+
+    fn checker(state: &OverlayState) -> Vec<u8> {
+        let mut buffer = solid(state, 0);
+        for y in 0..state.capture.height {
+            for x in 0..state.capture.width {
+                if (x + y) % 2 == 0 {
+                    let offset = (y as usize * state.capture.width as usize + x as usize) * 4;
+                    buffer[offset..offset + 3].fill(200);
+                }
+            }
+        }
+        buffer
+    }
+
+    fn at(buffer: &[u8], x: i32, y: i32) -> [u8; 3] {
+        let offset = (y as usize * 640 + x as usize) * 4;
+        [buffer[offset], buffer[offset + 1], buffer[offset + 2]]
+    }
+
+    fn rectangle(id: usize, rect: Rect, thickness: i32) -> AnnotationObject {
+        AnnotationObject::new(
+            id,
+            AnnotationKind::Rectangle {
+                rect,
+                color: RED,
+                thickness,
+            },
+        )
+    }
+
+    #[test]
+    fn gdi_drawing_is_clipped_and_the_clip_is_restored_afterwards() {
+        let state = scene();
+        let brush = unsafe { CreateSolidBrush(COLORREF(0x0000_00ff)) };
+        let fill = || unsafe {
+            FillRect(
+                state.mem_dc,
+                &WIN_RECT {
+                    left: 0,
+                    top: 0,
+                    right: 100,
+                    bottom: 100,
+                },
+                brush,
+            );
+        };
+        state.with_clip(Rect::new(10, 10, 50, 50), fill);
+        assert_eq!(rgb_at(&state, 20, 20), [0, 0, 255]);
+        assert_eq!(rgb_at(&state, 60, 60), [0, 0, 0]);
+        fill();
+        assert_eq!(rgb_at(&state, 60, 60), [0, 0, 255]);
+        unsafe {
+            let _ = DeleteObject(HGDIOBJ(brush.0));
+        }
+    }
+
+    #[test]
+    fn restoring_outside_the_selection_leaves_the_inside_alone() {
+        let state = scene();
+        let mut buffer = solid(&state, 77);
+        state.restore_outside(
+            &mut buffer,
+            Rect::new(10, 10, 100, 100),
+            Rect::new(30, 30, 70, 70),
+        );
+        for (x, y) in [(10, 10), (20, 50), (80, 50), (50, 15), (50, 90)] {
+            assert_eq!(at(&buffer, x, y), dimmed_rgb(), "({x}, {y})");
+        }
+        for (x, y) in [(50, 50), (5, 5), (100, 100)] {
+            assert_eq!(at(&buffer, x, y), [77, 77, 77], "({x}, {y})");
+        }
+    }
+
+    #[test]
+    fn blur_pixelates_only_the_part_inside_the_selection() {
+        let state = scene();
+        let mut buffer = checker(&state);
+        let before = buffer.clone();
+        let blur = |rect| {
+            AnnotationObject::new(
+                1,
+                AnnotationKind::Blur {
+                    rect,
+                    block_size: 12,
+                },
+            )
+        };
+        state.render_effect(&blur(Rect::new(10, 10, 50, 50)), &mut buffer, SEL);
+        assert_eq!(
+            buffer, before,
+            "a blur wholly outside the selection does nothing"
+        );
+        state.render_effect(&blur(Rect::new(60, 60, 120, 120)), &mut buffer, SEL);
+        // Blocks start at the clipped corner; a 12 px block of a checkerboard averages out.
+        assert_eq!(at(&buffer, 100, 80), [100, 100, 100]);
+        assert_eq!(at(&buffer, 111, 91), [100, 100, 100]);
+        assert_eq!(at(&buffer, 70, 70), [200, 200, 200]);
+        assert_eq!(at(&buffer, 71, 70), [0, 0, 0]);
+    }
+
+    #[test]
+    fn redaction_fills_the_selected_part_with_ink() {
+        let state = scene();
+        let mut buffer = checker(&state);
+        let before = buffer.clone();
+        let redact = |rect| AnnotationObject::new(1, AnnotationKind::Redact { rect });
+        state.render_effect(&redact(Rect::new(10, 10, 50, 50)), &mut buffer, SEL);
+        assert_eq!(buffer, before);
+        state.render_effect(&redact(Rect::new(60, 60, 150, 150)), &mut buffer, SEL);
+        assert_eq!(at(&buffer, 100, 80), INK);
+        assert_eq!(at(&buffer, 149, 149), INK);
+        assert_eq!(at(&buffer, 99, 100), checker_value(99, 100));
+    }
+
+    fn checker_value(x: i32, y: i32) -> [u8; 3] {
+        if (x + y) % 2 == 0 { [200; 3] } else { [0; 3] }
+    }
+
+    #[test]
+    fn a_highlight_is_trimmed_to_the_selection_and_other_kinds_are_not_effects() {
+        let state = scene();
+        let mut buffer = solid(&state, 200);
+        let highlight = AnnotationObject::new(
+            1,
+            AnnotationKind::Highlight {
+                points: vec![(60, 150), (200, 150)],
+                color: [25, 196, 252, 255],
+                thickness: 5,
+            },
+        );
+        state.render_effect(&highlight, &mut buffer, SEL);
+        assert_eq!(
+            at(&buffer, 80, 150),
+            dimmed_rgb(),
+            "outside the selection it is undone"
+        );
+        assert_ne!(
+            at(&buffer, 150, 150),
+            [200, 200, 200],
+            "inside it tints the pixels"
+        );
+        let mut untouched = solid(&state, 5);
+        state.render_effect(&rectangle(2, SEL, 4), &mut untouched, SEL);
+        assert_eq!(untouched, solid(&state, 5));
+    }
+
+    #[test]
+    fn the_size_readout_is_a_card_with_its_text() {
+        let mut state = scene();
+        state.hud_rect = Some(Rect::new(300, 300, 436, 328));
+        state.render_capture_hud();
+        let card = bgr(crate::theme::tokens().card);
+        assert_eq!(rgb_at(&state, 306, 314), card);
+        let marked = (306..430)
+            .flat_map(|x| (303..325).map(move |y| (x, y)))
+            .filter(|&(x, y)| rgb_at(&state, x, y) != card)
+            .count();
+        assert!(marked > 20, "the label is drawn over the card");
+    }
+
+    #[test]
+    fn the_readout_lights_up_under_the_pointer_once_a_region_exists() {
+        let mut state = scene();
+        state.hud_rect = Some(Rect::new(300, 300, 436, 328));
+        state.pointer = (310, 310);
+        state.render_capture_hud();
+        assert_eq!(
+            rgb_at(&state, 306, 314),
+            bgr(crate::theme::tokens().accent_tint)
+        );
+    }
+
+    #[test]
+    fn nothing_is_drawn_without_a_readout_position_or_a_target() {
+        let mut state = scene();
+        state.render_capture_hud();
+        state.committed_selection = None;
+        state.mode = OverlayMode::Hovering;
+        state.hud_rect = Some(Rect::new(300, 300, 436, 328));
+        state.render_capture_hud();
+        assert_eq!(rgb_at(&state, 306, 314), [0, 0, 0]);
+    }
+
+    #[test]
+    fn the_readout_is_placed_clear_of_the_toolbar_and_the_open_wheel() {
+        let mut state = scene();
+        state.composite_scene();
+        let hud = state.hud_rect.expect("a readout is placed");
+        let toolbar = state.toolbar.as_ref().unwrap();
+        assert!(!rects_intersect(&hud, &toolbar.tool_bounds));
+        assert!(!rects_intersect(&hud, &toolbar.action_bounds));
+        assert_eq!(hud.width(), 136 * state.dpi as i32 / 96);
+        state.thickness_input = Some(String::new());
+        state.composite_scene();
+        let wheel = state
+            .toolbar
+            .as_ref()
+            .unwrap()
+            .wheel_bounds
+            .expect("an open wheel");
+        assert!(!rects_intersect(&state.hud_rect.unwrap(), &wheel));
+    }
+
+    #[test]
+    fn the_readout_needs_a_target_but_not_a_toolbar() {
+        let mut state = backbuffer_state(640, 480);
+        state.hud_rect = Some(Rect::new(1, 1, 2, 2));
+        state.place_capture_hud();
+        assert_eq!(state.hud_rect, None);
+        state.hover_snap_rect = Some(Rect::new(200, 200, 400, 300));
+        state.place_capture_hud();
+        let hud = state.hud_rect.expect("placed beside the hovered window");
+        assert!(!rects_intersect(&hud, &Rect::new(200, 200, 400, 300)));
+    }
+
+    #[test]
+    fn the_scene_follows_the_dpi_of_the_monitor_only_in_the_editor() {
+        let expected = selection_monitor_dpi(&scene().capture, SEL, 7);
+        let mut editor = scene();
+        editor.dpi = 7;
+        editor.composite_scene();
+        assert_eq!(editor.dpi, expected);
+        let mut export = scene();
+        export.dpi = 7;
+        export.composite_scene_with(CompositionPolicy::EXPORT);
+        assert_eq!(export.dpi, 7);
+    }
+
+    #[test]
+    fn unfinished_shapes_are_previewed_in_the_editor_but_never_exported() {
+        let red = |state: &OverlayState| count_color(state, SEL, RED);
+        let shapes = [
+            InProgressDrawing::Rectangle {
+                start: (120, 90),
+                current: (240, 170),
+            },
+            InProgressDrawing::Arrow {
+                start: (110, 100),
+                current: (250, 170),
+            },
+            InProgressDrawing::Pen {
+                points: vec![(120, 100), (180, 130), (240, 110)],
+            },
+        ];
+        for shape in shapes {
+            let mut editor = scene();
+            editor.active_tool = ToolKind::Pen;
+            editor.drawing_shape = Some(shape.clone());
+            editor.composite_scene();
+            assert!(red(&editor) > 20, "{shape:?}");
+            let mut export = scene();
+            export.active_tool = ToolKind::Pen;
+            export.drawing_shape = Some(shape);
+            export.composite_scene_with(CompositionPolicy::EXPORT);
+            assert_eq!(red(&export), 0);
+        }
+    }
+
+    #[test]
+    fn a_highlighter_stroke_in_progress_stays_inside_the_selection() {
+        let mut state = scene();
+        state.active_tool = ToolKind::Highlight;
+        state.active_color = [25, 196, 252, 255];
+        state.drawing_shape = Some(InProgressDrawing::Pen {
+            points: vec![(60, 150), (200, 150)],
+        });
+        state.composite_scene();
+        assert_eq!(rgb_at(&state, 80, 150), dimmed_rgb());
+        assert_ne!(rgb_at(&state, 150, 150), [0, 0, 0]);
+    }
+
+    #[test]
+    fn a_redaction_in_progress_is_shown_as_solid_ink() {
+        let mut state = scene();
+        state.drawing_shape = Some(InProgressDrawing::Blur {
+            start: (120, 100),
+            current: (180, 140),
+            redact: true,
+        });
+        state.composite_scene();
+        assert_eq!(rgb_at(&state, 150, 120), INK);
+    }
+
+    #[test]
+    fn a_blur_in_progress_and_a_finished_one_average_what_is_below_them() {
+        for finished in [false, true] {
+            let mut state = scene();
+            state
+                .objects
+                .push(rectangle(1, Rect::new(150, 100, 250, 170), 8));
+            let rect = Rect::new(140, 110, 164, 134);
+            if finished {
+                state.objects.push(AnnotationObject::new(
+                    2,
+                    AnnotationKind::Blur {
+                        rect,
+                        block_size: 12,
+                    },
+                ));
+            } else {
+                state.drawing_shape = Some(InProgressDrawing::Blur {
+                    start: (140, 110),
+                    current: (164, 134),
+                    redact: false,
+                });
+            }
+            state.composite_scene();
+            let block = rgb_at(&state, 141, 115);
+            assert_eq!(
+                rgb_at(&state, 145, 115),
+                block,
+                "uniform block (finished: {finished})"
+            );
+            assert_ne!(block, [0, 0, 0]);
+            assert_ne!(block, [RED[0], RED[1], RED[2]]);
+        }
+    }
+
+    #[test]
+    fn a_text_being_edited_is_drawn_live_instead_of_its_object() {
+        let mut state = scene();
+        state.objects.push(AnnotationObject::new(
+            5,
+            AnnotationKind::Text {
+                pos: (120, 90),
+                text: "AAAA".to_string(),
+                color: GREEN,
+                font_size: 22,
+            },
+        ));
+        let mut edit = TextEditState::new((200, 150), "BB".to_string(), PLUM, 22, Some(5));
+        edit.caret_visible = false;
+        state.set_text_edit(Some(edit));
+        state.composite_scene();
+        assert_eq!(
+            count_color(&state, SEL, GREEN),
+            0,
+            "the object is hidden while it is edited"
+        );
+        assert!(count_color(&state, SEL, PLUM) > 0, "the live text is drawn");
+        let mut export = scene();
+        export.objects = state.objects.clone();
+        export.composite_scene_with(CompositionPolicy::EXPORT);
+        assert!(count_color(&export, SEL, GREEN) > 0);
+    }
+
+    #[test]
+    fn the_caret_and_its_halo_follow_the_edit_state() {
+        let mut state = scene();
+        let edit = TextEditState::new((150, 120), String::new(), PLUM, 22, None);
+        let middle = {
+            let bounds = edit.bounds();
+            (bounds.top + bounds.bottom) / 2
+        };
+        state.set_text_edit(Some(edit));
+        state.composite_scene();
+        assert_eq!(rgb_at(&state, 150, middle), [PLUM[0], PLUM[1], PLUM[2]]);
+        assert_eq!(rgb_at(&state, 149, middle), [255, 255, 255]);
+        state.text_edit.as_mut().unwrap().caret_visible = false;
+        state.composite_scene();
+        assert_eq!(rgb_at(&state, 150, middle), [0, 0, 0]);
+    }
+
+    #[test]
+    fn selected_text_is_highlighted_and_the_box_gets_a_dotted_amber_frame() {
+        let mut state = scene();
+        let mut edit = TextEditState::new((150, 120), "hello".to_string(), PLUM, 22, None);
+        edit.anchor = Some(1);
+        edit.caret = 4;
+        let bounds = edit.bounds();
+        let left = 150 + crate::drawing::measure_text("h", 22).0;
+        let right = 150 + crate::drawing::measure_text("hell", 22).0;
+        state.set_text_edit(Some(edit));
+        state.composite_scene();
+        let highlight = Rect::new(left, bounds.top, right, bounds.bottom);
+        let selected = bgr(crate::theme::TEXT_SELECTION);
+        assert!(
+            count_color(
+                &state,
+                highlight,
+                [selected[0], selected[1], selected[2], 255]
+            ) > 20
+        );
+        assert!(
+            count_color(&state, highlight, PLUM) > 0,
+            "the glyphs are drawn over it"
+        );
+        let margin = super::super::text::text_box_margin(state.dpi);
+        let frame = bounds.inflate(margin, margin);
+        let top_line = Rect::new(frame.left, frame.top, frame.right, frame.top + 1);
+        assert!(count_color(&state, top_line, crate::theme::BRAND_AMBER_BGRA) > 0);
+    }
+
+    #[test]
+    fn redactions_cover_everything_below_them() {
+        let mut state = scene();
+        state
+            .objects
+            .push(rectangle(1, Rect::new(150, 100, 250, 170), 8));
+        state.objects.push(AnnotationObject::new(
+            2,
+            AnnotationKind::Redact {
+                rect: Rect::new(140, 90, 260, 180),
+            },
+        ));
+        state.composite_scene();
+        for (x, y) in [(145, 95), (200, 135), (150, 105)] {
+            assert_eq!(rgb_at(&state, x, y), INK, "({x}, {y})");
+        }
+        assert_eq!(count_color(&state, Rect::new(140, 90, 260, 180), RED), 0);
+    }
+
+    #[test]
+    fn a_highlight_object_tints_inside_the_selection_only() {
+        let mut state = scene();
+        state.objects.push(AnnotationObject::new(
+            1,
+            AnnotationKind::Highlight {
+                points: vec![(60, 150), (200, 150)],
+                color: [25, 196, 252, 255],
+                thickness: 5,
+            },
+        ));
+        state.composite_scene();
+        assert_eq!(rgb_at(&state, 80, 150), dimmed_rgb());
+        assert_ne!(rgb_at(&state, 150, 150), [0, 0, 0]);
+    }
+
+    #[test]
+    fn the_selected_object_gets_grips_in_the_editor_only() {
+        let mut state = scene();
+        state
+            .objects
+            .push(rectangle(1, Rect::new(150, 100, 250, 170), 4));
+        state.set_selected_id(Some(1));
+        state.composite_scene();
+        let half = (4 * state.dpi as i32 / 96).max(4);
+        assert_eq!(rgb_at(&state, 150 - half, 100 - half), [255, 255, 255]);
+        let mut export = scene();
+        export.objects = state.objects.clone();
+        export.set_selected_id(Some(1));
+        export.composite_scene_with(CompositionPolicy::EXPORT);
+        assert_eq!(rgb_at(&export, 150 - half, 100 - half), [0, 0, 0]);
+    }
+
+    #[test]
+    fn the_content_layer_is_cached_until_a_full_redraw() {
+        let window = crate::overlay::test_support::TestWindow::new();
+        let mut state = scene();
+        state
+            .objects
+            .push(rectangle(1, Rect::new(150, 100, 250, 170), 8));
+        state.cache_requested = true;
+        state.composite_scene();
+        assert_eq!(state.base_cache.len(), 640 * 480 * 4);
+        let old = Rect::new(144, 120, 156, 150);
+        let moved = Rect::new(194, 120, 206, 150);
+        state.objects[0].translate(50, 0);
+        state.composite_scene();
+        assert!(
+            count_color(&state, old, RED) > 0,
+            "the cached layer is reused"
+        );
+        assert_eq!(count_color(&state, moved, RED), 0);
+        state.redraw(window.0);
+        state.composite_scene();
+        assert_eq!(count_color(&state, old, RED), 0);
+        assert!(count_color(&state, Rect::new(194, 120, 206, 150), RED) > 0);
+    }
+
+    #[test]
+    fn nothing_is_cached_without_objects_or_for_the_export() {
+        let mut empty = scene();
+        empty.cache_requested = true;
+        empty.composite_scene();
+        assert!(empty.base_cache.is_empty());
+        let mut export = scene();
+        export
+            .objects
+            .push(rectangle(1, Rect::new(150, 100, 250, 170), 8));
+        export.cache_requested = true;
+        export.composite_scene_with(CompositionPolicy::EXPORT);
+        assert!(export.base_cache.is_empty());
+    }
+
+    fn items(state: &OverlayState) -> Vec<ToolbarItem> {
+        state
+            .toolbar
+            .as_ref()
+            .unwrap()
+            .buttons
+            .iter()
+            .map(|b| b.item)
+            .collect()
+    }
+
+    #[test]
+    fn the_style_buttons_follow_the_active_tool() {
+        for (tool, color, thickness) in [
+            (ToolKind::Rectangle, true, true),
+            (ToolKind::Highlight, true, true),
+            (ToolKind::Text, true, false),
+            (ToolKind::Step, true, false),
+            (ToolKind::Redact, false, false),
+            (ToolKind::Select, false, false),
+        ] {
+            let mut state = scene();
+            state.active_tool = tool;
+            state.composite_scene();
+            let shown = items(&state);
+            assert_eq!(shown.contains(&ToolbarItem::Color), color, "{tool:?}");
+            assert_eq!(
+                shown.contains(&ToolbarItem::Thickness),
+                thickness,
+                "{tool:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_style_buttons_follow_the_selected_object_with_the_select_tool() {
+        let step = AnnotationKind::Step {
+            pos: (150, 120),
+            number: 1,
+            color: RED,
+            radius: 12,
+        };
+        let blur = AnnotationKind::Blur {
+            rect: Rect::new(150, 100, 200, 150),
+            block_size: 12,
+        };
+        let frame = AnnotationKind::Rectangle {
+            rect: Rect::new(150, 100, 200, 150),
+            color: RED,
+            thickness: 4,
+        };
+        for (kind, color, thickness) in [
+            (step, true, false),
+            (blur, false, false),
+            (frame, true, true),
+        ] {
+            let mut state = scene();
+            state.active_tool = ToolKind::Select;
+            state.objects.push(AnnotationObject::new(1, kind.clone()));
+            state.set_selected_id(Some(1));
+            state.composite_scene();
+            let shown = items(&state);
+            assert_eq!(shown.contains(&ToolbarItem::Color), color, "{kind:?}");
+            assert_eq!(
+                shown.contains(&ToolbarItem::Thickness),
+                thickness,
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hover_and_press_survive_a_new_frame_only_while_their_button_is_shown() {
+        let mut state = scene();
+        state.composite_scene();
+        let toolbar = state.toolbar.as_mut().unwrap();
+        toolbar.hovered_item = Some(ToolbarItem::Color);
+        toolbar.pressed_item = Some(ToolbarItem::Tool(ToolKind::Arrow));
+        state.composite_scene();
+        let toolbar = state.toolbar.as_ref().unwrap();
+        assert_eq!(toolbar.hovered_item, Some(ToolbarItem::Color));
+        assert_eq!(
+            toolbar.pressed_item,
+            Some(ToolbarItem::Tool(ToolKind::Arrow))
+        );
+        state.active_tool = ToolKind::Redact;
+        state.composite_scene();
+        let toolbar = state.toolbar.as_ref().unwrap();
+        assert_eq!(toolbar.hovered_item, None, "the colour button is gone");
+        assert_eq!(
+            toolbar.pressed_item,
+            Some(ToolbarItem::Tool(ToolKind::Arrow))
+        );
+    }
 }

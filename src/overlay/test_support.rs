@@ -229,7 +229,7 @@ pub(super) fn export_state(save_dir: &TempDir) -> OverlayState {
 /// Points `%LOCALAPPDATA%` at a fresh temporary folder, where the editor looks for the
 /// protected upload keys, and restores it on drop. The tests run on one thread.
 pub(super) struct LocalAppData {
-    previous: Option<std::ffi::OsString>,
+    previous: std::ffi::OsString,
     pub(super) dir: std::path::PathBuf,
 }
 
@@ -239,7 +239,7 @@ impl LocalAppData {
             std::env::temp_dir().join(format!("isolmass-overlay-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a temporary LOCALAPPDATA");
-        let previous = std::env::var_os("LOCALAPPDATA");
+        let previous = std::env::var_os("LOCALAPPDATA").unwrap_or_default();
         // SAFETY: the test suite runs on a single thread (`--test-threads=1`), so no
         // other thread reads the environment while it changes.
         unsafe { std::env::set_var("LOCALAPPDATA", &dir) };
@@ -250,12 +250,7 @@ impl LocalAppData {
 impl Drop for LocalAppData {
     fn drop(&mut self) {
         // SAFETY: as in `new`.
-        unsafe {
-            match &self.previous {
-                Some(value) => std::env::set_var("LOCALAPPDATA", value),
-                None => std::env::remove_var("LOCALAPPDATA"),
-            }
-        }
+        unsafe { std::env::set_var("LOCALAPPDATA", &self.previous) };
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
@@ -273,16 +268,8 @@ impl ClipboardHold {
         let (ready_tx, ready) = mpsc::channel::<()>();
         let thread = std::thread::spawn(move || {
             let window = TestWindow::new();
-            let mut opened = false;
-            for _ in 0..100 {
-                if unsafe { OpenClipboard(window.0) }.is_ok() {
-                    opened = true;
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
+            unsafe { OpenClipboard(window.0) }.expect("the test holds the clipboard");
             ready_tx.send(()).expect("the test is waiting");
-            assert!(opened, "the clipboard could not be opened for the test");
             let _ = released.recv();
             unsafe {
                 let _ = CloseClipboard();

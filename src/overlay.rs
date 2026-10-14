@@ -1150,7 +1150,8 @@ impl OverlayState {
                             &error.to_string(),
                         ),
                     }
-                } else if let Some(edit) = &mut self.text_edit {
+                } else {
+                    let edit = self.text_edit.as_mut().expect("a text box is open");
                     let shift =
                         mods as u32 & windows::Win32::UI::Input::KeyboardAndMouse::MOD_SHIFT.0 != 0;
                     match vk {
@@ -1618,13 +1619,19 @@ impl OverlayState {
     /// Lightshot-style upload: encode the selection, hand it to the upload toast
     /// (which sends it in the background and shows the link), and close the
     /// editor right away. The first upload opens Cloudflare setup instead.
-    fn upload_selection(&mut self, hwnd: HWND) -> std::result::Result<(), String> {
+    fn begin_upload(
+        &mut self,
+        hwnd: HWND,
+    ) -> std::result::Result<
+        Option<(crate::upload::Prepared, windows::Win32::Foundation::POINT)>,
+        String,
+    > {
         let selection = self
             .committed_selection
             .ok_or_else(|| crate::i18n::t("Select a screen region first.").to_string())?;
         if self.settings.cloud_url.is_none() {
             if self.setup_pending {
-                return Ok(());
+                return Ok(None);
             }
             unsafe {
                 windows::Win32::UI::WindowsAndMessaging::PostMessageW(
@@ -1636,10 +1643,9 @@ impl OverlayState {
             }
             .map_err(|error| crate::i18n::tf("Could not open Cloudflare setup: {}", &[&error]))?;
             self.setup_pending = true;
-            return Ok(());
+            return Ok(None);
         }
-        let (prepared, anchor) = self.prepare_upload(selection)?;
-        self.start_upload(hwnd, prepared, anchor)
+        self.prepare_upload(selection).map(Some)
     }
 
     /// Encodes the selection as the export renders it, and finds the screen point the

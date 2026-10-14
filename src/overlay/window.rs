@@ -12,14 +12,13 @@ impl OverlayState {
         self.apply_command_menu_choice(hwnd, &buttons, choice);
     }
 
-    /// Hands the encoded selection to the upload toast, which sends it from a background
-    /// thread and shows the link, and closes the editor.
-    pub(super) fn start_upload(
-        &mut self,
-        hwnd: HWND,
-        prepared: crate::upload::Prepared,
-        anchor: windows::Win32::Foundation::POINT,
-    ) -> std::result::Result<(), String> {
+    /// Starts the upload of the selection: the first one opens Cloudflare setup instead.
+    /// The encoded image goes to the upload toast, which sends it from a background
+    /// thread and shows the link, and the editor closes.
+    pub(super) fn upload_selection(&mut self, hwnd: HWND) -> std::result::Result<(), String> {
+        let Some((prepared, anchor)) = self.begin_upload(hwnd)? else {
+            return Ok(());
+        };
         crate::toast::show_upload(prepared, anchor);
         self.finish_upload(hwnd)
     }
