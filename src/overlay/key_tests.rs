@@ -1002,3 +1002,173 @@ fn arrows_with_a_selection_mode_but_no_region_change_nothing() {
     assert_eq!(state.committed_selection(), None);
     assert!(state.scene_dirty);
 }
+
+// ---- Ctrl+A and the colour picker ----------------------------------------------------
+
+const LEFT_MONITOR: Rect = Rect::new(0, 0, 1000, 600);
+const RIGHT_MONITOR: Rect = Rect::new(1000, 0, 1600, 400);
+
+/// A 1000x600 primary monitor with a shorter 600x400 one to its right.
+fn two_monitor_state() -> OverlayState {
+    let mut capture = CaptureBuffer::dummy(1600, 600);
+    capture.monitors = vec![
+        crate::capture::Monitor {
+            bounds: LEFT_MONITOR,
+            primary: true,
+        },
+        crate::capture::Monitor {
+            bounds: RIGHT_MONITOR,
+            primary: false,
+        },
+    ];
+    OverlayState::create_test_state(Rc::new(capture))
+}
+
+#[test]
+fn ctrl_a_selects_the_whole_monitor_under_the_cursor_and_can_be_undone() {
+    let window = TestWindow::new();
+    let mut state = two_monitor_state();
+    state.set_selection_active(Rect::new(100, 100, 300, 300));
+    state.add_test_rectangle(Rect::new(120, 120, 200, 200));
+    let rectangle = state.objects[0].kind.clone();
+    state.select_whole_monitor(window.0, (1200, 100));
+    assert_eq!(state.committed_selection(), Some(RIGHT_MONITOR));
+    assert_eq!(state.mode(), OverlayMode::SelectionActive);
+    assert_eq!(state.objects[0].kind, rectangle, "annotations stay put");
+    assert!(state.scene_dirty);
+    press(&mut state, &window, key('z'), CTRL);
+    assert_eq!(
+        state.committed_selection(),
+        Some(Rect::new(100, 100, 300, 300))
+    );
+    assert_eq!(state.object_count(), 1);
+    press(&mut state, &window, key('y'), CTRL);
+    assert_eq!(state.committed_selection(), Some(RIGHT_MONITOR));
+}
+
+#[test]
+fn ctrl_a_picks_the_monitor_by_cursor_then_selection_centre_then_primary() {
+    let window = TestWindow::new();
+    let mut state = two_monitor_state();
+    state.select_whole_monitor(window.0, (500, 500));
+    assert_eq!(state.committed_selection(), Some(LEFT_MONITOR));
+    assert_eq!(state.mode(), OverlayMode::SelectionActive);
+    assert!(!state.history.can_undo(), "a first region has no history");
+
+    // The cursor is in the strip under the right monitor: the selection decides.
+    let mut state = two_monitor_state();
+    state.set_selection_active(Rect::new(1100, 50, 1300, 250));
+    state.select_whole_monitor(window.0, (1200, 500));
+    assert_eq!(state.committed_selection(), Some(RIGHT_MONITOR));
+
+    // Without a selection the primary monitor is taken.
+    let mut state = two_monitor_state();
+    state.select_whole_monitor(window.0, (1200, 500));
+    assert_eq!(state.committed_selection(), Some(LEFT_MONITOR));
+}
+
+#[test]
+fn ctrl_a_changes_nothing_when_the_monitor_is_selected_or_a_gesture_runs() {
+    let window = TestWindow::new();
+    let mut state = two_monitor_state();
+    state.set_selection_active(LEFT_MONITOR);
+    state.select_whole_monitor(window.0, (10, 10));
+    assert!(!state.history.can_undo());
+
+    let region = Rect::new(100, 100, 300, 300);
+    state.set_selection_active(region);
+    state.begin_test_rectangle_gesture((120, 120), (150, 150));
+    state.select_whole_monitor(window.0, (10, 10));
+    state.drawing_shape = None;
+    state.pending_reselect = Some((5, 5));
+    state.select_whole_monitor(window.0, (10, 10));
+    state.pending_reselect = None;
+    state.mode = OverlayMode::DraggingSelection;
+    state.select_whole_monitor(window.0, (10, 10));
+    assert_eq!(state.committed_selection(), Some(region));
+    assert_eq!(state.mode(), OverlayMode::DraggingSelection);
+    assert!(!state.history.can_undo());
+}
+
+#[test]
+fn the_ctrl_a_key_selects_a_monitor_while_plain_a_stays_the_arrow_tool() {
+    let window = TestWindow::new();
+    let mut state = plain_state();
+    press(&mut state, &window, key('a'), CTRL);
+    assert_eq!(state.committed_selection(), Some(Rect::new(0, 0, 800, 600)));
+    assert_eq!(state.mode(), OverlayMode::SelectionActive);
+    assert!(state.scene_dirty);
+    press(&mut state, &window, key('a'), 0);
+    assert_eq!(state.active_tool, ToolKind::Arrow);
+}
+
+#[test]
+fn ctrl_a_in_a_text_box_still_selects_the_text() {
+    let window = TestWindow::new();
+    let mut state = editing_state("abc");
+    let selection = state.committed_selection();
+    press(&mut state, &window, key('a'), CTRL);
+    assert_eq!(edit(&state).selection(), Some(0..3));
+    assert_eq!(state.committed_selection(), selection);
+}
+
+#[test]
+fn i_starts_the_colour_picker_and_escape_goes_back_to_the_previous_tool() {
+    let window = TestWindow::new();
+    let mut state = state_with_rectangle();
+    press(&mut state, &window, key('i'), 0);
+    assert_eq!(state.active_tool, ToolKind::ColorPicker);
+    assert_eq!(state.tool_before_pick, Some(ToolKind::Rectangle));
+    assert_eq!(state.settings.last_tool, ToolKind::Rectangle);
+    // Pressing I again keeps the tool to return to.
+    press(&mut state, &window, key('i'), 0);
+    assert_eq!(state.tool_before_pick, Some(ToolKind::Rectangle));
+    state.scene_dirty = false;
+    press(&mut state, &window, ESCAPE, 0);
+    assert_eq!(state.active_tool, ToolKind::Rectangle);
+    assert_eq!(state.tool_before_pick, None);
+    assert_eq!(state.mode(), OverlayMode::SelectionActive);
+    assert_eq!(state.object_count(), 1);
+    assert!(state.scene_dirty);
+}
+
+#[test]
+fn choosing_another_tool_ends_the_picker_and_saves_that_tool() {
+    let window = TestWindow::new();
+    let mut state = state_with_rectangle();
+    press(&mut state, &window, key('i'), 0);
+    press(&mut state, &window, key('p'), 0);
+    assert_eq!(state.active_tool, ToolKind::Pen);
+    assert_eq!(state.tool_before_pick, None);
+    assert_eq!(state.settings.last_tool, ToolKind::Pen);
+}
+
+#[test]
+fn i_without_a_region_does_not_arm_the_picker_so_escape_still_closes_the_editor() {
+    let window = TestWindow::new();
+    let mut state = plain_state();
+    assert_eq!(state.mode(), OverlayMode::Hovering);
+    press(&mut state, &window, key('i'), 0);
+    assert_eq!(state.active_tool, ToolKind::Rectangle);
+    assert_eq!(state.tool_before_pick, None);
+    assert!(!state.preferences_dirty);
+    press(&mut state, &window, ESCAPE, 0);
+    assert!(!window.exists(), "Esc from idle closes the editor");
+}
+
+#[test]
+fn discarding_the_region_while_picking_disarms_the_picker() {
+    let window = TestWindow::new();
+    let mut state = state_with_rectangle();
+    press(&mut state, &window, key('i'), 0);
+    assert_eq!(state.active_tool, ToolKind::ColorPicker);
+    state.activate_toolbar_item(window.0, ToolbarItem::Action(ToolbarAction::Cancel), (0, 0));
+    assert_eq!(state.mode(), OverlayMode::Hovering);
+    assert_eq!(state.active_tool, ToolKind::Rectangle);
+    assert_eq!(state.tool_before_pick, None);
+    press(&mut state, &window, ESCAPE, 0);
+    assert!(
+        !window.exists(),
+        "the first Esc is not swallowed by the picker"
+    );
+}

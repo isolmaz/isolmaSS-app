@@ -20,7 +20,7 @@ pub enum ToolbarAction {
 }
 
 /// The tools behind the "more tools" chevron, in rail order. A collapsed rail leaves them out.
-pub const MORE_TOOLS: [ToolKind; 7] = [
+pub const MORE_TOOLS: [ToolKind; 8] = [
     ToolKind::Ellipse,
     ToolKind::Line,
     ToolKind::Highlight,
@@ -28,6 +28,7 @@ pub const MORE_TOOLS: [ToolKind; 7] = [
     ToolKind::Step,
     ToolKind::Blur,
     ToolKind::Redact,
+    ToolKind::ColorPicker,
 ];
 
 fn is_more_tool(item: ToolbarItem) -> bool {
@@ -128,6 +129,7 @@ impl Toolbar {
             (ToolbarItem::Tool(ToolKind::Step), true),
             (ToolbarItem::Tool(ToolKind::Blur), true),
             (ToolbarItem::Tool(ToolKind::Redact), true),
+            (ToolbarItem::Tool(ToolKind::ColorPicker), true),
             (ToolbarItem::Action(ToolbarAction::Undo), can_undo),
             (ToolbarItem::Action(ToolbarAction::Redo), can_redo),
         ];
@@ -715,6 +717,7 @@ impl Toolbar {
                 ToolbarItem::Tool(ToolKind::Text) => crate::i18n::t("Text"),
                 ToolbarItem::Tool(ToolKind::Blur) => crate::i18n::t("Blur"),
                 ToolbarItem::Tool(ToolKind::Redact) => crate::i18n::t("Redact"),
+                ToolbarItem::Tool(ToolKind::ColorPicker) => crate::i18n::t("Pick color"),
                 ToolbarItem::MoreTools if self.expanded => crate::i18n::t("Hide more tools"),
                 ToolbarItem::MoreTools => crate::i18n::t("More tools"),
                 ToolbarItem::Action(ToolbarAction::Undo) => crate::i18n::t("Undo"),
@@ -831,6 +834,7 @@ fn shortcut(item: ToolbarItem) -> Option<&'static str> {
         ToolbarItem::Tool(ToolKind::Step) => "N",
         ToolbarItem::Tool(ToolKind::Blur) => "B",
         ToolbarItem::Tool(ToolKind::Redact) => "M",
+        ToolbarItem::Tool(ToolKind::ColorPicker) => "I",
         ToolbarItem::Action(ToolbarAction::Undo) => "Ctrl+Z",
         ToolbarItem::Action(ToolbarAction::Redo) => "Ctrl+Y",
         ToolbarItem::Action(ToolbarAction::Save) => "Ctrl+S",
@@ -903,6 +907,7 @@ fn draw_tool_icon(
         ToolKind::Text => 0xe8d2,
         ToolKind::Blur => 0xe727,
         ToolKind::Redact => 0xe73b,
+        ToolKind::ColorPicker => 0xef3c,
     };
     icon(hdc, rect, glyph, unit(16), ink, true);
 }
@@ -978,6 +983,7 @@ fn build_command_menu(buttons: &[ToolbarButton]) -> windows::core::Result<Option
                 crate::i18n::t("Blur (not secure redaction)").to_owned()
             }
             ToolbarItem::Tool(ToolKind::Redact) => crate::i18n::t("Redact (opaque)").to_owned(),
+            ToolbarItem::Tool(ToolKind::ColorPicker) => crate::i18n::t("Pick color").to_owned(),
             ToolbarItem::MoreTools => crate::i18n::t("Show or hide extra tools").to_owned(),
             ToolbarItem::Action(ToolbarAction::Undo) => crate::i18n::t("Undo").to_owned(),
             ToolbarItem::Action(ToolbarAction::Redo) => crate::i18n::t("Redo").to_owned(),
@@ -1408,6 +1414,7 @@ mod tests {
             ToolKind::Step,
             ToolKind::Blur,
             ToolKind::Redact,
+            ToolKind::ColorPicker,
         ] {
             let key = shortcut(ToolbarItem::Tool(tool)).expect("every tool has a key");
             assert_eq!(key.len(), 1, "{tool:?}");
@@ -1419,6 +1426,87 @@ mod tests {
         }
         assert_eq!(shortcut(ToolbarItem::Color), None);
         assert_eq!(shortcut(ToolbarItem::MoreTools), None);
+    }
+
+    #[test]
+    fn the_colour_picker_sits_behind_the_chevron_and_leaves_the_main_row_alone() {
+        let viewport = Rect::new(0, 0, 1920, 1040);
+        let selection = Rect::new(200, 100, 800, 600);
+        let build = |expanded: bool, tool: ToolKind| {
+            Toolbar::layout(
+                &selection,
+                viewport,
+                tool,
+                PRESET_COLORS[0],
+                3,
+                expanded,
+                true,
+                true,
+                false,
+                true,
+                true,
+                96,
+                None,
+            )
+        };
+        let picker = ToolbarItem::Tool(ToolKind::ColorPicker);
+        let collapsed = build(false, ToolKind::Rectangle);
+        let expanded = build(true, ToolKind::Rectangle);
+        assert!(!collapsed.buttons.iter().any(|button| button.item == picker));
+        let shown = expanded
+            .buttons
+            .iter()
+            .find(|button| button.item == picker)
+            .expect("the expanded rail lists the picker");
+        assert!(shown.is_enabled && !shown.is_checked);
+
+        // Every overflow tool, the picker included, adds a rail button and none an action
+        // bar button.
+        let more = MORE_TOOLS.len() as i32;
+        assert_eq!(
+            expanded.buttons.len(),
+            collapsed.buttons.len() + MORE_TOOLS.len()
+        );
+        assert_eq!(
+            expanded.tool_bounds.height() - collapsed.tool_bounds.height(),
+            more * (Toolbar::TOOL_BUTTON + 2)
+        );
+        assert_eq!(
+            expanded.action_bounds.width(),
+            collapsed.action_bounds.width()
+        );
+        for button in &expanded.buttons {
+            if matches!(
+                button.item,
+                ToolbarItem::Tool(_)
+                    | ToolbarItem::MoreTools
+                    | ToolbarItem::Action(ToolbarAction::Undo | ToolbarAction::Redo)
+            ) {
+                assert!(
+                    button.rect.top >= expanded.tool_bounds.top
+                        && button.rect.bottom <= expanded.tool_bounds.bottom,
+                    "{:?} leaves the rail",
+                    button.item
+                );
+            }
+        }
+
+        // An active picker is hidden behind the chevron, which then shows as lit.
+        let hidden = build(false, ToolKind::ColorPicker);
+        assert!(!hidden.buttons.iter().any(|button| button.item == picker));
+        let more = hidden
+            .buttons
+            .iter()
+            .find(|button| button.item == ToolbarItem::MoreTools)
+            .unwrap();
+        assert!(more.is_checked);
+        let active = build(true, ToolKind::ColorPicker);
+        assert!(
+            active
+                .buttons
+                .iter()
+                .any(|button| button.item == picker && button.is_checked)
+        );
     }
 
     #[test]

@@ -1054,6 +1054,7 @@ fn every_other_tool_has_its_own_centred_glyph_in_the_ink_colour() {
         ToolKind::Text,
         ToolKind::Blur,
         ToolKind::Redact,
+        ToolKind::ColorPicker,
     ];
     let renders: Vec<Vec<Rgb>> = tools
         .iter()
@@ -1135,6 +1136,7 @@ fn menu_label(item: ToolbarItem) -> String {
         Tool(ToolKind::Text) => "Text".into(),
         Tool(ToolKind::Blur) => "Blur (not secure redaction)".into(),
         Tool(ToolKind::Redact) => "Redact (opaque)".into(),
+        Tool(ToolKind::ColorPicker) => "Pick color".into(),
         MoreTools => "Show or hide extra tools".into(),
         Action(Undo) => "Undo".into(),
         Action(Redo) => "Redo".into(),
