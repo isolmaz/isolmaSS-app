@@ -23,6 +23,9 @@ const SIGNATURE_ASSET_NAME: &str = "isolmass-setup.exe.sig";
 const PINNED_PUBLIC_KEY: &[u8] = include_bytes!("../resources/update-public-key.blob");
 const MAX_METADATA_BYTES: usize = 2 * 1024 * 1024;
 const MAX_INSTALLER_BYTES: usize = 32 * 1024 * 1024;
+/// Overall limits per request. Stalls are caught earlier by the per-operation WinHTTP timeouts.
+const METADATA_DEADLINE: Duration = Duration::from_secs(45);
+const INSTALLER_DEADLINE: Duration = Duration::from_secs(300);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateInfo {
     pub version: String,
@@ -88,14 +91,13 @@ fn parse_https_url(url: &str) -> Result<(&str, String), String> {
     Ok((host, path))
 }
 
-fn http_get(host: &str, path: &str, maximum_size: usize) -> Result<Vec<u8>, String> {
-    http_get_inner(
-        host,
-        path,
-        maximum_size,
-        Instant::now() + Duration::from_secs(45),
-        0,
-    )
+fn http_get(
+    host: &str,
+    path: &str,
+    maximum_size: usize,
+    deadline: Duration,
+) -> Result<Vec<u8>, String> {
+    http_get_inner(host, path, maximum_size, Instant::now() + deadline, 0)
 }
 
 fn check_cancelled(deadline: Instant) -> Result<(), String> {
@@ -307,7 +309,12 @@ fn parse_version(value: &str) -> Option<[u64; 3]> {
 }
 
 pub fn check_for_update() -> Result<Option<UpdateInfo>, String> {
-    let bytes = http_get(RELEASE_API_HOST, RELEASE_API_PATH, MAX_METADATA_BYTES)?;
+    let bytes = http_get(
+        RELEASE_API_HOST,
+        RELEASE_API_PATH,
+        MAX_METADATA_BYTES,
+        METADATA_DEADLINE,
+    )?;
     let release: GithubRelease = serde_json::from_slice(&bytes)
         .map_err(|error| crate::i18n::tf("The update metadata is invalid: {}", &[&error]))?;
     if release.draft || release.prerelease {
@@ -373,27 +380,77 @@ pub fn check_for_update() -> Result<Option<UpdateInfo>, String> {
     }))
 }
 
-pub fn download_update(update: &UpdateInfo) -> Result<PathBuf, String> {
+/// Why staging an update failed. Each kind gets its own wording, so a dropped connection is
+/// never reported like a tampered installer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadFailure {
+    /// A release asset could not be fetched.
+    Network,
+    /// The signature, digest or embedded version does not match the signed release.
+    Integrity,
+    /// The verified installer could not be written to the staging folder.
+    Storage,
+}
+
+pub struct DownloadError {
+    pub kind: DownloadFailure,
+    pub message: String,
+}
+
+impl DownloadError {
+    fn network(message: String) -> Self {
+        Self {
+            kind: DownloadFailure::Network,
+            message,
+        }
+    }
+
+    fn integrity(message: String) -> Self {
+        Self {
+            kind: DownloadFailure::Integrity,
+            message,
+        }
+    }
+
+    fn storage(message: String) -> Self {
+        Self {
+            kind: DownloadFailure::Storage,
+            message,
+        }
+    }
+}
+
+pub fn download_update(update: &UpdateInfo) -> Result<PathBuf, DownloadError> {
     if parse_version(&update.version).is_none()
         || update.sha256.len() != 64
         || !update.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
-        return Err(crate::i18n::t("Invalid signed update metadata.").to_string());
+        return Err(DownloadError::integrity(
+            crate::i18n::t("Invalid signed update metadata.").to_string(),
+        ));
     }
-    let (signature_host, signature_path) = parse_https_url(&update.signature_url)?;
-    let signature = http_get(signature_host, &signature_path, 512)?;
-    verify_release_signature(&update.version, &update.sha256, &signature)?;
-    let (host, path) = parse_https_url(&update.download_url)?;
-    let bytes = http_get(host, &path, MAX_INSTALLER_BYTES)?;
-    if sha256_hex(&bytes)? != update.sha256 {
-        return Err(crate::i18n::t(
-            "The downloaded installer does not match its signed SHA-256 digest.",
-        )
-        .to_string());
+    let (signature_host, signature_path) =
+        parse_https_url(&update.signature_url).map_err(DownloadError::integrity)?;
+    let signature = http_get(signature_host, &signature_path, 512, METADATA_DEADLINE)
+        .map_err(DownloadError::network)?;
+    verify_release_signature(&update.version, &update.sha256, &signature)
+        .map_err(DownloadError::integrity)?;
+    let (host, path) = parse_https_url(&update.download_url).map_err(DownloadError::integrity)?;
+    let bytes = http_get(host, &path, MAX_INSTALLER_BYTES, INSTALLER_DEADLINE)
+        .map_err(DownloadError::network)?;
+    if sha256_hex(&bytes).map_err(DownloadError::integrity)? != update.sha256 {
+        return Err(DownloadError::integrity(
+            crate::i18n::t("The downloaded installer does not match its signed SHA-256 digest.")
+                .to_string(),
+        ));
     }
-    let root = update_directory()?;
-    std::fs::create_dir_all(&root)
-        .map_err(|error| crate::i18n::tf("Could not create the update folder: {}", &[&error]))?;
+    let root = update_directory().map_err(DownloadError::storage)?;
+    std::fs::create_dir_all(&root).map_err(|error| {
+        DownloadError::storage(crate::i18n::tf(
+            "Could not create the update folder: {}",
+            &[&error],
+        ))
+    })?;
     let destination = root.join(format!("isolmass-setup-{}.exe", update.version));
     let signature_destination = destination.with_extension("exe.sig");
     let temporary = root.join(format!(
@@ -402,22 +459,23 @@ pub fn download_update(update: &UpdateInfo) -> Result<PathBuf, String> {
         update.version,
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|error| error.to_string())?
+            .map_err(|error| DownloadError::storage(error.to_string()))?
             .as_nanos()
     ));
     let signature_temporary = temporary.with_extension("sig.tmp");
     let result = (|| {
-        write_staged_file(&temporary, &bytes)?;
-        check_cancelled(Instant::now() + Duration::from_secs(1))?;
-        if file_version(&temporary)? != update.version {
-            return Err(crate::i18n::t(
-                "The installer file version does not match the signed release.",
-            )
-            .to_string());
+        write_staged_file(&temporary, &bytes).map_err(DownloadError::storage)?;
+        check_cancelled(Instant::now() + Duration::from_secs(1)).map_err(DownloadError::network)?;
+        if file_version(&temporary).map_err(DownloadError::integrity)? != update.version {
+            return Err(DownloadError::integrity(
+                crate::i18n::t("The installer file version does not match the signed release.")
+                    .to_string(),
+            ));
         }
-        write_staged_file(&signature_temporary, &signature)?;
-        replace_staged_file(&temporary, &destination)?;
-        replace_staged_file(&signature_temporary, &signature_destination)?;
+        write_staged_file(&signature_temporary, &signature).map_err(DownloadError::storage)?;
+        replace_staged_file(&temporary, &destination).map_err(DownloadError::storage)?;
+        replace_staged_file(&signature_temporary, &signature_destination)
+            .map_err(DownloadError::storage)?;
         Ok(destination)
     })();
     if result.is_err() {
@@ -432,6 +490,150 @@ fn update_directory() -> Result<PathBuf, String> {
         .map(PathBuf::from)
         .ok_or_else(|| "%LOCALAPPDATA% is unavailable.".to_string())
         .map(|root| root.join("isolmaSS").join("updates"))
+}
+
+/// Whether `name` in the update folder is a leftover: a staged installer or signature for the
+/// running or an older version, or an interrupted download.
+fn is_stale_update_file(name: &str, current: [u64; 3]) -> bool {
+    if name.starts_with(".download-") && name.ends_with(".tmp") {
+        return true;
+    }
+    name.strip_prefix("isolmass-setup-")
+        .and_then(|rest| {
+            rest.strip_suffix(".exe.sig")
+                .or_else(|| rest.strip_suffix(".exe"))
+        })
+        .and_then(parse_version)
+        .is_some_and(|version| version <= current)
+}
+
+/// Runs on the update worker, so it never races a download. A finished installer cannot delete
+/// itself; the next launch removes it here.
+fn remove_stale_update_files() {
+    let Some(current) = parse_version(env!("CARGO_PKG_VERSION")) else {
+        return;
+    };
+    let Ok(root) = update_directory() else {
+        return;
+    };
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) => {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                crate::diagnostics::record("update cleanup", &error.to_string());
+            }
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| is_stale_update_file(name, current))
+            && let Err(error) = std::fs::remove_file(entry.path())
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::diagnostics::record("update cleanup", &error.to_string());
+        }
+    }
+}
+
+const APP_PATHS_KEY: PCWSTR =
+    w!("Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\isolmass.exe");
+
+/// The executable the installer registered under App Paths.
+fn registered_executable() -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_SZ, RegGetValueW};
+    let mut size = 0u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            APP_PATHS_KEY,
+            PCWSTR::null(),
+            RRF_RT_REG_SZ,
+            None,
+            None,
+            Some(&mut size),
+        )
+    };
+    if status.is_err() || !(2..=65_536).contains(&size) {
+        return None;
+    }
+    let mut buffer = vec![0u16; (size as usize).div_ceil(2)];
+    let mut size = (buffer.len() * 2) as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            APP_PATHS_KEY,
+            PCWSTR::null(),
+            RRF_RT_REG_SZ,
+            None,
+            Some(buffer.as_mut_ptr().cast()),
+            Some(&mut size),
+        )
+    };
+    if status.is_err() {
+        return None;
+    }
+    let length = buffer
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(buffer.len());
+    Some(PathBuf::from(std::ffi::OsString::from_wide(
+        &buffer[..length],
+    )))
+}
+
+/// An installed copy runs from the folder the installer registered and has its uninstaller
+/// beside it. The portable ZIP never does, so it must not install over or register anything.
+fn is_installed_copy(
+    exe_dir: &Path,
+    registered_dir: Option<&Path>,
+    uninstaller_present: bool,
+) -> bool {
+    uninstaller_present
+        && registered_dir
+            .is_some_and(|dir| dir.as_os_str().eq_ignore_ascii_case(exe_dir.as_os_str()))
+}
+
+/// False for the portable build, whose update offer opens the release page instead.
+pub fn runs_from_installation() -> bool {
+    let parent_of = |path: PathBuf| {
+        std::fs::canonicalize(path)
+            .ok()
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+    };
+    let Some(exe_dir) = std::env::current_exe().ok().and_then(parent_of) else {
+        return false;
+    };
+    let registered_dir = registered_executable().and_then(parent_of);
+    is_installed_copy(
+        &exe_dir,
+        registered_dir.as_deref(),
+        exe_dir.join("uninstall.exe").is_file(),
+    )
+}
+
+/// Opens a release page in the browser; only the GitHub hosts are accepted.
+pub fn open_release_page(url: &str) -> Result<(), String> {
+    parse_https_url(url)?;
+    let url_wide = wide(url);
+    let result = unsafe {
+        ShellExecuteW(
+            HWND::default(),
+            w!("open"),
+            PCWSTR(url_wide.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if result.0 as isize <= 32 {
+        Err(crate::i18n::tf("Windows could not open '{}'.", &[&url]))
+    } else {
+        Ok(())
+    }
 }
 
 fn write_staged_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -629,9 +831,7 @@ pub fn launch_installer(path: &Path) -> Result<(), String> {
 
 mod job;
 use job::CANCELLED;
-pub use job::{
-    configure, is_checking, poll, run_automatic_update_check, run_manual_update_check, shutdown,
-};
+pub use job::{configure, is_checking, poll, run_manual_update_check, run_startup_work, shutdown};
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -694,5 +894,50 @@ mod tests {
             sha256_hex(b"abc").expect("SHA-256"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    #[test]
+    fn only_installers_for_the_running_or_older_versions_and_interrupted_downloads_are_stale() {
+        let current = [0, 6, 3];
+        for name in [
+            "isolmass-setup-0.6.3.exe",
+            "isolmass-setup-0.6.3.exe.sig",
+            "isolmass-setup-0.5.12.exe",
+            "isolmass-setup-0.6.2.exe.sig",
+            ".download-4120-0.6.4-1760000000.tmp",
+            ".download-4120-0.6.4-1760000000.sig.tmp",
+        ] {
+            assert!(is_stale_update_file(name, current), "{name}");
+        }
+        for name in [
+            "isolmass-setup-0.6.4.exe",
+            "isolmass-setup-0.6.4.exe.sig",
+            "isolmass-setup-1.0.0.exe",
+            "isolmass-setup-latest.exe",
+            "isolmass-setup-0.6.3.exe.bak",
+            "isolmass-setup-.exe",
+            "notes.txt",
+            "download-1.tmp",
+            ".download-4120-0.6.4-1760000000.part",
+        ] {
+            assert!(!is_stale_update_file(name, current), "{name}");
+        }
+    }
+
+    #[test]
+    fn only_the_registered_folder_with_an_uninstaller_counts_as_installed() {
+        let installed = Path::new(r"C:\Users\me\AppData\Local\isolmaSS");
+        assert!(is_installed_copy(
+            installed,
+            Some(Path::new(r"c:\users\ME\appdata\local\ISOLMASS")),
+            true
+        ));
+        assert!(!is_installed_copy(installed, Some(installed), false));
+        assert!(!is_installed_copy(
+            Path::new(r"D:\Tools\isolmaSS"),
+            Some(installed),
+            true
+        ));
+        assert!(!is_installed_copy(installed, None, true));
     }
 }

@@ -1314,4 +1314,25 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "You can close this tab and return to isolmaSS.",
         "Bu sekmeyi kapatıp isolmaSS'e dönebilirsiniz.",
     ),
+    (
+        "The update could not be downloaded. Check your connection and try again.",
+        "Güncelleme indirilemedi. Bağlantınızı kontrol edip yeniden deneyin.",
+    ),
+    (
+        "The update could not be saved. Check free disk space and folder access, then try again.",
+        "Güncelleme kaydedilemedi. Boş disk alanını ve klasör erişimini kontrol edip yeniden deneyin.",
+    ),
+    (
+        "isolmaSS {} is available. This portable copy does not update itself. Open the download page to get the new portable ZIP?",
+        "isolmaSS {} sürümü kullanılabilir. Bu taşınabilir kopya kendini güncellemez. Yeni taşınabilir ZIP'i almak için indirme sayfası açılsın mı?",
+    ),
+    (
+        "Could not open the download page",
+        "İndirme sayfası açılamadı",
+    ),
+    ("isolmaSS is ready", "isolmaSS hazır"),
+    (
+        "Press {} to capture. isolmaSS waits in the notification area.",
+        "Ekran görüntüsü almak için {} kısayolunu kullanın. isolmaSS bildirim alanında bekler.",
+    ),
 ];

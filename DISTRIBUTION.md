@@ -29,7 +29,7 @@ The installer is not Authenticode-signed; Windows SmartScreen may display a repu
 
 The NSIS installer installs per user at `%LOCALAPPDATA%\isolmaSS` without elevation. `isolmass.exe` runs as a background tray app; installer startup is not tied to double-clicking the EXE. Updates pass `/S /UPDATE /WAITPID=<pid>` after editing/settings and synchronous clipboard/save work finishes. The installer waits for the old process, stages the new executable, keeps `isolmass.previous.exe`, runs `--health-check` on the installed candidate, starts the tray and checks that the window is present. If activation fails, it restores the executable and display version, displays an error and retains the backup when restoration is prevented. Never delete a remaining `.previous.exe` without diagnosing the failed transaction.
 
-The rollback covers application activation, **not** user screenshots or settings. Users should retain backups of personal data independently. Successful updates remove the rollback executable. Uninstall offers to keep personal configuration and screenshots.
+The rollback covers application activation, **not** user screenshots or settings. Users should retain backups of personal data independently. Successful updates remove the rollback executable. Uninstall always removes the program and its downloaded updates, then asks whether to also remove your settings, Cloudflare connection keys and logs (the default is No). Screenshots and the Worker in your Cloudflare account are never touched.
 
 ## Cloudflare deployment
 
