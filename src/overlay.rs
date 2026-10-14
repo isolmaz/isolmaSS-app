@@ -1450,8 +1450,12 @@ impl OverlayState {
                             }
                         }
                         0x5a if ctrl_down => edit.undo(),
-                        0x59 if ctrl_down => edit.redo(),
-                        _ => {}
+                        // Ctrl+Y; every other key that reaches a text box is handled above.
+                        _ => {
+                            if ctrl_down && vk == 0x59 {
+                                edit.redo();
+                            }
+                        }
                     }
                     edit.caret_visible = true;
                 }

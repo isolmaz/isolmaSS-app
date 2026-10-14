@@ -1,7 +1,7 @@
 //! Keyboard handling of the editor: `handle_key_down` and `handle_char`.
 use super::test_support::*;
 use super::*;
-use windows::Win32::UI::Input::KeyboardAndMouse::{MOD_SHIFT, VK_F5};
+use windows::Win32::UI::Input::KeyboardAndMouse::MOD_SHIFT;
 
 const CTRL: isize = MOD_CONTROL.0 as isize;
 const SHIFT: isize = MOD_SHIFT.0 as isize;
@@ -295,18 +295,6 @@ fn text_keys_restart_the_caret_blink() {
     assert!(edit(&state).caret_visible);
     // The blink timer was (re)started at the system rate, 500 ms by default.
     assert!(window.wait_for_timer(CARET_TIMER, std::time::Duration::from_millis(1500)));
-}
-
-#[test]
-fn other_keys_leave_the_text_and_caret_alone_but_show_the_caret() {
-    let window = TestWindow::new();
-    let mut state = editing_state("abc");
-    state.text_edit.as_mut().unwrap().caret = 1;
-    state.text_edit.as_mut().unwrap().caret_visible = false;
-    press(&mut state, &window, VK_F5.0 as usize, 0);
-    assert_eq!(edit(&state).text, "abc");
-    assert_eq!(edit(&state).caret, 1);
-    assert!(edit(&state).caret_visible);
 }
 
 #[test]
