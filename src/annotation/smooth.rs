@@ -11,8 +11,13 @@ use windows::Win32::Graphics::GdiPlus::{
     GdipDeleteGraphics, GdipDeletePen, GdipDrawLines, GdipDrawRectangle, GdipFillPolygon,
     GdipSetPenEndCap, GdipSetPenLineJoin, GdipSetPenStartCap, GdipSetPixelOffsetMode,
     GdipSetSmoothingMode, GpGraphics, GpPen, GpSolidFill, LineCapRound, LineJoinRound,
-    Ok as StatusOk, PixelOffsetModeHalf, PointF, SmoothingModeAntiAlias8x8, UnitPixel,
+    Ok as StatusOk, PixelOffsetModeHalf, PointF, SmoothingModeAntiAlias8x8, Status, UnitPixel,
 };
+
+/// `Some(())` when a GDI+ call succeeded, so a chain of calls stops at the first failure.
+fn ok(status: Status) -> Option<()> {
+    (status == StatusOk).then_some(())
+}
 
 /// Anti-aliased drawing surface over a device context. Deleting it flushes the drawing,
 /// so every pixel is in the DIB again before any CPU pass reads it.
@@ -20,13 +25,9 @@ struct Graphics(*mut GpGraphics);
 
 impl Graphics {
     fn new(hdc: HDC) -> Option<Self> {
-        if !crate::drawing::gdiplus_ready() {
-            return None;
-        }
+        crate::drawing::gdiplus_ready().then_some(())?;
         let mut raw = std::ptr::null_mut();
-        if unsafe { GdipCreateFromHDC(hdc, &mut raw) } != StatusOk {
-            return None;
-        }
+        ok(unsafe { GdipCreateFromHDC(hdc, &mut raw) })?;
         let graphics = Self(raw);
         unsafe {
             GdipSetSmoothingMode(raw, SmoothingModeAntiAlias8x8);
@@ -52,11 +53,7 @@ impl Pen {
     /// mitred like a GDI frame.
     fn new(color: [u8; 4], thickness: i32, round: bool) -> Option<Self> {
         let mut raw = std::ptr::null_mut();
-        let created =
-            unsafe { GdipCreatePen1(argb(color), thickness.max(1) as f32, UnitPixel, &mut raw) };
-        if created != StatusOk {
-            return None;
-        }
+        ok(unsafe { GdipCreatePen1(argb(color), thickness.max(1) as f32, UnitPixel, &mut raw) })?;
         let pen = Self(raw);
         if round {
             unsafe {
@@ -82,9 +79,7 @@ struct Brush(*mut GpSolidFill);
 impl Brush {
     fn new(color: [u8; 4]) -> Option<Self> {
         let mut raw = std::ptr::null_mut();
-        if unsafe { GdipCreateSolidFill(argb(color), &mut raw) } != StatusOk {
-            return None;
-        }
+        ok(unsafe { GdipCreateSolidFill(argb(color), &mut raw) })?;
         Some(Self(raw))
     }
 }
@@ -134,25 +129,25 @@ pub(super) fn frame(hdc: HDC, rect: Rect, color: [u8; 4], thickness: i32) -> boo
     if rect.width() < 2 || rect.height() < 2 {
         return false;
     }
-    let Some(graphics) = Graphics::new(hdc) else {
-        return false;
-    };
-    let Some(pen) = Pen::new(color, thickness, false) else {
-        return false;
-    };
+    draw_frame(hdc, rect, color, thickness).is_some()
+}
+
+fn draw_frame(hdc: HDC, rect: Rect, color: [u8; 4], thickness: i32) -> Option<()> {
+    let graphics = Graphics::new(hdc)?;
+    let pen = Pen::new(color, thickness, false)?;
     let (x, y, width, height) = frame_outline(rect, thickness);
-    unsafe { GdipDrawRectangle(graphics.0, pen.0, x, y, width, height) == StatusOk }
+    ok(unsafe { GdipDrawRectangle(graphics.0, pen.0, x, y, width, height) })
 }
 
 /// Freehand stroke through every input point, with round caps and joins.
 pub(super) fn polyline(hdc: HDC, points: &[(i32, i32)], color: [u8; 4], thickness: i32) -> bool {
+    draw_polyline(hdc, points, color, thickness).is_some()
+}
+
+fn draw_polyline(hdc: HDC, points: &[(i32, i32)], color: [u8; 4], thickness: i32) -> Option<()> {
     thread_local! { static SCRATCH: RefCell<Vec<PointF>> = const { RefCell::new(Vec::new()) }; }
-    let Some(graphics) = Graphics::new(hdc) else {
-        return false;
-    };
-    let Some(pen) = Pen::new(color, thickness, true) else {
-        return false;
-    };
+    let graphics = Graphics::new(hdc)?;
+    let pen = Pen::new(color, thickness, true)?;
     let center = pen_center(thickness);
     SCRATCH.with(|scratch| {
         let mut scratch = scratch.borrow_mut();
@@ -162,9 +157,7 @@ pub(super) fn polyline(hdc: HDC, points: &[(i32, i32)], color: [u8; 4], thicknes
                 .iter()
                 .map(|&(x, y)| point(x as f64, y as f64, center)),
         );
-        unsafe {
-            GdipDrawLines(graphics.0, pen.0, scratch.as_ptr(), scratch.len() as i32) == StatusOk
-        }
+        ok(unsafe { GdipDrawLines(graphics.0, pen.0, scratch.as_ptr(), scratch.len() as i32) })
     })
 }
 
@@ -176,15 +169,19 @@ pub(super) fn arrow(
     color: [u8; 4],
     thickness: i32,
 ) -> bool {
-    let Some(graphics) = Graphics::new(hdc) else {
-        return false;
-    };
-    let Some(pen) = Pen::new(color, thickness, true) else {
-        return false;
-    };
-    let Some(brush) = Brush::new(color) else {
-        return false;
-    };
+    draw_arrow(hdc, start, geometry, color, thickness).is_some()
+}
+
+fn draw_arrow(
+    hdc: HDC,
+    start: (i32, i32),
+    geometry: &ArrowGeometry,
+    color: [u8; 4],
+    thickness: i32,
+) -> Option<()> {
+    let graphics = Graphics::new(hdc)?;
+    let pen = Pen::new(color, thickness, true)?;
+    let brush = Brush::new(color)?;
     let center = pen_center(thickness);
     let shaft = [
         point(start.0 as f64, start.1 as f64, center),
@@ -192,20 +189,35 @@ pub(super) fn arrow(
     ];
     let head = geometry.head.map(|(x, y)| point(x, y, center));
     unsafe {
-        GdipDrawLines(graphics.0, pen.0, shaft.as_ptr(), shaft.len() as i32) == StatusOk
-            && GdipFillPolygon(
+        ok(GdipDrawLines(
+            graphics.0,
+            pen.0,
+            shaft.as_ptr(),
+            shaft.len() as i32,
+        ))
+        .and_then(|()| {
+            ok(GdipFillPolygon(
                 graphics.0,
                 brush.0.cast(),
                 head.as_ptr(),
                 head.len() as i32,
                 FillModeAlternate,
-            ) == StatusOk
+            ))
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_ok_status_counts_as_success() {
+        use windows::Win32::Graphics::GdiPlus::{GenericError, InvalidParameter};
+        assert_eq!(ok(StatusOk), Some(()));
+        assert_eq!(ok(InvalidParameter), None);
+        assert_eq!(ok(GenericError), None);
+    }
 
     #[test]
     fn argb_is_opaque_and_orders_channels() {

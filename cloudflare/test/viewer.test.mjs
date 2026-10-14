@@ -1,6 +1,6 @@
-import { reset } from 'cloudflare:test';
+import { reset, runInDurableObject } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { PASSWORD, admin, bytesOf, call, expectSameBytes, jpeg, navigate, png, sql, upload } from './helpers.mjs';
+import { PASSWORD, admin, bytesOf, call, expectSameBytes, jpeg, navigate, png, sql, store, upload } from './helpers.mjs';
 
 const ROBOTS = 'noindex, nofollow, noimageindex';
 const THIRTY_DAYS = 30 * 86400;
@@ -63,6 +63,24 @@ describe('viewer page', () => {
     expect(html).not.toContain('og:image:width');
     expect(html).not.toMatch(/<img [^>]*width=/);
     expect(html).toContain(`download="${await expectedStem(id)}.jpg"`);
+  });
+
+  it('escapes the address it embeds in the og: tags, whatever host the Durable Object is given', async () => {
+    // The runtime only forwards hostnames made of letters, digits, hyphens and underscores to the
+    // Durable Object, so this calls its fetch directly. Quotes, ampersands and apostrophes are valid
+    // in a hostname, and none of them may break out of an attribute.
+    const host = `a&b'c"d.test`;
+    const id = await upload(png());
+    const html = await runInDurableObject(store(), async instance => {
+      const request = new Request(`https://${host}/i/${id}`, { headers: { 'Sec-Fetch-Dest': 'document' } });
+      const response = await instance.fetch(request);
+      expect(response.status).toBe(200);
+      return await response.text();
+    });
+    const escaped = 'a&amp;b&#39;c&quot;d.test';
+    expect(html).toContain(`<meta property="og:image" content="https://${escaped}/i/${id}.png">`);
+    expect(html).toContain(`<meta name="twitter:image" content="https://${escaped}/i/${id}.png">`);
+    expect(html).not.toContain(host);
   });
 
   it('is built from the stored size, which an older Worker never recorded', async () => {

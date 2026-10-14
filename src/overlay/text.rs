@@ -24,6 +24,8 @@ mod ime {
         pub fn ImmReleaseContext(hwnd: HWND, himc: *mut c_void) -> i32;
         pub fn ImmSetCompositionWindow(himc: *mut c_void, form: *const CompositionForm) -> i32;
         pub fn ImmSetCompositionFontW(himc: *mut c_void, font: *const LOGFONTW) -> i32;
+        #[cfg(test)]
+        pub fn ImmGetCompositionWindow(himc: *mut c_void, form: *mut CompositionForm) -> i32;
     }
 }
 
@@ -629,5 +631,243 @@ mod tests {
         assert_eq!((state.text.as_str(), state.caret), ("ac", 1));
         assert_eq!(state.selected_text(), None);
         assert!(!state.delete_selected());
+    }
+
+    // ---- editing --------------------------------------------------------------------
+
+    #[test]
+    fn the_frame_margin_scales_with_the_dpi_and_never_vanishes() {
+        assert_eq!(text_box_margin(96), 4);
+        assert_eq!(text_box_margin(192), 8);
+        assert_eq!(text_box_margin(10), 1);
+    }
+
+    #[test]
+    fn typing_inserts_at_the_caret_and_undo_redo_walk_the_edits() {
+        let mut state = edit("ac");
+        state.move_to(1, false);
+        state.insert_text("b");
+        assert_eq!((state.text.as_str(), state.caret), ("abc", 2));
+        state.undo();
+        assert_eq!((state.text.as_str(), state.caret), ("ac", 1));
+        state.redo();
+        assert_eq!((state.text.as_str(), state.caret), ("abc", 2));
+        // Nothing left to redo or undo past the ends.
+        state.redo();
+        assert_eq!(state.text, "abc");
+        state.undo();
+        state.undo();
+        assert_eq!(state.text, "ac");
+        // A new edit forgets the undone ones.
+        state.insert_text("x");
+        state.redo();
+        assert_eq!(state.text, "axc");
+    }
+
+    #[test]
+    fn only_the_last_thirty_two_edits_can_be_undone() {
+        let mut state = edit("");
+        for _ in 0..40 {
+            state.insert_text("x");
+        }
+        for _ in 0..50 {
+            state.undo();
+        }
+        assert_eq!(state.text.len(), 8);
+    }
+
+    #[test]
+    fn inserting_replaces_the_selection_and_ignores_empty_text() {
+        let mut state = edit("hello");
+        state.insert_text("");
+        assert_eq!(state.text, "hello");
+        assert!(state.undo.is_empty());
+        state.anchor = Some(1);
+        state.caret = 4;
+        state.insert_text("ipp");
+        assert_eq!(
+            (state.text.as_str(), state.caret, state.anchor),
+            ("hippo", 4, None)
+        );
+    }
+
+    #[test]
+    fn text_longer_than_the_limit_is_cut_at_a_character_boundary() {
+        let mut state = edit(&"a".repeat(16_383));
+        state.insert_text("é");
+        assert_eq!(
+            state.text.len(),
+            16_383,
+            "a two-byte character does not fit in one byte"
+        );
+        state.insert_text("bcd");
+        assert_eq!(state.text.len(), 16_384);
+        assert!(state.text.ends_with('b'));
+        state.insert_text("more");
+        assert_eq!(state.text.len(), 16_384);
+    }
+
+    #[test]
+    fn a_tab_becomes_four_spaces_and_other_characters_are_inserted_as_they_are() {
+        let mut state = edit("");
+        state.insert_char('\t');
+        state.insert_char('é');
+        assert_eq!(state.text, "    é");
+        assert_eq!(state.caret, 5);
+    }
+
+    #[test]
+    fn backspace_removes_the_selection_or_the_character_before_the_caret() {
+        let mut state = edit("héllo");
+        assert!(state.backspace());
+        assert_eq!((state.text.as_str(), state.caret), ("héll", 4));
+        state.anchor = Some(1);
+        state.caret = 3;
+        assert!(state.backspace());
+        assert_eq!(
+            (state.text.as_str(), state.caret, state.anchor),
+            ("hl", 1, None)
+        );
+        state.move_to(0, false);
+        assert!(!state.backspace());
+        assert_eq!(state.text, "hl");
+    }
+
+    #[test]
+    fn delete_removes_the_selection_or_the_character_after_the_caret() {
+        let mut state = edit("héllo");
+        assert!(!state.delete());
+        state.move_to(1, false);
+        assert!(state.delete());
+        assert_eq!((state.text.as_str(), state.caret), ("hllo", 1));
+        state.anchor = Some(0);
+        assert!(state.delete());
+        assert_eq!(
+            (state.text.as_str(), state.caret, state.anchor),
+            ("llo", 0, None)
+        );
+    }
+
+    #[test]
+    fn the_caret_moves_one_character_and_stops_at_the_ends() {
+        let mut state = edit("ab");
+        assert!(!state.move_right());
+        assert!(state.move_left());
+        assert_eq!(state.caret, 1);
+        assert!(state.move_left());
+        assert!(!state.move_left());
+        assert!(state.move_right());
+        assert_eq!(state.caret, 1);
+    }
+
+    #[test]
+    fn select_all_covers_the_whole_text() {
+        let mut state = edit("héllo");
+        state.select_all();
+        assert_eq!(state.selection(), Some(0..5));
+        assert_eq!(state.selected_text().as_deref(), Some("héllo"));
+    }
+
+    // ---- geometry -------------------------------------------------------------------
+
+    #[test]
+    fn the_caret_offset_is_the_width_of_the_text_before_it() {
+        let mut state = edit("héllo");
+        state.move_to(2, false);
+        assert_eq!(
+            state.caret_offset(),
+            crate::drawing::measure_text("hé", 22).0
+        );
+        state.move_to(0, false);
+        assert_eq!(state.caret_offset(), 0);
+    }
+
+    #[test]
+    fn the_box_is_the_text_extent_and_at_least_one_em_wide() {
+        let mut state = TextEditState::new((30, 40), "hello".to_string(), [0, 0, 0, 255], 22, None);
+        let (width, height) = crate::drawing::measure_text("hello", 22);
+        assert_eq!(
+            state.bounds(),
+            Rect::new(30, 40, 30 + width.max(22), 40 + height)
+        );
+        state.text.clear();
+        let (_, empty_height) = crate::drawing::measure_text("", 22);
+        assert_eq!(state.bounds(), Rect::new(30, 40, 52, 40 + empty_height));
+    }
+
+    #[test]
+    fn the_box_includes_the_margin_its_frame_is_drawn_in() {
+        let state = TextEditState::new((30, 40), "hello".to_string(), [0, 0, 0, 255], 22, None);
+        let bounds = state.bounds();
+        assert!(state.contains((30, 40), 96));
+        assert!(state.contains((bounds.left - 4, bounds.top - 4), 96));
+        assert!(!state.contains((bounds.left - 5, bounds.top), 96));
+        assert!(state.contains((bounds.left - 8, bounds.top), 192));
+        assert!(!state.contains((bounds.right + 20, bounds.top), 96));
+    }
+
+    #[test]
+    fn a_click_picks_the_nearest_character_boundary() {
+        let state = TextEditState::new((30, 40), "héllo".to_string(), [0, 0, 0, 255], 22, None);
+        let boundary = 30 + crate::drawing::measure_text("hé", 22).0;
+        assert_eq!(state.caret_at(boundary), 2);
+        assert_eq!(state.caret_at(0), 0);
+        assert_eq!(state.caret_at(10_000), 5);
+    }
+
+    // ---- characters from the keyboard -------------------------------------------------
+
+    #[test]
+    fn utf16_units_are_assembled_into_characters() {
+        let mut state = edit("");
+        state.insert_utf16('a' as u32);
+        // A surrogate pair is one character.
+        state.insert_utf16(0xd83d);
+        state.insert_utf16(0xde42);
+        assert_eq!(state.text, "a🙂");
+        // A low surrogate on its own is dropped, as is a high one that is not completed.
+        state.insert_utf16(0xde42);
+        state.insert_utf16(0xd83d);
+        state.insert_utf16('b' as u32);
+        assert_eq!(state.text, "a🙂b");
+        // Control characters are dropped, a tab becomes spaces.
+        state.insert_utf16(0x08);
+        state.insert_utf16(0x0d);
+        state.insert_utf16('\t' as u32);
+        assert_eq!(state.text, "a🙂b    ");
+    }
+
+    // ---- IME -------------------------------------------------------------------------
+
+    #[test]
+    fn the_ime_window_opens_at_the_caret() {
+        use crate::overlay::test_support::TestWindow;
+        let window = TestWindow::new();
+        let mut state =
+            TextEditState::new((120, 70), "héllo".to_string(), [0, 0, 0, 255], 22, None);
+        state.move_to(2, false);
+        state.place_ime_window(window.0);
+        let mut form = ime::CompositionForm {
+            style: 0,
+            current_pos: POINT::default(),
+            area: RECT::default(),
+        };
+        unsafe {
+            let context = ime::ImmGetContext(window.0);
+            assert!(!context.is_null(), "the window has an input context");
+            assert_ne!(ime::ImmGetCompositionWindow(context, &mut form), 0);
+            ime::ImmReleaseContext(window.0, context);
+        }
+        assert_eq!(form.style, ime::CFS_POINT);
+        assert_eq!(
+            (form.current_pos.x, form.current_pos.y),
+            (120 + state.caret_offset(), 70)
+        );
+    }
+
+    #[test]
+    fn a_window_without_an_input_context_is_left_alone() {
+        let state = edit("abc");
+        state.place_ime_window(HWND::default());
     }
 }

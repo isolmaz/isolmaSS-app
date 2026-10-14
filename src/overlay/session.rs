@@ -1,7 +1,38 @@
+use super::window::overlay_wnd_proc;
 use super::*;
 use std::time::Instant;
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::UpdateWindow;
+
+struct ScreenDcGuard(HDC);
+
+impl Drop for ScreenDcGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = ReleaseDC(HWND::default(), self.0);
+        }
+    }
+}
+
+struct DeleteDcGuard(HDC);
+
+impl Drop for DeleteDcGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = DeleteDC(self.0);
+        }
+    }
+}
+
+struct DeleteBitmapGuard(HBITMAP);
+
+impl Drop for DeleteBitmapGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = DeleteObject(HGDIOBJ(self.0.0));
+        }
+    }
+}
 
 fn register_overlay_class() -> Result<()> {
     static REGISTERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

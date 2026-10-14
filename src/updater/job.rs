@@ -1,5 +1,5 @@
 use super::*;
-use crate::settings_window::UpdateStatus;
+use std::sync::MutexGuard;
 use std::thread::JoinHandle;
 
 pub(super) static CANCELLED: AtomicBool = AtomicBool::new(false);
@@ -12,7 +12,7 @@ static EVENT: Mutex<Option<Event>> = Mutex::new(None);
 static READY: Mutex<Option<(PathBuf, bool)>> = Mutex::new(None);
 static RECHECK: Mutex<Option<bool>> = Mutex::new(None);
 
-enum Event {
+pub(super) enum Event {
     Checked(Result<Option<UpdateInfo>, String>, bool),
     Downloaded(Result<PathBuf, DownloadError>, bool),
 }
@@ -26,7 +26,17 @@ impl Event {
     }
 }
 
-fn remove_staged_update(path: &Path) {
+/// Work for the update worker thread.
+pub(super) type Work = Box<dyn FnOnce() -> Event + Send>;
+
+/// Locks `mutex`, taking the data back from a thread that panicked while holding it. Every
+/// critical section here leaves the state consistent, so a panic elsewhere must not wedge the
+/// updater.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+pub(super) fn remove_staged_update(path: &Path) {
     for file in [path.to_path_buf(), path.with_extension("exe.sig")] {
         if let Err(error) = std::fs::remove_file(&file)
             && error.kind() != std::io::ErrorKind::NotFound
@@ -38,7 +48,7 @@ fn remove_staged_update(path: &Path) {
 
 fn discard_event(event: Event) {
     if let Event::Downloaded(Ok(path), _) = event {
-        let ready = READY.lock().unwrap_or_else(|error| error.into_inner());
+        let ready = lock(&READY);
         if ready
             .as_ref()
             .is_some_and(|(ready_path, _)| ready_path == &path)
@@ -50,13 +60,13 @@ fn discard_event(event: Event) {
     }
 }
 
-fn start(automatic: bool, checking: bool, work: impl FnOnce() -> Event + Send + 'static) -> bool {
+pub(super) fn start(automatic: bool, checking: bool, work: Work) -> bool {
     if RUNNING
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
         if !automatic {
-            let mut pending = EVENT.lock().unwrap_or_else(|error| error.into_inner());
+            let mut pending = lock(&EVENT);
             if let Some(Event::Checked(_, manual)) = pending.as_mut() {
                 *manual = true;
                 return true;
@@ -68,11 +78,7 @@ fn start(automatic: bool, checking: bool, work: impl FnOnce() -> Event + Send + 
         }
         return false;
     }
-    if let Some(previous) = WORKER
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .take()
-    {
+    if let Some(previous) = lock(&WORKER).take() {
         let _ = previous.join();
     }
     CANCELLED.store(false, Ordering::Release);
@@ -84,7 +90,7 @@ fn start(automatic: bool, checking: bool, work: impl FnOnce() -> Event + Send + 
         {
             // Publish under the EVENT lock and recheck cancellation there, so a
             // concurrent cancel either discards this result or clears it afterwards.
-            let mut pending = EVENT.lock().unwrap_or_else(|error| error.into_inner());
+            let mut pending = lock(&EVENT);
             if checking
                 && MANUAL_REQUESTED.swap(false, Ordering::AcqRel)
                 && let Event::Checked(_, manual) = &mut event
@@ -103,7 +109,7 @@ fn start(automatic: bool, checking: bool, work: impl FnOnce() -> Event + Send + 
         RUNNING.store(false, Ordering::Release);
         crate::tray::notify_tray_wakeup();
     });
-    *WORKER.lock().unwrap_or_else(|error| error.into_inner()) = Some(handle);
+    *lock(&WORKER) = Some(handle);
     true
 }
 
@@ -111,27 +117,15 @@ pub fn is_checking() -> bool {
     CHECKING.load(Ordering::Acquire)
 }
 
-pub fn run_manual_update_check() -> bool {
-    start(false, true, || Event::Checked(check_for_update(), true))
-}
-fn run_automatic_update_check() {
-    let _ = start(true, true, || Event::Checked(check_for_update(), false));
-}
-
-/// Once per launch: sweeps leftovers of earlier updates, then runs the automatic check when
-/// enabled. Without a check the worker is not flagged as checking, so the menu stays usable.
-pub fn run_startup_work(check_for_updates: bool) {
-    let _ = start(true, check_for_updates, move || {
-        remove_stale_update_files();
-        Event::Checked(
-            if check_for_updates {
-                check_for_update()
-            } else {
-                Ok(None)
-            },
-            false,
-        )
-    });
+/// The first work of a launch: sweeps leftovers of earlier updates, then runs the automatic
+/// check when enabled. Without a check the result is empty, so nothing is offered.
+pub(super) fn startup_event(
+    check_for_updates: bool,
+    sweep: fn(),
+    check: fn() -> Result<Option<UpdateInfo>, String>,
+) -> Event {
+    sweep();
+    Event::Checked(if check_for_updates { check() } else { Ok(None) }, false)
 }
 
 pub fn configure(previous: &crate::settings::Settings, current: &crate::settings::Settings) {
@@ -140,7 +134,7 @@ pub fn configure(previous: &crate::settings::Settings, current: &crate::settings
             // Cancel and clear pending automatic results under the same lock the
             // worker publishes with, so nothing stale survives a settings change
             // while pending manual requests are preserved.
-            let mut pending = EVENT.lock().unwrap_or_else(|error| error.into_inner());
+            let mut pending = lock(&EVENT);
             if AUTOMATIC.load(Ordering::Acquire)
                 && !MANUAL_REQUESTED.load(Ordering::Acquire)
                 && !pending.as_ref().is_some_and(Event::manual)
@@ -152,7 +146,7 @@ pub fn configure(previous: &crate::settings::Settings, current: &crate::settings
             } else {
                 None
             };
-            let mut ready = READY.lock().unwrap_or_else(|error| error.into_inner());
+            let mut ready = lock(&READY);
             if let Some((path, automatic)) = ready.take() {
                 if automatic {
                     remove_staged_update(&path);
@@ -165,37 +159,11 @@ pub fn configure(previous: &crate::settings::Settings, current: &crate::settings
                 discard_event(event);
             }
         }
-        *RECHECK.lock().unwrap_or_else(|error| error.into_inner()) =
-            current.check_updates_automatically.then_some(true);
+        *lock(&RECHECK) = current.check_updates_automatically.then_some(true);
     }
 }
 
-/// The portable build never runs the installer: the offer leads to the release page instead.
-fn offer_release_page(owner: HWND, update: &UpdateInfo) {
-    let open_page = crate::ui::confirm(
-        owner,
-        crate::i18n::t("isolmaSS update"),
-        &crate::i18n::tf(
-            "isolmaSS {} is available. This portable copy does not update itself. Open the download page to get the new portable ZIP?",
-            &[&update.version],
-        ),
-    );
-    if !open_page {
-        crate::settings_window::report_update_status(
-            owner,
-            crate::i18n::t("Not installed. You can check again at any time."),
-            UpdateStatus::Idle,
-        );
-    } else if let Err(error) = open_release_page(&update.release_url) {
-        crate::ui::error(
-            owner,
-            crate::i18n::t("Could not open the download page"),
-            &error,
-        );
-    }
-}
-
-fn download_failure_status(kind: DownloadFailure) -> &'static str {
+pub(super) fn download_failure_status(kind: DownloadFailure) -> &'static str {
     match kind {
         DownloadFailure::Network => crate::i18n::t(
             "The update could not be downloaded. Check your connection and try again.",
@@ -207,250 +175,68 @@ fn download_failure_status(kind: DownloadFailure) -> &'static str {
     }
 }
 
-/// Called by UI loops without a borrowed window state. Installation waits until editing ends.
-pub fn poll(owner: HWND, allow_install: bool) {
+/// What a UI loop tick should do about the updater.
+pub(super) enum Step {
+    /// A worker is still running; look again on the next tick.
+    Busy,
+    /// Automatic checking was switched on: start a fresh check.
+    Recheck,
+    /// Take the result a finished worker left, if any.
+    Event(Option<Event>),
+}
+
+pub(super) fn next_step() -> Step {
     if RUNNING.load(Ordering::Acquire) {
-        return;
+        return Step::Busy;
     }
-    let recheck = RECHECK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .take();
-    if recheck.is_some() {
-        run_automatic_update_check();
-        return;
+    if lock(&RECHECK).take().is_some() {
+        return Step::Recheck;
     }
-    let event = EVENT
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .take();
-    if event.is_some() {
-        crate::tray::set_update_activity(None);
+    Step::Event(lock(&EVENT).take())
+}
+
+/// Remembers a verified installer for installation, dropping the one it replaces.
+pub(super) fn stage_ready(path: PathBuf, automatic: bool) {
+    let mut ready = lock(&READY);
+    let same_path = ready.as_ref().is_some_and(|(old, _)| old == &path);
+    if let Some((old, _)) = ready.replace((path, automatic))
+        && !same_path
+    {
+        remove_staged_update(&old);
     }
-    match event {
-        Some(Event::Checked(Ok(Some(update)), manual)) => {
-            if !manual {
-                match crate::settings::Settings::load() {
-                    Ok(settings)
-                        if settings.skipped_update_version.as_deref() == Some(&update.version) =>
-                    {
-                        return;
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        crate::diagnostics::record("update preferences", &error.to_string());
-                        return;
-                    }
-                }
-            }
-            if manual {
-                crate::settings_window::report_update_status(
-                    owner,
-                    &crate::i18n::tf("Version {} is ready", &[&update.version]),
-                    UpdateStatus::Idle,
-                );
-            }
-            if !runs_from_installation() {
-                offer_release_page(owner, &update);
-                return;
-            }
-            match crate::ui::ask_for_update(owner, &update.version) {
-                Ok(crate::ui::UpdateChoice::Install) => {
-                    let inline = crate::settings_window::report_update_status(
-                        owner,
-                        crate::i18n::t("Downloading and verifying the installer…"),
-                        UpdateStatus::Busy,
-                    );
-                    crate::tray::set_update_activity(Some(crate::i18n::t(
-                        "isolmaSS · Downloading update…",
-                    )));
-                    if !inline {
-                        crate::tray::show_update_notification(
-                            crate::i18n::t("Downloading update"),
-                            crate::i18n::t(
-                                "Verifying the signed installer. isolmaSS restarts after installation.",
-                            ),
-                        );
-                    }
-                    let _ = start(!manual, false, move || {
-                        Event::Downloaded(download_update(&update), !manual)
-                    });
-                }
-                Ok(crate::ui::UpdateChoice::SkipVersion) => {
-                    if let Err(error) =
-                        crate::settings::Settings::skip_update_version(&update.version)
-                    {
-                        crate::ui::error(
-                            owner,
-                            crate::i18n::t("Could not skip this version"),
-                            &error.to_string(),
-                        );
-                    } else {
-                        crate::settings_window::report_update_status(
-                            owner,
-                            crate::i18n::t("This version was skipped."),
-                            UpdateStatus::Idle,
-                        );
-                    }
-                }
-                Ok(crate::ui::UpdateChoice::Later) => {
-                    crate::settings_window::report_update_status(
-                        owner,
-                        crate::i18n::t("Not installed. You can check again at any time."),
-                        UpdateStatus::Idle,
-                    );
-                }
-                Err(error) => {
-                    crate::settings_window::report_update_status(
-                        owner,
-                        crate::i18n::t("Could not open the update options. Try again."),
-                        UpdateStatus::Idle,
-                    );
-                    crate::ui::error(
-                        owner,
-                        crate::i18n::t("Could not open the update window"),
-                        &error.to_string(),
-                    );
-                }
-            }
-        }
-        Some(Event::Checked(Ok(None), true)) => {
-            let message = &crate::i18n::tf(
-                "isolmaSS {} is the latest version.",
-                &[&env!("CARGO_PKG_VERSION")],
-            );
-            if !crate::settings_window::report_update_status(owner, message, UpdateStatus::Idle) {
-                crate::tray::show_update_notification(
-                    crate::i18n::t("isolmaSS is up to date"),
-                    message,
-                );
-            }
-        }
-        Some(Event::Checked(Err(error), manual)) => {
-            crate::diagnostics::record("update", &error);
-            if manual {
-                crate::settings_window::report_update_status(
-                    owner,
-                    crate::i18n::t("Could not check for updates. Try again."),
-                    UpdateStatus::Idle,
-                );
-                crate::ui::error(owner, crate::i18n::t("Update check failed"), &error);
-            }
-        }
-        Some(Event::Downloaded(Ok(path), automatic)) => {
-            let mut ready = READY.lock().unwrap_or_else(|error| error.into_inner());
-            let same_path = ready.as_ref().is_some_and(|(old, _)| old == &path);
-            if let Some((old, _)) = ready.replace((path, automatic))
-                && !same_path
-            {
-                remove_staged_update(&old);
-            }
-            drop(ready);
-            if !allow_install {
-                let message = crate::i18n::t("Verified. Save or close Settings to install.");
-                let inline = crate::settings_window::report_update_status(
-                    owner,
-                    message,
-                    UpdateStatus::Ready,
-                );
-                if inline && !automatic {
-                    crate::ui::info(
-                        owner,
-                        crate::i18n::t("Update ready"),
-                        crate::i18n::t(
-                            "The signed installer is ready. Save or close Settings; isolmaSS will install and reopen.",
-                        ),
-                    );
-                } else if automatic {
-                    crate::tray::show_notification(
-                        crate::i18n::t("Update ready"),
-                        crate::i18n::t("Finish the open task to install and restart."),
-                    );
-                } else {
-                    crate::tray::show_update_notification(
-                        crate::i18n::t("Update ready"),
-                        crate::i18n::t("Finish the open capture to install."),
-                    );
-                }
-            }
-        }
-        Some(Event::Downloaded(Err(error), automatic)) => {
-            crate::settings_window::report_update_status(
-                owner,
-                download_failure_status(error.kind),
-                UpdateStatus::Idle,
-            );
-            if automatic {
-                crate::diagnostics::record("update", &error.message);
-                crate::tray::show_notification(
-                    crate::i18n::t("Could not download the update"),
-                    &error.message,
-                );
-            } else {
-                crate::ui::error(
-                    owner,
-                    crate::i18n::t("Could not install the update"),
-                    &error.message,
-                );
-            }
-        }
-        _ => {}
-    }
-    // An upload in flight is killed by the installer's exit request; wait like for an open editor.
-    let ready = if allow_install && !crate::toast::upload_in_flight() {
-        READY
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take()
+}
+
+/// The verified installer to run now, when installing is allowed.
+pub(super) fn take_ready(install_now: bool) -> Option<(PathBuf, bool)> {
+    if install_now {
+        lock(&READY).take()
     } else {
         None
-    };
-    if let Some((path, automatic)) = ready {
-        if !automatic {
-            crate::tray::show_update_notification(
-                crate::i18n::t("Installing update"),
-                crate::i18n::t("isolmaSS closes, installs the verified version and reopens."),
-            );
-        }
-        match launch_installer(&path) {
-            Ok(()) => crate::tray::request_exit(),
-            Err(error) => {
-                crate::ui::error(
-                    owner,
-                    crate::i18n::t("Could not start the installer"),
-                    &error,
-                );
-                remove_staged_update(&path);
-            }
-        }
     }
+}
+
+/// Whether the user chose to skip `version`.
+pub(super) fn is_skipped(settings: &crate::settings::Settings, version: &str) -> bool {
+    settings.skipped_update_version.as_deref() == Some(version)
 }
 
 pub fn shutdown() {
     {
-        let _guard = EVENT.lock().unwrap_or_else(|error| error.into_inner());
+        let _guard = lock(&EVENT);
         CANCELLED.store(true, Ordering::Release);
     }
-    if let Some(worker) = WORKER
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .take()
+    if let Some(worker) = lock(&WORKER).take()
         && worker.join().is_err()
     {
         crate::diagnostics::record("update", "Update worker terminated unexpectedly.");
     }
-    if let Some(event) = EVENT
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .take()
-    {
+    if let Some(event) = lock(&EVENT).take() {
         discard_event(event);
     }
-    if let Some((path, _)) = READY
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .take()
-    {
+    if let Some((path, _)) = lock(&READY).take() {
         remove_staged_update(&path);
     }
 }
+
+#[cfg(test)]
+pub(super) mod tests;

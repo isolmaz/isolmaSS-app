@@ -1,22 +1,23 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, channel, sync_channel};
-use std::thread::{self, JoinHandle};
+use std::sync::mpsc::SyncSender;
+use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
-    RegisterHotKey, UnregisterHotKey, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
-    VK_SNAPSHOT,
+    GetAsyncKeyState, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, VIRTUAL_KEY,
+    VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT, VK_SNAPSHOT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, HHOOK, KBDLLHOOKSTRUCT, KBDLLHOOKSTRUCT_FLAGS, MSG, PM_NOREMOVE, PeekMessageW,
-    PostMessageW, PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL,
-    WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_USER,
+    CallNextHookEx, KBDLLHOOKSTRUCT, KBDLLHOOKSTRUCT_FLAGS, PostMessageW, WM_KEYDOWN, WM_KEYUP,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_USER,
+};
+
+mod system;
+pub use system::{
+    HotkeyHandle, disable_windows_snipping_tool_hotkey, register_overlay, start_hotkey_listener,
+    unregister_overlay,
 };
 
 pub const HOTKEY_ID: i32 = 1001;
@@ -62,15 +63,10 @@ impl HotkeyConfig {
             return Some(Self::default());
         }
 
-        let parts: Vec<&str> = trimmed.split('+').map(|p| p.trim()).collect();
-        if parts.is_empty() {
-            return None;
-        }
-
         let mut modifiers = MOD_NOREPEAT.0;
         let mut vk = 0u32;
 
-        for part in &parts {
+        for part in trimmed.split('+').map(|p| p.trim()) {
             if vk != 0
                 && !matches!(
                     part.to_ascii_lowercase().as_str(),
@@ -139,29 +135,11 @@ pub fn settings_path() -> Option<PathBuf> {
 // Windows Registry Fix for PrintScreen & Snipping Tool
 // -----------------------------------------------------------------------------
 
-/// Disables the Windows Snipping Tool from intercepting the PrintScreen key
-/// by setting HKCU\Control Panel\Keyboard -> PrintScreenKeyForSnippingEnabled = 0 (REG_DWORD).
-pub fn disable_windows_snipping_tool_hotkey() -> bool {
-    use windows::Win32::System::Registry::*;
-    let value = 0u32;
-    unsafe {
-        RegSetKeyValueW(
-            HKEY_CURRENT_USER,
-            windows::core::w!("Control Panel\\Keyboard"),
-            windows::core::w!("PrintScreenKeyForSnippingEnabled"),
-            REG_DWORD.0,
-            Some((&value as *const u32).cast()),
-            4,
-        )
-        .is_ok()
-    }
-}
-
 pub fn is_windows_snipping_tool_disabled() -> bool {
     use windows::Win32::System::Registry::*;
     let mut value = 1u32;
     let mut size = 4u32;
-    unsafe {
+    let read = unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
             windows::core::w!("Control Panel\\Keyboard"),
@@ -171,9 +149,9 @@ pub fn is_windows_snipping_tool_disabled() -> bool {
             Some((&mut value as *mut u32).cast()),
             Some(&mut size),
         )
-        .is_ok()
-            && value == 0
     }
+    .is_ok();
+    read && value == 0
 }
 
 // -----------------------------------------------------------------------------
@@ -192,6 +170,15 @@ struct HookState {
 }
 
 static HOOK_STATE: Mutex<Option<HookState>> = Mutex::new(None);
+
+/// The listener's delivery state. A thread that panicked while holding it must not
+/// silence the shortcut for the rest of the session, so a poisoned lock is taken over.
+fn hook_state() -> MutexGuard<'static, Option<HookState>> {
+    match HOOK_STATE.lock() {
+        Ok(state) => state,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
 static TARGET_VK: AtomicU32 = AtomicU32::new(0);
 static TARGET_MODS: AtomicU32 = AtomicU32::new(0);
 static SNAPSHOT_HANDLED: AtomicBool = AtomicBool::new(false);
@@ -230,56 +217,6 @@ static OVERLAY_TEXT_EDITING: AtomicBool = AtomicBool::new(false);
 static OVERLAY_IME_COMPOSING: AtomicBool = AtomicBool::new(false);
 static OVERLAY_LOCAL_HOOK: AtomicIsize = AtomicIsize::new(0);
 
-/// Registers the active overlay window handle and marks the overlay as active.
-/// If no global low-level hook is currently running, installs a temporary hook
-/// for the duration of the overlay session.
-pub fn register_overlay(hwnd: HWND) -> windows::core::Result<()> {
-    OVERLAY_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
-    OVERLAY_ACTIVE.store(true, Ordering::SeqCst);
-
-    let has_hook = HOOK_STATE
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .as_ref()
-        .is_some();
-
-    if !has_hook {
-        let hinstance = unsafe {
-            GetModuleHandleW(None)
-                .ok()
-                .map(|h| HINSTANCE(h.0))
-                .unwrap_or_default()
-        };
-        let hook_handle: windows::core::Result<HHOOK> = unsafe {
-            SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_level_keyboard_proc), hinstance, 0)
-        };
-        let hook = match hook_handle {
-            Ok(hook) => hook,
-            Err(error) => {
-                unregister_overlay();
-                return Err(error);
-            }
-        };
-        OVERLAY_LOCAL_HOOK.store(hook.0 as isize, Ordering::SeqCst);
-    }
-    Ok(())
-}
-
-/// Unregisters the overlay window and tears down any temporary overlay hook.
-pub fn unregister_overlay() {
-    OVERLAY_ACTIVE.store(false, Ordering::SeqCst);
-    OVERLAY_TEXT_EDITING.store(false, Ordering::SeqCst);
-    OVERLAY_IME_COMPOSING.store(false, Ordering::SeqCst);
-    OVERLAY_HWND.store(0, Ordering::SeqCst);
-
-    let prev_hook = OVERLAY_LOCAL_HOOK.swap(0, Ordering::SeqCst);
-    if prev_hook != 0 {
-        unsafe {
-            let _ = UnhookWindowsHookEx(HHOOK(prev_hook as *mut _));
-        }
-    }
-}
-
 /// Updates the overlay text editing state.
 pub fn set_overlay_text_editing(editing: bool) {
     OVERLAY_TEXT_EDITING.store(editing, Ordering::SeqCst);
@@ -301,26 +238,40 @@ pub fn is_overlay_text_editing() -> bool {
     OVERLAY_TEXT_EDITING.load(Ordering::SeqCst)
 }
 
-/// Reads the current physical modifier keys (Ctrl, Shift, Alt, Win) via GetAsyncKeyState.
-pub fn get_current_modifiers() -> u32 {
+/// The `MOD_*` bits of the modifier keys that `is_down` reports as held.
+fn modifiers_from(is_down: impl Fn(VIRTUAL_KEY) -> bool) -> u32 {
     let mut mods = 0u32;
-    unsafe {
-        if (GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0 {
-            mods |= MOD_CONTROL.0;
-        }
-        if (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0 {
-            mods |= MOD_SHIFT.0;
-        }
-        if (GetAsyncKeyState(VK_MENU.0 as i32) as u16 & 0x8000) != 0 {
-            mods |= MOD_ALT.0;
-        }
-        if ((GetAsyncKeyState(VK_LWIN.0 as i32) as u16 & 0x8000) != 0)
-            || ((GetAsyncKeyState(VK_RWIN.0 as i32) as u16 & 0x8000) != 0)
-        {
-            mods |= MOD_WIN.0;
-        }
+    if is_down(VK_CONTROL) {
+        mods |= MOD_CONTROL.0;
+    }
+    if is_down(VK_SHIFT) {
+        mods |= MOD_SHIFT.0;
+    }
+    if is_down(VK_MENU) {
+        mods |= MOD_ALT.0;
+    }
+    if is_down(VK_LWIN) || is_down(VK_RWIN) {
+        mods |= MOD_WIN.0;
     }
     mods
+}
+
+/// Reads the current physical modifier keys (Ctrl, Shift, Alt, Win) via GetAsyncKeyState.
+pub fn get_current_modifiers() -> u32 {
+    modifiers_from(|key| (unsafe { GetAsyncKeyState(key.0 as i32) } as u16 & 0x8000) != 0)
+}
+
+/// When a trigger key was pressed, from the `GetTickCount` time of its message.
+/// Delivering it to the capture thread takes a moment, so captures are timed from the
+/// key press itself; a tick further back than five seconds (a stale or wrapped one)
+/// counts as five seconds ago.
+fn trigger_instant(tick: u32) -> Instant {
+    let now = Instant::now();
+    let age = unsafe { windows::Win32::System::SystemInformation::GetTickCount() }
+        .wrapping_sub(tick)
+        .min(5_000);
+    now.checked_sub(std::time::Duration::from_millis(u64::from(age)))
+        .unwrap_or(now)
 }
 
 /// Core processing logic for low-level keyboard hook callback.
@@ -441,27 +392,17 @@ pub unsafe fn process_keyboard_hook(
                 };
             } else if !was_down {
                 // First keydown: dispatch capture event to listener channel
-                let event_tx = HOOK_STATE
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner())
-                    .as_ref()
-                    .map(|state| state.event_tx.clone());
+                let event_tx = hook_state().as_ref().map(|state| state.event_tx.clone());
                 if let Some(tx) = event_tx
                     && !is_overlay_active()
                     && !overlay_input_suspended()
                 {
-                    let now = Instant::now();
-                    let age = if kb.time != 0 {
-                        unsafe { windows::Win32::System::SystemInformation::GetTickCount() }
-                            .wrapping_sub(kb.time)
-                            .min(5_000)
+                    let pressed = if kb.time != 0 {
+                        trigger_instant(kb.time)
                     } else {
-                        0
+                        Instant::now()
                     };
-                    let _ = tx.try_send(
-                        now.checked_sub(std::time::Duration::from_millis(age as u64))
-                            .unwrap_or(now),
-                    );
+                    let _ = tx.try_send(pressed);
                 }
             }
             // Return 1 to swallow keystroke: Windows Shell & Snipping Tool will NEVER receive it!
@@ -488,260 +429,6 @@ pub unsafe extern "system" fn low_level_keyboard_proc(
     unsafe { process_keyboard_hook(ncode, wparam, lparam, mods) }
 }
 
-/// Active hotkey handle with thread cleanup and hook removal on Drop.
-struct ListenerResources(HHOOK);
-impl Drop for ListenerResources {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = UnhookWindowsHookEx(self.0);
-            let _ = UnregisterHotKey(HWND::default(), HOTKEY_ID);
-        }
-        TARGET_VK.store(0, Ordering::SeqCst);
-        TARGET_MODS.store(0, Ordering::SeqCst);
-        SNAPSHOT_HANDLED.store(false, Ordering::SeqCst);
-        *HOOK_STATE
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = None;
-    }
-}
-
-struct StopSignal(isize);
-impl Drop for StopSignal {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = windows::Win32::Foundation::CloseHandle(windows::Win32::Foundation::HANDLE(
-                self.0 as *mut _,
-            ));
-        }
-    }
-}
-
-pub struct HotkeyHandle {
-    stop: std::sync::Arc<StopSignal>,
-    thread_id: u32,
-    join_handle: Option<JoinHandle<()>>,
-    pub active_description: String,
-}
-
-impl Drop for HotkeyHandle {
-    fn drop(&mut self) {
-        if let Err(error) = unsafe {
-            windows::Win32::System::Threading::SetEvent(windows::Win32::Foundation::HANDLE(
-                self.stop.0 as *mut _,
-            ))
-        } {
-            crate::diagnostics::record("hotkey shutdown", &error.to_string());
-        }
-        if self.thread_id != 0 {
-            unsafe {
-                let _ = PostThreadMessageW(self.thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
-            }
-        }
-        if let Some(handle) = self.join_handle.take()
-            && handle.join().is_err()
-        {
-            crate::diagnostics::record("hotkey", "Keyboard listener terminated unexpectedly.");
-        }
-    }
-}
-
-/// Starts the global hotkey listener on a dedicated Win32 message-loop thread.
-/// Returns a Receiver for hotkey trigger events and a HotkeyHandle that unregisters on drop.
-pub fn start_hotkey_listener(
-    requested_config: HotkeyConfig,
-) -> windows::core::Result<(Receiver<Instant>, HotkeyHandle)> {
-    let (event_tx, event_rx) = sync_channel::<Instant>(1);
-    let (ready_tx, ready_rx) = channel::<std::result::Result<(u32, String), String>>();
-
-    let event =
-        unsafe { windows::Win32::System::Threading::CreateEventW(None, true, false, None)? };
-    let stop = std::sync::Arc::new(StopSignal(event.0 as isize));
-    let listener_stop = stop.clone();
-    let join_handle = thread::spawn(move || {
-        let thread_id = unsafe { GetCurrentThreadId() };
-
-        // Force creation of message queue for this thread
-        let mut msg = MSG::default();
-        unsafe {
-            let _ = PeekMessageW(&mut msg, HWND::default(), 0, 0, PM_NOREMOVE);
-        }
-
-        let is_snapshot = requested_config.vk == VK_SNAPSHOT.0 as u32;
-
-        // Populate delivery state before installing the hook so no callback can
-        // ever run without it, and fail startup loudly on a poisoned state lock
-        // instead of continuing with a shortcut that swallows keys silently.
-        {
-            let mut guard = match HOOK_STATE.lock() {
-                Ok(guard) => guard,
-                Err(_) => {
-                    let _ = ready_tx.send(Err(crate::i18n::t(
-                        "Keyboard hook state could not be initialized: state lock poisoned.",
-                    )
-                    .to_string()));
-                    return;
-                }
-            };
-            *guard = Some(HookState {
-                event_tx: event_tx.clone(),
-                _config: requested_config.clone(),
-            });
-        }
-
-        // Set target VK and modifiers for low-level hook
-        TARGET_VK.store(requested_config.vk, Ordering::SeqCst);
-        TARGET_MODS.store(requested_config.modifiers, Ordering::SeqCst);
-        SNAPSHOT_HANDLED.store(false, Ordering::SeqCst);
-
-        let hinstance = unsafe {
-            GetModuleHandleW(None)
-                .ok()
-                .map(|h| HINSTANCE(h.0))
-                .unwrap_or_default()
-        };
-
-        let hook_handle: windows::core::Result<HHOOK> = unsafe {
-            SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_level_keyboard_proc), hinstance, 0)
-        };
-
-        let hook = match hook_handle {
-            Ok(hook) => hook,
-            Err(error) => {
-                TARGET_VK.store(0, Ordering::SeqCst);
-                TARGET_MODS.store(0, Ordering::SeqCst);
-                *HOOK_STATE
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner()) = None;
-                let _ = ready_tx.send(Err(crate::i18n::tf(
-                    "Keyboard hook could not be installed: {}",
-                    &[&error],
-                )));
-                return;
-            }
-        };
-        let _resources = ListenerResources(hook);
-
-        let active_desc = if is_snapshot {
-            // Low-level hook is primary for PrintScreen.
-            // Attempt RegisterHotKey as well:
-            let reg_ok = unsafe {
-                RegisterHotKey(
-                    HWND::default(),
-                    HOTKEY_ID,
-                    HOT_KEY_MODIFIERS(requested_config.modifiers),
-                    requested_config.vk,
-                )
-            }
-            .is_ok();
-
-            if !reg_ok {
-                crate::diagnostics::record(
-                    "hotkey",
-                    &format!(
-                        "RegisterHotKey for '{}' held by OS; WH_KEYBOARD_LL hook active, Snipping Tool suppressed.",
-                        requested_config.description
-                    ),
-                );
-            }
-            // Do not switch to fallback: WH_KEYBOARD_LL intercepts VK_SNAPSHOT and consumes it!
-            requested_config.description.clone()
-        } else {
-            // Non-snapshot key: RegisterHotKey is primary
-            let primary_ok = unsafe {
-                RegisterHotKey(
-                    HWND::default(),
-                    HOTKEY_ID,
-                    HOT_KEY_MODIFIERS(requested_config.modifiers),
-                    requested_config.vk,
-                )
-            }
-            .is_ok();
-
-            if primary_ok {
-                requested_config.description.clone()
-            } else {
-                let _ = ready_tx.send(Err(crate::i18n::tf(
-                    "The shortcut '{}' is already registered by Windows or another application.",
-                    &[&requested_config.description],
-                )));
-                return;
-            }
-        };
-
-        let _ = ready_tx.send(Ok((thread_id, active_desc)));
-
-        // Wait on shutdown and input together: no polling or detached listener on a lost quit message.
-        use windows::Win32::UI::WindowsAndMessaging::{
-            MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PM_REMOVE, QS_ALLINPUT,
-        };
-        let event = windows::Win32::Foundation::HANDLE(listener_stop.0 as *mut _);
-        'messages: loop {
-            let result = unsafe {
-                MsgWaitForMultipleObjectsEx(
-                    Some(&[event]),
-                    u32::MAX,
-                    QS_ALLINPUT,
-                    MWMO_INPUTAVAILABLE,
-                )
-            };
-            if result == windows::Win32::Foundation::WAIT_OBJECT_0 {
-                break;
-            }
-            if result == windows::Win32::Foundation::WAIT_FAILED {
-                crate::diagnostics::record(
-                    "hotkey",
-                    &windows::core::Error::from_win32().to_string(),
-                );
-                break;
-            }
-            while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
-                if msg.message == WM_QUIT {
-                    break 'messages;
-                }
-                if msg.message == WM_HOTKEY && !is_overlay_active() && !overlay_input_suspended() {
-                    let now = Instant::now();
-                    let age = unsafe { windows::Win32::System::SystemInformation::GetTickCount() }
-                        .wrapping_sub(msg.time)
-                        .min(5_000);
-                    let _ = event_tx.try_send(
-                        now.checked_sub(std::time::Duration::from_millis(age as u64))
-                            .unwrap_or(now),
-                    );
-                }
-                unsafe {
-                    let _ = windows::Win32::UI::WindowsAndMessaging::TranslateMessage(&msg);
-                    windows::Win32::UI::WindowsAndMessaging::DispatchMessageW(&msg);
-                }
-            }
-        }
-    });
-
-    let (thread_id, active_description) = match ready_rx.recv() {
-        Ok(Ok(info)) => info,
-        Ok(Err(err)) => {
-            let _ = join_handle.join();
-            return Err(windows::core::Error::new(windows::core::HRESULT(-1), err));
-        }
-        Err(_) => {
-            let _ = join_handle.join();
-            return Err(windows::core::Error::new(
-                windows::core::HRESULT(-1),
-                crate::i18n::t("Shortcut thread exited unexpectedly"),
-            ));
-        }
-    };
-
-    Ok((
-        event_rx,
-        HotkeyHandle {
-            stop,
-            thread_id,
-            join_handle: Some(join_handle),
-            active_description,
-        },
-    ))
-}
-
 /// Helper to create a synthetic KBDLLHOOKSTRUCT for testing hook callback logic.
 pub fn create_test_kbdllhookstruct(vk: u32) -> KBDLLHOOKSTRUCT {
     KBDLLHOOKSTRUCT {
@@ -756,15 +443,22 @@ pub fn create_test_kbdllhookstruct(vk: u32) -> KBDLLHOOKSTRUCT {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::test_env::{Sandbox, lock, poison};
+    use std::sync::MutexGuard;
+    use std::sync::mpsc::sync_channel;
+    use std::time::Duration;
+    use windows::Win32::Foundation::HINSTANCE;
+    use windows::Win32::System::SystemInformation::GetTickCount;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, HWND_MESSAGE, MSG, PM_REMOVE, PeekMessageW, WINDOW_STYLE,
+    };
 
     /// The hook reads process-wide state; tests that drive it run one at a time.
     static HOOK_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_overlay_keyboard_routing_in_hook() {
-        let _serial = HOOK_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _serial = lock(&HOOK_TEST_LOCK);
         let kb_esc = create_test_kbdllhookstruct(VK_ESCAPE.0 as u32);
         let lparam_esc = LPARAM(&kb_esc as *const _ as isize);
         let wparam_down = WPARAM(WM_KEYDOWN as usize);
@@ -856,12 +550,7 @@ mod tests {
     }
     #[test]
     fn running_shortcut_is_handed_to_the_recording_window() {
-        use windows::Win32::UI::WindowsAndMessaging::{
-            CreateWindowExW, DestroyWindow, HWND_MESSAGE, PM_REMOVE, WINDOW_STYLE,
-        };
-        let _serial = HOOK_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _serial = lock(&HOOK_TEST_LOCK);
         let window = unsafe {
             CreateWindowExW(
                 Default::default(),
@@ -954,5 +643,607 @@ mod tests {
                 "{description}"
             );
         }
+    }
+
+    /// Restores the hook's idle state around a test and keeps tests that drive it apart.
+    struct HookTest {
+        _serial: MutexGuard<'static, ()>,
+    }
+
+    impl HookTest {
+        fn start() -> Self {
+            let serial = lock(&HOOK_TEST_LOCK);
+            let test = Self { _serial: serial };
+            test.reset();
+            test
+        }
+
+        fn reset(&self) {
+            OVERLAY_ACTIVE.store(false, Ordering::SeqCst);
+            OVERLAY_TEXT_EDITING.store(false, Ordering::SeqCst);
+            OVERLAY_IME_COMPOSING.store(false, Ordering::SeqCst);
+            OVERLAY_HWND.store(0, Ordering::SeqCst);
+            TARGET_VK.store(0, Ordering::SeqCst);
+            TARGET_MODS.store(0, Ordering::SeqCst);
+            SNAPSHOT_HANDLED.store(false, Ordering::SeqCst);
+            RECORDING_WINDOW.store(0, Ordering::SeqCst);
+            HOOK_STATE.clear_poison();
+            *hook_state() = None;
+            crate::tray::capture_finished();
+        }
+
+        /// The hook state of a running listener: its capture events go to the receiver.
+        fn listen(&self) -> std::sync::mpsc::Receiver<Instant> {
+            let (events, received) = sync_channel(1);
+            *hook_state() = Some(HookState {
+                event_tx: events,
+                _config: HotkeyConfig::fallback(),
+            });
+            received
+        }
+
+        /// What the hook answers for one key message with the given modifiers held.
+        fn send(&self, vk: u32, message: u32, mods: u32) -> LRESULT {
+            let kb = create_test_kbdllhookstruct(vk);
+            unsafe {
+                process_keyboard_hook(
+                    0,
+                    WPARAM(message as usize),
+                    LPARAM(&kb as *const _ as isize),
+                    mods,
+                )
+            }
+        }
+    }
+
+    impl Drop for HookTest {
+        fn drop(&mut self) {
+            self.reset();
+        }
+    }
+
+    const ESCAPE: u32 = 0x1B;
+    const F9: u32 = 0x78;
+
+    /// A message-only window that receives what the hook posts.
+    struct TestWindow(HWND);
+
+    impl TestWindow {
+        fn new() -> Self {
+            Self(
+                unsafe {
+                    CreateWindowExW(
+                        Default::default(),
+                        windows::core::w!("STATIC"),
+                        windows::core::w!(""),
+                        WINDOW_STYLE(0),
+                        0,
+                        0,
+                        0,
+                        0,
+                        HWND_MESSAGE,
+                        None,
+                        HINSTANCE::default(),
+                        None,
+                    )
+                }
+                .expect("message-only window"),
+            )
+        }
+
+        /// The next queued `message` for this window, taken off the queue.
+        fn take(&self, message: u32) -> Option<MSG> {
+            take_message(self.0, message)
+        }
+    }
+
+    impl Drop for TestWindow {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = DestroyWindow(self.0);
+            }
+        }
+    }
+
+    /// The next queued `message` of this thread (for `window` or, with a null window, posted
+    /// without one), taken off the queue.
+    fn take_message(window: HWND, message: u32) -> Option<MSG> {
+        let mut msg = MSG::default();
+        unsafe { PeekMessageW(&mut msg, window, message, message, PM_REMOVE) }
+            .as_bool()
+            .then_some(msg)
+    }
+
+    #[test]
+    fn calls_that_are_not_key_events_pass_through() {
+        let hook = HookTest::start();
+        TARGET_VK.store(F9, Ordering::SeqCst);
+        TARGET_MODS.store(MOD_NOREPEAT.0, Ordering::SeqCst);
+        let kb = create_test_kbdllhookstruct(F9);
+        let lparam = LPARAM(&kb as *const _ as isize);
+        let down = WPARAM(WM_KEYDOWN as usize);
+        // A negative code means "do not process"; a null pointer has no key to read.
+        assert_ne!(
+            unsafe { process_keyboard_hook(-1, down, lparam, 0) },
+            LRESULT(1)
+        );
+        assert_ne!(
+            unsafe { process_keyboard_hook(0, down, LPARAM(0), 0) },
+            LRESULT(1)
+        );
+        assert_ne!(
+            unsafe { low_level_keyboard_proc(-1, down, lparam) },
+            LRESULT(1)
+        );
+        assert_ne!(
+            unsafe { low_level_keyboard_proc(0, down, LPARAM(0)) },
+            LRESULT(1)
+        );
+        // Other messages (characters, timers) are neither press nor release.
+        assert_ne!(hook.send(F9, 0x0102, 0), LRESULT(1));
+        assert!(!SNAPSHOT_HANDLED.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn escape_cancels_a_pending_capture_and_stays_swallowed() {
+        let hook = HookTest::start();
+        while take_message(HWND::default(), crate::tray::WM_CANCEL_CAPTURE).is_some() {}
+        crate::tray::queue_capture(Instant::now());
+        assert!(
+            crate::tray::capture_pending(),
+            "a capture waits for its overlay"
+        );
+
+        assert_eq!(hook.send(ESCAPE, WM_KEYDOWN, 0), LRESULT(1));
+        assert!(
+            take_message(HWND::default(), crate::tray::WM_CANCEL_CAPTURE).is_some(),
+            "the tray is asked to cancel the capture"
+        );
+        assert_eq!(
+            hook.send(ESCAPE, WM_KEYUP, 0),
+            LRESULT(1),
+            "the release is swallowed too"
+        );
+        assert!(
+            take_message(HWND::default(), crate::tray::WM_CANCEL_CAPTURE).is_none(),
+            "only the press cancels"
+        );
+        assert_ne!(
+            hook.send(0x41, WM_KEYDOWN, 0),
+            LRESULT(1),
+            "other keys are not affected"
+        );
+
+        crate::tray::capture_finished();
+        assert_ne!(
+            hook.send(ESCAPE, WM_KEYDOWN, 0),
+            LRESULT(1),
+            "no capture, no claim on Esc"
+        );
+    }
+
+    #[test]
+    fn overlay_commands_are_posted_to_the_overlay_window() {
+        let hook = HookTest::start();
+        let window = TestWindow::new();
+        OVERLAY_HWND.store(window.0.0 as isize, Ordering::SeqCst);
+        OVERLAY_ACTIVE.store(true, Ordering::SeqCst);
+
+        assert_eq!(hook.send(ESCAPE, WM_KEYDOWN, 0), LRESULT(1));
+        let escape = window
+            .take(WM_OVERLAY_KEYDOWN)
+            .expect("Esc reaches the editor");
+        assert_eq!((escape.wParam.0, escape.lParam.0), (ESCAPE as usize, 0));
+        assert_eq!(hook.send(ESCAPE, WM_KEYUP, 0), LRESULT(1));
+        assert!(
+            window.take(WM_OVERLAY_KEYDOWN).is_none(),
+            "a release is not a command"
+        );
+
+        // Ctrl+Z (undo) carries the modifiers, the plain key a tool shortcut.
+        assert_eq!(hook.send(0x5A, WM_KEYDOWN, MOD_CONTROL.0), LRESULT(1));
+        let undo = window
+            .take(WM_OVERLAY_KEYDOWN)
+            .expect("Ctrl+Z reaches the editor");
+        assert_eq!((undo.wParam.0, undo.lParam.0 as u32), (0x5A, MOD_CONTROL.0));
+        assert_eq!(hook.send(0x52, WM_KEYDOWN, 0), LRESULT(1));
+        assert_eq!(
+            window
+                .take(WM_OVERLAY_KEYDOWN)
+                .expect("R reaches the editor")
+                .wParam
+                .0,
+            0x52
+        );
+        assert_eq!(hook.send(0x52, WM_KEYUP, 0), LRESULT(1));
+        assert!(window.take(WM_OVERLAY_KEYDOWN).is_none());
+
+        // While text is typed only commands are taken; characters go to the focused window.
+        set_overlay_text_editing(true);
+        assert!(is_overlay_text_editing());
+        assert_ne!(hook.send(0x52, WM_KEYDOWN, 0), LRESULT(1));
+        assert!(window.take(WM_OVERLAY_KEYDOWN).is_none());
+        assert_eq!(
+            hook.send(0x08, WM_KEYDOWN, 0),
+            LRESULT(1),
+            "Backspace edits"
+        );
+        assert!(window.take(WM_OVERLAY_KEYDOWN).is_some());
+    }
+
+    #[test]
+    fn suspended_overlay_input_lets_keys_through() {
+        let hook = HookTest::start();
+        let window = TestWindow::new();
+        OVERLAY_HWND.store(window.0.0 as isize, Ordering::SeqCst);
+        OVERLAY_ACTIVE.store(true, Ordering::SeqCst);
+        assert!(is_overlay_active());
+
+        assert!(!overlay_input_suspended());
+        let outer = OverlayInputSuspension::new();
+        let inner = OverlayInputSuspension::new();
+        assert!(overlay_input_suspended());
+        assert_ne!(
+            hook.send(ESCAPE, WM_KEYDOWN, 0),
+            LRESULT(1),
+            "a dialog owns the keyboard"
+        );
+        assert_ne!(hook.send(0x52, WM_KEYDOWN, 0), LRESULT(1));
+        assert!(window.take(WM_OVERLAY_KEYDOWN).is_none());
+        drop(inner);
+        assert!(
+            overlay_input_suspended(),
+            "the outer suspension still holds"
+        );
+        drop(outer);
+        assert!(!overlay_input_suspended());
+        assert_eq!(hook.send(ESCAPE, WM_KEYDOWN, 0), LRESULT(1));
+    }
+
+    #[test]
+    fn the_running_shortcut_starts_one_capture_per_key_press() {
+        let hook = HookTest::start();
+        let received = hook.listen();
+        // Alt in the combination keeps the editor-shortcut routing out of the way.
+        let mods = MOD_CONTROL.0 | MOD_ALT.0;
+        TARGET_VK.store(F9, Ordering::SeqCst);
+        TARGET_MODS.store(mods | MOD_NOREPEAT.0, Ordering::SeqCst);
+
+        for (down, up) in [(WM_KEYDOWN, WM_KEYUP), (WM_SYSKEYDOWN, WM_SYSKEYUP)] {
+            assert_eq!(
+                hook.send(F9, down, mods),
+                LRESULT(1),
+                "the shortcut never reaches Windows"
+            );
+            let pressed = received
+                .try_recv()
+                .expect("the first press starts a capture");
+            assert!(pressed.elapsed() < Duration::from_secs(5));
+            assert_eq!(
+                hook.send(F9, down, mods),
+                LRESULT(1),
+                "auto-repeat is swallowed"
+            );
+            assert!(
+                received.try_recv().is_err(),
+                "a held key starts only one capture"
+            );
+            assert_eq!(
+                hook.send(F9, up, mods),
+                LRESULT(1),
+                "the release is swallowed"
+            );
+            assert!(received.try_recv().is_err());
+        }
+        // Released, so the next press is a new one.
+        assert_eq!(hook.send(F9, WM_KEYDOWN, mods), LRESULT(1));
+        assert!(received.try_recv().is_ok());
+    }
+
+    #[test]
+    fn the_running_shortcut_needs_exactly_its_modifiers() {
+        let hook = HookTest::start();
+        let received = hook.listen();
+        let mods = MOD_CONTROL.0 | MOD_ALT.0;
+        TARGET_VK.store(F9, Ordering::SeqCst);
+        TARGET_MODS.store(mods | MOD_NOREPEAT.0, Ordering::SeqCst);
+
+        for wrong in [0, MOD_CONTROL.0, mods | MOD_SHIFT.0] {
+            assert_ne!(
+                hook.send(F9, WM_KEYDOWN, wrong),
+                LRESULT(1),
+                "modifiers {wrong:#x}"
+            );
+            assert_ne!(
+                hook.send(F9, WM_KEYUP, wrong),
+                LRESULT(1),
+                "modifiers {wrong:#x}"
+            );
+        }
+        assert!(
+            received.try_recv().is_err(),
+            "no capture without the full shortcut"
+        );
+        assert!(!SNAPSHOT_HANDLED.load(Ordering::SeqCst));
+        assert_ne!(
+            hook.send(0x41, WM_KEYDOWN, mods),
+            LRESULT(1),
+            "another key is not the shortcut"
+        );
+        // A release whose press was never seen (modifiers matching) is still swallowed.
+        assert_eq!(hook.send(F9, WM_KEYUP, mods), LRESULT(1));
+    }
+
+    #[test]
+    fn a_capture_is_not_started_while_an_overlay_or_dialog_is_open() {
+        let hook = HookTest::start();
+        let received = hook.listen();
+        let mods = MOD_CONTROL.0 | MOD_ALT.0;
+        TARGET_VK.store(F9, Ordering::SeqCst);
+        TARGET_MODS.store(mods | MOD_NOREPEAT.0, Ordering::SeqCst);
+
+        OVERLAY_ACTIVE.store(true, Ordering::SeqCst);
+        assert_eq!(
+            hook.send(F9, WM_KEYDOWN, mods),
+            LRESULT(1),
+            "still swallowed"
+        );
+        assert!(received.try_recv().is_err(), "the overlay is already open");
+        assert_eq!(hook.send(F9, WM_KEYUP, mods), LRESULT(1));
+        OVERLAY_ACTIVE.store(false, Ordering::SeqCst);
+
+        let suspension = OverlayInputSuspension::new();
+        assert_eq!(hook.send(F9, WM_KEYDOWN, mods), LRESULT(1));
+        assert!(received.try_recv().is_err(), "a dialog is open");
+        assert_eq!(hook.send(F9, WM_KEYUP, mods), LRESULT(1));
+        drop(suspension);
+
+        // Without a listener (no state) the key is still claimed but nothing is sent.
+        *hook_state() = None;
+        assert_eq!(hook.send(F9, WM_KEYDOWN, mods), LRESULT(1));
+        assert!(received.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_capture_is_timed_from_the_key_press() {
+        let hook = HookTest::start();
+        let received = hook.listen();
+        let mods = MOD_CONTROL.0 | MOD_ALT.0;
+        TARGET_VK.store(F9, Ordering::SeqCst);
+        TARGET_MODS.store(mods | MOD_NOREPEAT.0, Ordering::SeqCst);
+        let mut kb = create_test_kbdllhookstruct(F9);
+        kb.time = unsafe { GetTickCount() }.wrapping_sub(300);
+        let result = unsafe {
+            process_keyboard_hook(
+                0,
+                WPARAM(WM_KEYDOWN as usize),
+                LPARAM(&kb as *const _ as isize),
+                mods,
+            )
+        };
+        assert_eq!(result, LRESULT(1));
+        let pressed = received.try_recv().expect("a capture was started");
+        let age = pressed.elapsed();
+        assert!(
+            age >= Duration::from_millis(300),
+            "the press happened {age:?} ago"
+        );
+    }
+
+    #[test]
+    fn a_poisoned_delivery_state_does_not_silence_the_shortcut() {
+        let hook = HookTest::start();
+        let received = hook.listen();
+        let mods = MOD_CONTROL.0 | MOD_ALT.0;
+        TARGET_VK.store(F9, Ordering::SeqCst);
+        TARGET_MODS.store(mods | MOD_NOREPEAT.0, Ordering::SeqCst);
+        // Some other thread panics while it holds the state.
+        poison(&HOOK_STATE);
+        assert!(HOOK_STATE.lock().is_err());
+
+        assert_eq!(hook.send(F9, WM_KEYDOWN, mods), LRESULT(1));
+        assert!(
+            received.try_recv().is_ok(),
+            "the capture still starts after the panic"
+        );
+    }
+
+    #[test]
+    fn trigger_times_look_back_at_most_five_seconds() {
+        let tick = unsafe { GetTickCount() };
+        let recent = trigger_instant(tick.wrapping_sub(250));
+        assert!(recent.elapsed() >= Duration::from_millis(250));
+        assert!(recent.elapsed() < Duration::from_secs(5));
+        let stale = trigger_instant(tick.wrapping_sub(60_000));
+        assert!(stale.elapsed() >= Duration::from_secs(5));
+        assert!(stale.elapsed() < Duration::from_secs(10));
+        let now = trigger_instant(unsafe { GetTickCount() });
+        assert!(now.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn modifier_bits_follow_the_held_keys() {
+        let held = |keys: &'static [VIRTUAL_KEY]| move |key: VIRTUAL_KEY| keys.contains(&key);
+        assert_eq!(modifiers_from(held(&[])), 0);
+        assert_eq!(modifiers_from(held(&[VK_CONTROL])), MOD_CONTROL.0);
+        assert_eq!(modifiers_from(held(&[VK_SHIFT])), MOD_SHIFT.0);
+        assert_eq!(modifiers_from(held(&[VK_MENU])), MOD_ALT.0);
+        assert_eq!(modifiers_from(held(&[VK_LWIN])), MOD_WIN.0);
+        assert_eq!(modifiers_from(held(&[VK_RWIN])), MOD_WIN.0);
+        assert_eq!(modifiers_from(held(&[VK_LWIN, VK_RWIN])), MOD_WIN.0);
+        assert_eq!(
+            modifiers_from(held(&[VK_CONTROL, VK_SHIFT, VK_MENU, VK_RWIN])),
+            MOD_CONTROL.0 | MOD_SHIFT.0 | MOD_ALT.0 | MOD_WIN.0
+        );
+        assert_eq!(
+            modifiers_from(held(&[VIRTUAL_KEY(0x41)])),
+            0,
+            "letters are not modifiers"
+        );
+        let live = get_current_modifiers();
+        assert_eq!(
+            live & !(MOD_CONTROL.0 | MOD_SHIFT.0 | MOD_ALT.0 | MOD_WIN.0),
+            0
+        );
+    }
+
+    #[test]
+    fn printscreen_and_modifier_combinations_parse_to_their_key_codes() {
+        let default = HotkeyConfig::from_str("PrintScreen").unwrap();
+        assert_eq!(default, HotkeyConfig::default());
+        assert_eq!(HotkeyConfig::from_str("  prtsc ").unwrap(), default);
+        assert_eq!(HotkeyConfig::from_str("PRTSC").unwrap(), default);
+
+        let all = HotkeyConfig::from_str("Alt+Shift+Win+Ctrl+A").unwrap();
+        assert_eq!(all.vk, 0x41);
+        assert_eq!(
+            all.modifiers,
+            MOD_ALT.0 | MOD_SHIFT.0 | MOD_WIN.0 | MOD_CONTROL.0 | MOD_NOREPEAT.0
+        );
+        assert_eq!(all.description, "Alt+Shift+Win+Ctrl+A");
+
+        let spaced = HotkeyConfig::from_str(" control + windows + 7 ").unwrap();
+        assert_eq!(spaced.vk, 0x37);
+        assert_eq!(spaced.modifiers, MOD_CONTROL.0 | MOD_WIN.0 | MOD_NOREPEAT.0);
+        assert_eq!(
+            spaced.description, " control + windows + 7 ",
+            "kept as typed"
+        );
+
+        let function = HotkeyConfig::from_str("ctrl+f1").unwrap();
+        assert_eq!(
+            (function.vk, function.modifiers),
+            (0x70, MOD_CONTROL.0 | MOD_NOREPEAT.0)
+        );
+        assert_eq!(HotkeyConfig::from_str("Ctrl+F24").unwrap().vk, 0x87);
+        assert_eq!(
+            HotkeyConfig::from_str("Ctrl+F").unwrap().vk,
+            0x46,
+            "the letter F"
+        );
+
+        let snapshot = HotkeyConfig::from_str("Ctrl+PrintScreen").unwrap();
+        assert_eq!(snapshot.vk, VK_SNAPSHOT.0 as u32);
+        assert_eq!(snapshot.modifiers, MOD_CONTROL.0 | MOD_NOREPEAT.0);
+        let after = HotkeyConfig::from_str("PrintScreen+Shift").unwrap();
+        assert_eq!(
+            after.modifiers,
+            MOD_SHIFT.0 | MOD_NOREPEAT.0,
+            "modifiers may follow the key"
+        );
+    }
+
+    #[test]
+    fn malformed_shortcuts_are_refused() {
+        for text in [
+            "",
+            "Ctrl",
+            "Ctrl+",
+            "+A",
+            "Ctrl+Shift",
+            "Ctrl+Ctrl+A",
+            "Shift+Shift+A",
+            "Alt+Alt+A",
+            "Win+Windows+A",
+            "A",
+            "Ctrl+AB",
+            "Ctrl+-",
+            "Ctrl+F0",
+            "Ctrl+F25",
+            "Ctrl+Fx",
+            "Ctrl+Delete",
+            "Ctrl+A+B",
+            "Ctrl+A+Shift+B",
+            "F5",
+        ] {
+            assert_eq!(HotkeyConfig::from_str(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_stored_shortcut_must_match_its_description() {
+        assert!(HotkeyConfig::default().is_valid());
+        let fallback = HotkeyConfig::fallback();
+        assert_eq!(
+            fallback,
+            HotkeyConfig::from_str("Ctrl+Shift+S").unwrap(),
+            "the fallback is the shortcut it describes"
+        );
+        assert!(fallback.is_valid());
+
+        let without_repeat_flag = HotkeyConfig {
+            modifiers: MOD_CONTROL.0 | MOD_SHIFT.0,
+            ..fallback.clone()
+        };
+        assert!(
+            without_repeat_flag.is_valid(),
+            "the no-repeat flag is implied"
+        );
+        for broken in [
+            HotkeyConfig {
+                vk: 0x41,
+                ..fallback.clone()
+            },
+            HotkeyConfig {
+                modifiers: MOD_CONTROL.0 | MOD_NOREPEAT.0,
+                ..fallback.clone()
+            },
+            HotkeyConfig {
+                description: "Ctrl+Shift".into(),
+                ..fallback.clone()
+            },
+            HotkeyConfig {
+                description: "Ctrl+Shift+T".into(),
+                ..fallback.clone()
+            },
+        ] {
+            assert!(!broken.is_valid(), "{broken:?}");
+        }
+    }
+
+    #[test]
+    fn the_shortcut_is_read_from_the_stored_settings() {
+        let sandbox = Sandbox::new("hotkey_load");
+        assert_eq!(
+            HotkeyConfig::load().unwrap(),
+            HotkeyConfig::default(),
+            "a new installation uses PrintScreen"
+        );
+        let hotkey = HotkeyConfig::from_str("Ctrl+Alt+F9").unwrap();
+        crate::settings::Settings {
+            hotkey: hotkey.clone(),
+            ..crate::settings::Settings::default()
+        }
+        .save()
+        .expect("save");
+        assert_eq!(HotkeyConfig::load().unwrap(), hotkey);
+
+        assert_eq!(settings_path(), Some(sandbox.settings_file()));
+        sandbox.remove_appdata();
+        assert_eq!(settings_path(), None);
+    }
+
+    /// Whether `reg.exe` reports the Snipping Tool value as 0, read separately from the
+    /// code under test.
+    fn reg_exe_reports_snipping_tool_disabled() -> bool {
+        let output = std::process::Command::new("reg")
+            .args([
+                "query",
+                r"HKCU\Control Panel\Keyboard",
+                "/v",
+                "PrintScreenKeyForSnippingEnabled",
+            ])
+            .output()
+            .expect("run reg.exe");
+        let text = String::from_utf8_lossy(&output.stdout);
+        text.contains("REG_DWORD") && text.contains("0x0")
+    }
+
+    #[test]
+    fn the_snipping_tool_state_is_read_from_the_user_registry() {
+        assert_eq!(
+            is_windows_snipping_tool_disabled(),
+            reg_exe_reports_snipping_tool_disabled()
+        );
     }
 }

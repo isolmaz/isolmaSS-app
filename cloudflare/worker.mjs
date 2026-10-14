@@ -294,7 +294,7 @@ footer{padding:1rem;text-align:center;color:var(--muted);font-size:.875rem}
 `.replaceAll('\n', '');
 const PAGE_CSP = "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'";
 
-function documentShell(lang, { title, head = '', body }) {
+function documentShell(lang, { title, head, body }) {
   const text = VIEWER_TEXT[lang];
   return `<!doctype html><html lang="${lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="robots" content="${ROBOTS}"><meta name="theme-color" content="#F3F3F3" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#202020" media="(prefers-color-scheme: dark)"><title>${escapeHtml(title)} · isolmaSS</title><link rel="icon" type="image/svg+xml" href="${FAVICON_URI}"><meta property="og:site_name" content="isolmaSS">${head}<style>${PAGE_CSS}</style></head><body>${body}<footer>${text.footer}</footer></body></html>`;
 }
@@ -306,7 +306,7 @@ function htmlResponse(request, html, { status = 200, form = false, headers = {} 
   } });
 }
 /** One centered card: a glyph, heading, note and optionally a form. */
-function cardPage(request, kind, { status = 200, glyph = 'alert', form = '', headers = {} } = {}) {
+function cardPage(request, kind, { status = 200, glyph = 'alert', form = '', headers }) {
   const lang = viewerLanguage(request), text = VIEWER_TEXT[lang][kind];
   const html = documentShell(lang, {
     title: text.title,

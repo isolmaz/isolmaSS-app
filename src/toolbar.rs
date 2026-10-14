@@ -1,7 +1,12 @@
 use crate::annotation::{ToolKind, bgra_to_colorref};
 use crate::capture::Rect;
-use windows::Win32::Foundation::{COLORREF, HWND, POINT};
+use windows::Win32::Foundation::COLORREF;
 use windows::Win32::Graphics::Gdi::HDC;
+
+mod menu;
+pub use menu::show_command_menu;
+#[cfg(test)]
+mod render_tests;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolbarAction {
@@ -799,21 +804,22 @@ fn draw_tool_icon(
 ) {
     use crate::drawing::{icon, label, rounded};
     let unit = |value: i32| (value * dpi as i32 / 96).max(1);
-    if tool == ToolKind::Step {
-        let cx = (rect.left + rect.right) / 2;
-        let cy = (rect.top + rect.bottom) / 2;
-        rounded(
-            hdc,
-            Rect::new(cx - unit(9), cy - unit(9), cx + unit(9), cy + unit(9)),
-            unit(18),
-            ink,
-            ink,
-        );
-        label(hdc, rect, "1", unit(11), surface, true);
-        return;
-    }
     // Codepoints shared by Segoe Fluent Icons (Windows 11) and Segoe MDL2 (Windows 10).
     let glyph = match tool {
+        // A numbered badge is geometry plus a numeral, not a glyph.
+        ToolKind::Step => {
+            let cx = (rect.left + rect.right) / 2;
+            let cy = (rect.top + rect.bottom) / 2;
+            rounded(
+                hdc,
+                Rect::new(cx - unit(9), cy - unit(9), cx + unit(9), cy + unit(9)),
+                unit(18),
+                ink,
+                ink,
+            );
+            label(hdc, rect, "1", unit(11), surface, true);
+            return;
+        }
         ToolKind::Select => 0xe8b0,
         ToolKind::Rectangle => 0xe739,
         ToolKind::Arrow => 0xe8ad,
@@ -822,36 +828,47 @@ fn draw_tool_icon(
         ToolKind::Text => 0xe8d2,
         ToolKind::Blur => 0xe727,
         ToolKind::Redact => 0xe73b,
-        ToolKind::Step => unreachable!("drawn above"),
     };
     icon(hdc, rect, glyph, unit(16), ink, true);
 }
 
-/// Presents the toolbar's commands as a native popup menu for keyboard and screen-reader
-/// access (F10 / Apps key). Returns the chosen command; the overlay is never mutated.
-/// The menu opens at `anchor` (screen pixels) or, without one, at the cursor.
-pub fn show_command_menu(
-    owner: HWND,
-    buttons: &[ToolbarButton],
-    anchor: Option<(i32, i32)>,
-) -> windows::core::Result<Option<ToolbarItem>> {
+/// Owns a popup menu handle and destroys it on drop.
+struct MenuGuard(windows::Win32::UI::WindowsAndMessaging::HMENU);
+
+impl Drop for MenuGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::DestroyMenu(self.0);
+        }
+    }
+}
+
+/// The toolbar's commands as a native popup menu, with the item behind each command id.
+struct CommandMenu {
+    menu: MenuGuard,
+    /// Command id `n` selects `items[n - 1]`.
+    items: Vec<ToolbarItem>,
+}
+
+impl CommandMenu {
+    /// The item behind the command id `TrackPopupMenuEx` returned; `None` when the menu
+    /// was dismissed (id 0) or the id names no item.
+    fn item(&self, command: i32) -> Option<ToolbarItem> {
+        let index = usize::try_from(command).ok()?.checked_sub(1)?;
+        self.items.get(index).copied()
+    }
+}
+
+/// Builds the command menu for keyboard and screen-reader access (F10 / Apps key): a grayed
+/// heading starts each group, disabled buttons are grayed and checked ones carry a check
+/// mark. `None` when there are no buttons.
+fn build_command_menu(buttons: &[ToolbarButton]) -> windows::core::Result<Option<CommandMenu>> {
     use windows::Win32::UI::WindowsAndMessaging::{
-        AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, MF_CHECKED, MF_GRAYED, MF_STRING,
-        TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx,
+        AppendMenuW, CreatePopupMenu, MF_CHECKED, MF_GRAYED, MF_STRING,
     };
     use windows::core::PCWSTR;
     if buttons.is_empty() {
         return Ok(None);
-    }
-    // The menu runs a modal loop; suspend overlay hotkeys for its lifetime.
-    let _suspension = crate::hotkey::OverlayInputSuspension::new();
-    struct MenuGuard(windows::Win32::UI::WindowsAndMessaging::HMENU);
-    impl Drop for MenuGuard {
-        fn drop(&mut self) {
-            unsafe {
-                let _ = DestroyMenu(self.0);
-            }
-        }
     }
     fn wide(text: &str) -> Vec<u16> {
         text.encode_utf16().chain(Some(0)).collect()
@@ -934,30 +951,10 @@ pub fn show_command_menu(
         }
         mapping.push(button.item);
     }
-    let point = match anchor {
-        Some((x, y)) => POINT { x, y },
-        None => {
-            let mut cursor = POINT::default();
-            if unsafe { GetCursorPos(&mut cursor) }.is_err() {
-                return Ok(None);
-            }
-            cursor
-        }
-    };
-    let command = unsafe {
-        TrackPopupMenuEx(
-            menu.0,
-            (TPM_RETURNCMD | TPM_RIGHTBUTTON).0,
-            point.x,
-            point.y,
-            owner,
-            None,
-        )
-    };
-    if command.0 <= 0 {
-        return Ok(None);
-    }
-    Ok(mapping.get(command.0 as usize - 1).copied())
+    Ok(Some(CommandMenu {
+        menu,
+        items: mapping,
+    }))
 }
 
 #[cfg(test)]

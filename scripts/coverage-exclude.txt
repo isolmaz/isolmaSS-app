@@ -1,15 +1,29 @@
 # Files excluded from the 100% line-coverage gate in .github/workflows/release-check.yml.
 # One repo-relative path per line; blank lines and lines starting with # are ignored.
-# This list is reviewed in the coverage PR. Every file below is predominantly Win32
-# window/message/OS glue that only a real desktop can exercise, and is covered by
-# `isolmass --smoke-test` instead.
+# Every file below is Win32 window/message/OS glue that only a real desktop, a real user or
+# a live internet service can exercise, and is covered by `isolmass --smoke-test` instead.
+# Logic lives in the covered modules; glue files only wire it to the system.
 
 # Entry point and smoke test driver
 src/main.rs
 src/smoke.rs
 
-# Editor session: window procedure, mouse and keyboard handling
+# Editor: window procedure, session window, command menu and upload hand-off
 src/overlay/session.rs
+src/overlay/window.rs
+
+# Modal popups: Save As dialog and the toolbar command menu
+src/save/dialog.rs
+src/toolbar/menu.rs
+
+# Global shortcut: RegisterHotKey message loop, low-level keyboard hook, registry write
+src/hotkey/system.rs
+
+# Upload over the real HTTPS API and opening links in the browser
+src/upload/glue.rs
+
+# Update check, download and installer launch against the live release server
+src/updater/live.rs
 
 # Windows with message loops
 src/settings_window.rs

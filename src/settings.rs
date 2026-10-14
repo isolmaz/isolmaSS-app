@@ -198,8 +198,7 @@ impl Settings {
             })?;
         std::fs::create_dir_all(parent)?;
 
-        let json = serde_json::to_vec_pretty(self)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let json = serde_json::to_vec_pretty(self)?;
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos());
@@ -372,8 +371,14 @@ impl Settings {
 pub use crate::settings_window::show_settings_dialog;
 
 #[cfg(test)]
+pub(crate) mod test_env;
+
+#[cfg(test)]
 mod tests {
+    use super::test_env::Sandbox;
     use super::*;
+    use std::io::ErrorKind;
+    use std::os::windows::fs::OpenOptionsExt;
 
     #[test]
     fn older_settings_keep_saved_values_and_fill_new_preferences() {
@@ -527,5 +532,426 @@ mod tests {
         assert!(Settings::load_from_path(&temp_file).is_err());
         assert!(crate::hotkey::HotkeyConfig::from_str("Ctrl+A+B").is_none());
         std::fs::remove_dir_all(&temp_root).expect("remove settings test directory");
+    }
+
+    /// Every field set away from its default, saving into the sandbox.
+    fn custom_settings(sandbox: &Sandbox) -> Settings {
+        Settings {
+            hotkey: HotkeyConfig::from_str("Ctrl+Shift+K").expect("supported shortcut"),
+            save_directory: sandbox.path().join("Shots"),
+            default_color: [1, 2, 3, 255],
+            last_custom_color: [4, 5, 6, 255],
+            default_thickness: 9,
+            enable_window_snap: false,
+            close_after_action: false,
+            start_with_windows: true,
+            notify_after_save: false,
+            capture_delay_ms: 250,
+            save_format: SaveFormat::Jpeg,
+            jpeg_quality: 60,
+            check_updates_automatically: false,
+            skipped_update_version: Some("1.2.3".into()),
+            cloud_url: Some("https://screens.example.workers.dev".into()),
+            theme_preference: ThemePreference::Light,
+            language: LanguagePreference::Turkish,
+            last_tool: ToolKind::Arrow,
+        }
+    }
+
+    /// Writes `content` as the stored settings file of the sandbox.
+    fn write_stored(sandbox: &Sandbox, content: &[u8]) -> PathBuf {
+        let path = sandbox.settings_file();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    fn names(directory: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn missing_fields_take_their_defaults() {
+        let loaded: Settings = serde_json::from_str("{}").expect("an empty object");
+        assert_eq!(loaded.jpeg_quality, 90);
+        assert!(loaded.enable_window_snap && loaded.close_after_action);
+        assert!(loaded.notify_after_save && loaded.check_updates_automatically);
+        assert_eq!(loaded.save_format, SaveFormat::Png);
+        assert_eq!(loaded, Settings::default());
+    }
+
+    #[test]
+    fn settings_live_in_the_roaming_folder() {
+        let sandbox = Sandbox::new("settings_location");
+        assert_eq!(Settings::config_path(), Some(sandbox.settings_file()));
+        sandbox.remove_appdata();
+        assert_eq!(Settings::config_path(), None);
+    }
+
+    #[test]
+    fn a_new_installation_loads_defaults_without_writing_anything() {
+        let sandbox = Sandbox::new("settings_new");
+        assert_eq!(
+            Settings::load_with_warning().unwrap(),
+            (Settings::default(), None)
+        );
+        assert_eq!(Settings::load().unwrap(), Settings::default());
+        assert!(!sandbox.settings_file().exists());
+    }
+
+    #[test]
+    fn without_a_roaming_folder_defaults_load_with_a_warning() {
+        let sandbox = Sandbox::new("settings_no_appdata");
+        sandbox.remove_appdata();
+        assert_eq!(
+            Settings::load_with_warning().unwrap(),
+            (
+                Settings::default(),
+                Some(
+                    crate::i18n::t(
+                        "Settings could not be loaded because %APPDATA% is unavailable."
+                    )
+                    .to_string()
+                )
+            )
+        );
+    }
+
+    #[test]
+    fn saved_settings_load_back_unchanged() {
+        let sandbox = Sandbox::new("settings_roundtrip");
+        let settings = custom_settings(&sandbox);
+        settings.save().expect("save");
+        assert_eq!(
+            Settings::load_with_warning().unwrap(),
+            (settings.clone(), None)
+        );
+        assert_eq!(Settings::load().unwrap(), settings);
+
+        let changed = Settings {
+            default_thickness: 3,
+            ..settings
+        };
+        changed.save().expect("a second save replaces the file");
+        assert_eq!(Settings::load().unwrap(), changed);
+        assert_eq!(
+            names(sandbox.settings_file().parent().unwrap()),
+            ["settings.json"],
+            "no temporary file is left"
+        );
+    }
+
+    #[test]
+    fn saving_refuses_a_save_folder_that_is_a_file_and_a_missing_profile() {
+        let sandbox = Sandbox::new("settings_save_refused");
+        let mut settings = custom_settings(&sandbox);
+        let file = sandbox.path().join("not-a-folder");
+        std::fs::write(&file, b"x").unwrap();
+        settings.save_directory = file;
+        let error = settings.save().expect_err("a file cannot hold screenshots");
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert!(!sandbox.settings_file().exists(), "nothing was written");
+
+        // A folder that does not exist (yet) is fine; screenshots create it on demand.
+        settings.save_directory = sandbox.path().join("later");
+        settings.save().expect("a missing folder is allowed");
+
+        sandbox.remove_appdata();
+        let error = settings.save().expect_err("no roaming folder");
+        assert_eq!(error.kind(), ErrorKind::NotFound);
+        assert_eq!(
+            error.to_string(),
+            "cannot save settings: %APPDATA% is unavailable"
+        );
+    }
+
+    #[test]
+    fn the_settings_path_needs_a_folder_to_live_in() {
+        let error = Settings::default()
+            .save_to_path(Path::new("settings.json"))
+            .expect_err("a bare file name has no folder");
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+
+        let sandbox = Sandbox::new("settings_replace_folder");
+        let path = sandbox.path().join("settings.json");
+        std::fs::create_dir(&path).unwrap();
+        Settings::default()
+            .save_to_path(&path)
+            .expect_err("a folder cannot be replaced by a file");
+        assert!(path.is_dir());
+        assert_eq!(
+            names(sandbox.path()),
+            ["settings.json"],
+            "the failed save left no temporary file"
+        );
+    }
+
+    #[test]
+    fn invalid_settings_are_preserved_once_then_reset() {
+        let sandbox = Sandbox::new("settings_corrupt");
+        let path = write_stored(&sandbox, b"{ not json");
+        let backup = path.with_extension("corrupt.json");
+
+        let (settings, warning) = Settings::load_with_warning().expect("recovered");
+        assert_eq!(settings, Settings::default());
+        assert_eq!(
+            warning,
+            Some(crate::i18n::tf(
+                "Settings were invalid and have been reset. The original was preserved at {}.",
+                &[&backup.display()]
+            ))
+        );
+        assert_eq!(std::fs::read(&backup).unwrap(), b"{ not json");
+        assert_eq!(
+            Settings::load_from_path(&path).unwrap(),
+            Settings::default()
+        );
+
+        // A later corruption replaces the single backup instead of adding another.
+        write_stored(&sandbox, br#"{"default_thickness": 1000}"#);
+        let (settings, warning) = Settings::load_with_warning().expect("recovered again");
+        assert_eq!(settings, Settings::default());
+        assert!(warning.is_some());
+        assert_eq!(
+            std::fs::read(&backup).unwrap(),
+            br#"{"default_thickness": 1000}"#
+        );
+        assert_eq!(
+            names(path.parent().unwrap()),
+            ["settings.corrupt.json", "settings.json"]
+        );
+
+        // `load` recovers the same way and hands back only the settings.
+        write_stored(&sandbox, b"42");
+        assert_eq!(Settings::load().unwrap(), Settings::default());
+        assert_eq!(std::fs::read(&backup).unwrap(), b"42");
+    }
+
+    #[test]
+    fn unreadable_settings_are_reported_and_never_overwritten() {
+        let sandbox = Sandbox::new("settings_unreadable");
+        let path = sandbox.settings_file();
+        std::fs::create_dir_all(&path).unwrap();
+        for result in [
+            Settings::load_with_warning().map(|loaded| loaded.0),
+            Settings::load(),
+        ] {
+            let error = result.expect_err("a folder cannot be read as settings");
+            assert!(
+                !matches!(error.kind(), ErrorKind::NotFound | ErrorKind::InvalidData),
+                "{error:?}"
+            );
+        }
+        assert!(path.is_dir());
+        assert_eq!(names(path.parent().unwrap()), ["settings.json"]);
+    }
+
+    #[test]
+    fn recovery_stops_when_the_original_cannot_be_preserved() {
+        let sandbox = Sandbox::new("settings_no_backup");
+        let path = write_stored(&sandbox, b"{ broken");
+        std::fs::create_dir(path.with_extension("corrupt.json")).unwrap();
+        let error = Settings::load_with_warning().expect_err("no backup, no reset");
+        assert!(
+            error
+                .to_string()
+                .contains("could not be preserved before recovery"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"{ broken",
+            "the original stays"
+        );
+    }
+
+    #[test]
+    fn recovery_reports_a_reset_that_fails_after_preserving_the_original() {
+        let sandbox = Sandbox::new("settings_reset_fails");
+        let path = write_stored(&sandbox, b"{ broken");
+        // Like a virus scanner: the file may be read but not replaced.
+        let _scanner = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&path)
+            .unwrap();
+        let backup = path.with_extension("corrupt.json");
+        let error = Settings::load_with_warning().expect_err("the reset cannot replace the file");
+        assert!(
+            error.to_string().contains(&format!(
+                "was preserved at {}; resetting it failed",
+                backup.display()
+            )),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&backup).unwrap(), b"{ broken");
+        assert_eq!(std::fs::read(&path).unwrap(), b"{ broken");
+        assert_eq!(
+            names(path.parent().unwrap()),
+            ["settings.corrupt.json", "settings.json"],
+            "the failed reset left no temporary file"
+        );
+    }
+
+    #[test]
+    fn skipping_an_update_changes_only_the_skipped_version() {
+        let sandbox = Sandbox::new("settings_skip");
+        Settings::skip_update_version("2.0").expect("fresh installation");
+        assert_eq!(
+            Settings::load().unwrap(),
+            Settings {
+                skipped_update_version: Some("2.0".into()),
+                ..Settings::default()
+            }
+        );
+
+        let stored = custom_settings(&sandbox);
+        stored.save().unwrap();
+        Settings::skip_update_version("2.0.1").expect("merge");
+        assert_eq!(
+            Settings::load().unwrap(),
+            Settings {
+                skipped_update_version: Some("2.0.1".into()),
+                ..stored
+            }
+        );
+    }
+
+    #[test]
+    fn a_cloudflare_connection_change_keeps_the_rest_of_the_stored_settings() {
+        let sandbox = Sandbox::new("settings_cloud");
+        let stored = custom_settings(&sandbox);
+        stored.save().unwrap();
+        let other = "https://other.example.workers.dev".to_string();
+        Settings::save_cloud_url(Some(other.clone())).expect("connect");
+        assert_eq!(
+            Settings::load().unwrap(),
+            Settings {
+                cloud_url: Some(other),
+                ..stored.clone()
+            }
+        );
+        Settings::save_cloud_url(None).expect("disconnect");
+        assert_eq!(
+            Settings::load().unwrap(),
+            Settings {
+                cloud_url: None,
+                ..stored
+            }
+        );
+    }
+
+    fn editor_session() -> Settings {
+        Settings {
+            default_color: [9, 8, 7, 255],
+            last_custom_color: [6, 5, 4, 255],
+            default_thickness: 12,
+            last_tool: ToolKind::Rectangle,
+            ..Settings::default()
+        }
+    }
+
+    #[test]
+    fn editor_preferences_merge_into_the_latest_stored_settings() {
+        let sandbox = Sandbox::new("settings_editor");
+        let session = editor_session();
+        session
+            .save_editor_preferences()
+            .expect("fresh installation");
+        assert_eq!(Settings::load().unwrap(), session);
+
+        // The Settings window saved other values while the editor was open.
+        let stored = custom_settings(&sandbox);
+        stored.save().unwrap();
+        session.save_editor_preferences().expect("merge");
+        assert_eq!(
+            Settings::load().unwrap(),
+            Settings {
+                default_color: session.default_color,
+                last_custom_color: session.last_custom_color,
+                default_thickness: session.default_thickness,
+                last_tool: session.last_tool,
+                ..stored
+            }
+        );
+    }
+
+    #[test]
+    fn merges_never_touch_an_invalid_file_or_guess_a_missing_location() {
+        let sandbox = Sandbox::new("settings_merge_errors");
+        let operations: [(&str, &dyn Fn() -> std::io::Result<()>); 3] = [
+            ("editor preferences", &|| {
+                editor_session().save_editor_preferences()
+            }),
+            ("skipped version", &|| Settings::skip_update_version("3.1")),
+            ("cloud url", &|| {
+                Settings::save_cloud_url(Some("https://screens.example.workers.dev".into()))
+            }),
+        ];
+        let path = write_stored(&sandbox, b"{ broken");
+        for (name, operation) in &operations {
+            let error = operation().expect_err(name);
+            assert_eq!(error.kind(), ErrorKind::InvalidData, "{name}");
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                b"{ broken",
+                "{name} left the file alone"
+            );
+        }
+        assert_eq!(names(path.parent().unwrap()), ["settings.json"]);
+
+        sandbox.remove_appdata();
+        for (name, operation) in &operations {
+            let error = operation().expect_err(name);
+            assert_eq!(error.to_string(), "APPDATA is unavailable", "{name}");
+        }
+    }
+
+    #[test]
+    fn validation_names_the_setting_that_is_out_of_range() {
+        let sandbox = Sandbox::new("settings_validate");
+        custom_settings(&sandbox)
+            .validate()
+            .expect("a complete, valid file");
+
+        type Damage = fn(&mut Settings);
+        let broken: [(&str, Damage); 12] = [
+            ("default_thickness", |s| s.default_thickness = 0),
+            ("default_thickness", |s| s.default_thickness = 65),
+            ("capture_delay_ms", |s| s.capture_delay_ms = 5_001),
+            ("jpeg_quality", |s| s.jpeg_quality = 0),
+            ("jpeg_quality", |s| s.jpeg_quality = 101),
+            ("save_directory", |s| {
+                s.save_directory = PathBuf::from("shots")
+            }),
+            ("save_directory", |s| {
+                s.save_directory = PathBuf::from("C:\\a\0b")
+            }),
+            ("hotkey", |s| s.hotkey.vk = 0x4C),
+            ("skipped_update_version", |s| {
+                s.skipped_update_version = Some("1.2.x".into())
+            }),
+            ("skipped_update_version", |s| {
+                s.skipped_update_version = Some("9".repeat(33))
+            }),
+            ("cloud_url", |s| {
+                s.cloud_url = Some("http://a.example.com".into())
+            }),
+            ("cloud_url", |s| {
+                s.cloud_url = Some("https://a.example.com/x".into())
+            }),
+        ];
+        for (field, damage) in broken {
+            let mut settings = custom_settings(&sandbox);
+            damage(&mut settings);
+            let error = settings.validate().expect_err(field);
+            assert_eq!(error.kind(), ErrorKind::InvalidData, "{field}");
+            assert!(error.to_string().contains(field), "{field}: {error}");
+        }
     }
 }
