@@ -350,17 +350,22 @@ pub fn text(hdc: HDC, pos: (i32, i32), text: &str, font_size: i32, color: COLORR
 /// and, at the end of a line, the width of that line.
 pub fn with_caret_stops<T>(text: &str, font_size: i32, action: impl FnOnce(&[i32]) -> T) -> T {
     with_taken(&STOPS, |stops| {
-        stops.clear();
-        if !measure_caret_stops(text, font_size, stops) {
-            // The fallback of `measure_text`: every non-empty prefix is one font size wide.
-            stops.clear();
-            for line in text.split('\n') {
-                stops.push(0);
-                stops.extend(std::iter::repeat_n(font_size.max(1), line.chars().count()));
-            }
-        }
+        fill_caret_stops(text, font_size, stops);
         action(stops.as_slice())
     })
+}
+
+/// The stops of [`with_caret_stops`]. Not generic, so every caller shares one copy of it.
+fn fill_caret_stops(text: &str, font_size: i32, stops: &mut Vec<i32>) {
+    stops.clear();
+    if !measure_caret_stops(text, font_size, stops) {
+        // The fallback of `measure_text`: every non-empty prefix is one font size wide.
+        stops.clear();
+        for line in text.split('\n') {
+            stops.push(0);
+            stops.extend(std::iter::repeat_n(font_size.max(1), line.chars().count()));
+        }
+    }
 }
 
 /// Fills `stops` as [`with_caret_stops`] describes; false when GDI could not measure.
