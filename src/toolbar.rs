@@ -310,8 +310,9 @@ impl Toolbar {
         let mut buttons = Vec::with_capacity(
             visible_count as usize + usize::from(show_color) + usize::from(show_thickness) + 5,
         );
-        // The main column stays on the selection's side, so the chevron keeps its place
-        // when the rail grows a second column.
+        // The main column stays on the selection's side, so the chevron does not move
+        // sideways when the rail grows a second column; it keeps its row too while the rail
+        // grows upward from a bar below the selection.
         let rail_centre = tool_bounds.left + tool_bounds.right;
         let main_on_left = rail_centre >= selection.left + selection.right;
         let column_x = |column: usize| {
@@ -455,8 +456,10 @@ impl Toolbar {
         self.wheel_row = (cell * Self::WHEEL_ROW / 32).max(12);
     }
 
-    /// Opens the line-width wheel under the thickness button, or above it when
-    /// the work area has no room below. Rows run from thin (top) to thick.
+    /// Opens the line-width wheel under the thickness button, or above it when the work
+    /// area has no room below. A rail at the bar's left end can reach under that button;
+    /// the wheel then takes the side that clears the rail, else moves right past it, and
+    /// never covers a rail button. Rows run from thin (top) to thick.
     fn add_wheel(&mut self, safe: Rect) {
         let Some(anchor) = self
             .buttons
@@ -470,16 +473,35 @@ impl Toolbar {
         let pad = (4 * self.dpi as i32 / 96).max(1);
         let height = Self::WHEEL_ROWS * row + pad * 2;
         let width = anchor.width().max(row * 2);
-        let top = if anchor.bottom + pad + height <= safe.bottom {
-            anchor.bottom + pad
-        } else {
-            anchor.top - pad - height
+        let below = anchor.bottom + pad;
+        let above = anchor.top - pad - height;
+        // The grid is one panel under the wheel; only a real rail has to stay clear.
+        let rail = (self.tool_bounds != self.action_bounds).then_some(self.tool_bounds);
+        let past_rail = rail.map_or(anchor.left, |rail| rail.right + pad);
+        let bounds_at = |top: i32, left: i32| {
+            let left = left.clamp(safe.left, (safe.right - width).max(safe.left));
+            Rect::new(left, top, left + width, top + height)
         };
-        let top = top.clamp(safe.top, (safe.bottom - height).max(safe.top));
-        let left = anchor
-            .left
-            .clamp(safe.left, (safe.right - width).max(safe.left));
-        let bounds = Rect::new(left, top, left + width, top + height);
+        let bounds = [
+            (below, anchor.left),
+            (above, anchor.left),
+            (below, past_rail),
+            (above, past_rail),
+        ]
+        .into_iter()
+        .map(|(top, left)| bounds_at(top, left))
+        .find(|bounds| {
+            bounds.top >= safe.top
+                && bounds.bottom <= safe.bottom
+                && rail.is_none_or(|rail| !bounds.intersects(&rail))
+        })
+        .unwrap_or_else(|| {
+            // A work area shorter than the wheel: keep it in view, above the button.
+            bounds_at(
+                above.clamp(safe.top, (safe.bottom - height).max(safe.top)),
+                anchor.left,
+            )
+        });
         let center = Self::WHEEL_ROWS / 2;
         for index in 0..Self::WHEEL_ROWS {
             let value = self.active_thickness + index - center;
@@ -511,28 +533,32 @@ impl Toolbar {
                 .is_some_and(|wheel| wheel.contains(pt.0, pt.1))
     }
 
+    /// The buttons under `pt`, topmost first. The wheel is pushed last and drawn on top of
+    /// whatever is under its panel, so on the panel only its rows count: its padding and
+    /// empty rows hit nothing beneath.
+    fn buttons_at(&self, pt: (i32, i32)) -> impl Iterator<Item = &ToolbarButton> {
+        let on_wheel = self
+            .wheel_bounds
+            .is_some_and(|wheel| wheel.contains(pt.0, pt.1));
+        self.buttons.iter().rev().filter(move |button| {
+            button.rect.contains(pt.0, pt.1)
+                && (!on_wheel || matches!(button.item, ToolbarItem::ThicknessOption(_)))
+        })
+    }
+
     /// Hit-tests for a button under cursor.
     pub fn hit_test(&self, pt: (i32, i32)) -> Option<ToolbarItem> {
         if !self.contains_point(pt) {
             return None;
         }
-        // The wheel is pushed last and drawn on top, so it wins any overlap.
-        for btn in self.buttons.iter().rev() {
-            if btn.rect.contains(pt.0, pt.1) && btn.is_enabled {
-                return Some(btn.item);
-            }
-        }
-        None
+        self.buttons_at(pt)
+            .find(|button| button.is_enabled)
+            .map(|button| button.item)
     }
 
     /// Updates hover state based on mouse coordinates.
     pub fn update_hover(&mut self, pt: (i32, i32)) -> bool {
-        let new_hover = self
-            .buttons
-            .iter()
-            .rev()
-            .find(|button| button.rect.contains(pt.0, pt.1))
-            .map(|button| button.item);
+        let new_hover = self.buttons_at(pt).next().map(|button| button.item);
         if self.hovered_item != new_hover {
             self.hovered_item = new_hover;
             true

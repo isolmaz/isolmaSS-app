@@ -670,6 +670,108 @@ fn second_column_buttons_are_hit_hovered_and_given_tooltips_like_the_main_column
 }
 
 #[test]
+fn the_wheel_of_a_split_rail_never_covers_the_rail() {
+    let tall = Rect::new(0, 0, 1920, 1040);
+    let short = Rect::new(0, 0, 1366, 728);
+    // Work area, dpi, selection, whether the wheel moves right past the rail, and whether
+    // it opens above its button. The rail sits at the bar's left end except in the fourth
+    // case, where it is at the right end and the wheel stays under its button.
+    let cases = [
+        (tall, 192, Rect::new(0, 0, 960, 1040), true, true),
+        (tall, 192, Rect::new(1100, 200, 1900, 700), true, true),
+        (tall, 192, Rect::new(1100, 300, 1900, 980), true, false),
+        (tall, 192, Rect::new(400, 200, 1200, 700), false, true),
+        (short, 144, Rect::new(900, 100, 1350, 500), true, true),
+    ];
+    for (viewport, dpi, selection, past_rail, above) in cases {
+        let what = format!("{viewport:?} at {dpi} dpi, {selection:?}");
+        let toolbar = toolbar_for(selection, viewport, true, true, dpi);
+        let rail = toolbar.tool_bounds;
+        assert_ne!(rail, toolbar.action_bounds, "{what}: the grid took over");
+        let main = rect_of(&toolbar, ToolbarItem::Tool(ToolKind::Select));
+        let more = rect_of(&toolbar, ToolbarItem::Tool(ToolKind::Ellipse));
+        assert_ne!(main.left, more.left, "{what}: not a split rail");
+
+        let wheel = toolbar.wheel_bounds.expect("the wheel is open");
+        let anchor = rect_of(&toolbar, ToolbarItem::Thickness);
+        let pad = 4 * dpi as i32 / 96;
+        assert!(inside(wheel, viewport), "{what}: {wheel:?}");
+        assert!(
+            !wheel.intersects(&rail),
+            "{what}: {wheel:?} covers {rail:?}"
+        );
+        for button in &toolbar.buttons {
+            if !matches!(button.item, ToolbarItem::ThicknessOption(_)) {
+                assert!(
+                    !wheel.intersects(&button.rect),
+                    "{what}: covers {:?}",
+                    button.item
+                );
+            }
+        }
+        let left = if past_rail {
+            rail.right + pad
+        } else {
+            anchor.left
+        };
+        assert_eq!(wheel.left, left, "{what}");
+        if above {
+            assert_eq!(wheel.bottom, anchor.top - pad, "{what}");
+        } else {
+            assert_eq!(wheel.top, anchor.bottom + pad, "{what}");
+        }
+    }
+}
+
+#[test]
+fn the_open_wheel_owns_its_whole_panel_for_hits_and_hover() {
+    // Line width 1: the first two rows (values -1 and 0) have no button.
+    let mut toolbar = Toolbar::layout(
+        &SELECTION,
+        VIEWPORT,
+        ToolKind::Rectangle,
+        PRESET_COLORS[0],
+        1,
+        false,
+        true,
+        true,
+        true,
+        true,
+        true,
+        DPI,
+        None,
+    );
+    let wheel = toolbar.wheel_bounds.expect("the wheel is open");
+    // Slide a tool under the whole wheel.
+    let select = ToolbarItem::Tool(ToolKind::Select);
+    toolbar
+        .buttons
+        .iter_mut()
+        .find(|button| button.item == select)
+        .expect("the rail has Select")
+        .rect = wheel;
+    let (pad, row) = (8, toolbar.wheel_row_height());
+    let row_middle = |index: i32| wheel.top + pad + index * row + row / 2;
+    let x = (wheel.left + wheel.right) / 2;
+    let nothing = [
+        ("top-left padding", (wheel.left, wheel.top)),
+        ("bottom-right padding", (wheel.right - 1, wheel.bottom - 1)),
+        ("side padding", (wheel.left + 1, middle(wheel))),
+        ("first empty row", (x, row_middle(0))),
+        ("second empty row", (x, row_middle(1))),
+    ];
+    for (what, point) in nothing {
+        assert_eq!(toolbar.hit_test(point), None, "{what}");
+        assert!(!toolbar.update_hover(point), "{what} hovers nothing");
+        assert_eq!(toolbar.hovered_item, None, "{what}");
+    }
+    let one = ToolbarItem::ThicknessOption(1);
+    assert_eq!(toolbar.hit_test((x, row_middle(2))), Some(one));
+    assert!(toolbar.update_hover((x, row_middle(2))));
+    assert_eq!(toolbar.hovered_item, Some(one));
+}
+
+#[test]
 fn splitting_the_rail_keeps_the_button_order_the_command_menu_follows() {
     let viewport = Rect::new(0, 0, 1920, 1040);
     let selection = Rect::new(400, 200, 1200, 700);
