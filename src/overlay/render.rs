@@ -1249,4 +1249,33 @@ mod tests {
             Some(ToolbarItem::Tool(ToolKind::Arrow))
         );
     }
+
+    #[test]
+    fn a_selection_from_the_start_of_the_text_is_highlighted_from_its_left_edge() {
+        let mut state = scene();
+        let mut edit = TextEditState::new((150, 120), "hello".to_string(), PLUM, 22, None);
+        edit.anchor = Some(0);
+        edit.caret = 3;
+        let bounds = edit.bounds();
+        let right = 150 + crate::drawing::measure_text("hel", 22).0;
+        state.set_text_edit(Some(edit));
+        state.composite_scene();
+        let selected = bgr(crate::theme::TEXT_SELECTION);
+        let color = [selected[0], selected[1], selected[2], 255];
+        assert!(
+            count_color(
+                &state,
+                Rect::new(150, bounds.top, right, bounds.bottom),
+                color
+            ) > 20
+        );
+        assert_eq!(
+            count_color(
+                &state,
+                Rect::new(right + 3, bounds.top, right + 30, bounds.bottom),
+                color
+            ),
+            0
+        );
+    }
 }
