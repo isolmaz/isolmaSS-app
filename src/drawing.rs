@@ -355,7 +355,7 @@ pub fn with_caret_stops<T>(text: &str, font_size: i32, action: impl FnOnce(&[i32
             stops.clear();
             for line in text.split('\n') {
                 stops.push(0);
-                stops.extend(line.chars().map(|_| font_size.max(1)));
+                stops.extend(std::iter::repeat_n(font_size.max(1), line.chars().count()));
             }
         }
         action(stops.as_slice())
