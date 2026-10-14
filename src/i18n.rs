@@ -267,11 +267,7 @@ mod tests {
             .filter(|(_, turkish)| tr::TABLE.iter().filter(|(_, t)| t == turkish).count() == 1)
             .map(|(english, _)| *english)
             .collect();
-        assert!(
-            unique.len() > 100,
-            "only {} unambiguous entries",
-            unique.len()
-        );
+        assert!(unique.len() > 100);
         for preference in [
             LanguagePreference::English,
             LanguagePreference::Turkish,

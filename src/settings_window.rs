@@ -37,7 +37,11 @@ pub struct SettingsWindowState {
     settings: Settings,
     saved: bool,
     update_status: UpdateStatus,
+    /// The update line still shows its fixed text, not a check's message.
+    update_note_idle: bool,
     update_frame: u8,
+    /// The language the window is currently drawn in.
+    shown_language: LanguagePreference,
     tab: usize,
     recording_hotkey: bool,
     original_hotkey: HotkeyConfig,
@@ -1408,12 +1412,26 @@ fn fill_choice_combos(hwnd: HWND, settings: &Settings) {
             (1, "English".into()),
             (2, "Türkçe".into()),
         ],
-        match settings.language {
-            LanguagePreference::System => 0,
-            LanguagePreference::English => 1,
-            LanguagePreference::Turkish => 2,
-        },
+        language_choice(settings.language),
     );
+}
+
+/// The item data of the language drop-down entry for a preference.
+fn language_choice(language: LanguagePreference) -> i64 {
+    match language {
+        LanguagePreference::System => 0,
+        LanguagePreference::English => 1,
+        LanguagePreference::Turkish => 2,
+    }
+}
+
+/// The preference of a language drop-down entry; the inverse of [`language_choice`].
+fn language_from_choice(value: i64) -> LanguagePreference {
+    match value {
+        1 => LanguagePreference::English,
+        2 => LanguagePreference::Turkish,
+        _ => LanguagePreference::System,
+    }
 }
 
 fn initialize_control_values(hwnd: HWND, settings: &Settings) {
@@ -1468,6 +1486,7 @@ fn set_update_status(
 ) {
     let was_busy = state.update_status == UpdateStatus::Busy;
     state.update_status = status;
+    state.update_note_idle = false;
     if status == UpdateStatus::Busy && !was_busy {
         state.update_frame = 0;
         if unsafe { SetTimer(owner, 2, 75, None) } == 0 {
@@ -1546,18 +1565,25 @@ fn apply_selection(hwnd: HWND, state: &mut SettingsWindowState, id: i32) {
             };
             apply_theme(hwnd, state);
         }
-        ID_LANGUAGE => {
-            state.settings.language = match value {
-                1 => LanguagePreference::English,
-                2 => LanguagePreference::Turkish,
-                _ => LanguagePreference::System,
-            };
-            // Handled once the drop-down has closed, as it rebuilds the lists.
-            unsafe {
-                let _ = PostMessageW(hwnd, WM_LANGUAGE_CHANGED, WPARAM(0), LPARAM(0));
-            }
-        }
+        // While the list is open the selection changes with every arrow key; the
+        // choice is taken when it closes (CBN_CLOSEUP), as the switch refills the list.
+        ID_LANGUAGE if !language_list_open(hwnd) => choose_language(hwnd, state, value),
         _ => {}
+    }
+}
+
+fn language_list_open(hwnd: HWND) -> bool {
+    control(hwnd, ID_LANGUAGE).is_some_and(|combo| unsafe {
+        SendMessageW(combo, CB_GETDROPPEDSTATE, WPARAM(0), LPARAM(0)).0 != 0
+    })
+}
+
+/// Takes the language drop-down entry `value` as the chosen language and posts the
+/// switch, which runs after the message that reported the choice.
+fn choose_language(hwnd: HWND, state: &mut SettingsWindowState, value: i64) {
+    state.settings.language = language_from_choice(value);
+    unsafe {
+        let _ = PostMessageW(hwnd, WM_LANGUAGE_CHANGED, WPARAM(0), LPARAM(0));
     }
 }
 
@@ -1576,16 +1602,18 @@ fn control_text(hwnd: HWND, id: i32) -> String {
 /// through the shared language setting, the tray menu and icon tooltip. Cancel or
 /// closing the window restores the saved language.
 fn apply_language(hwnd: HWND, state: &mut SettingsWindowState) {
-    // Whether the update line still shows its idle text, in the old language.
-    let idle_update = control_text(hwnd, ID_UPDATE_STATUS) == idle_update_text();
+    if state.settings.language == state.shown_language {
+        return;
+    }
+    state.shown_language = state.settings.language;
     crate::i18n::set_preference(state.settings.language);
-    retranslate(hwnd, state, idle_update);
+    retranslate(hwnd, state);
     crate::tray::apply_tooltip();
 }
 
 /// Sets every text of the window in the current language and fits the window to
 /// the new text lengths. The tab, the values and the settings stay as they are.
-fn retranslate(hwnd: HWND, state: &SettingsWindowState, idle_update: bool) {
+fn retranslate(hwnd: HWND, state: &SettingsWindowState) {
     let title = wide_string(crate::i18n::t("isolmaSS Settings"));
     unsafe {
         let _ = SetWindowTextW(hwnd, PCWSTR(title.as_ptr()));
@@ -1599,7 +1627,7 @@ fn retranslate(hwnd: HWND, state: &SettingsWindowState, idle_update: bool) {
     for (index, name) in color_names().into_iter().enumerate() {
         set_text(hwnd, ID_COLOR_FIRST + index as i32, name);
     }
-    if idle_update {
+    if state.update_note_idle {
         set_text(hwnd, ID_UPDATE_STATUS, idle_update_text());
     }
     if !control_text(hwnd, ID_THICKNESS_NOTE).is_empty() {
@@ -1996,6 +2024,12 @@ unsafe extern "system" fn settings_wnd_proc(
                 apply_selection(hwnd, state, id);
                 return LRESULT(0);
             }
+            if code == CBN_CLOSEUP && id == ID_LANGUAGE {
+                if let Some(value) = combo_value(hwnd, id) {
+                    choose_language(hwnd, state, value);
+                }
+                return LRESULT(0);
+            }
             if id == ID_HOTKEY_RECORD && code == BN_KILLFOCUS {
                 end_recording(hwnd, state);
                 return LRESULT(0);
@@ -2267,7 +2301,9 @@ pub fn show_settings_dialog(current: &Settings, owner: Option<HWND>) -> Result<O
         settings: current.clone(),
         saved: false,
         update_status: UpdateStatus::Idle,
+        update_note_idle: true,
         update_frame: 0,
+        shown_language: current.language,
         tab: 0,
         recording_hotkey: false,
         original_hotkey: current.hotkey.clone(),
@@ -2590,6 +2626,23 @@ mod tests {
         // row pitch, the gap the layout used to reserve all the time.
         assert_eq!(warning_room(NOTE), 18);
         assert_eq!(warning_room(2 * NOTE), warning_room(NOTE) + NOTE);
+    }
+
+    #[test]
+    fn language_entries_map_to_preferences_and_back() {
+        for language in [
+            LanguagePreference::System,
+            LanguagePreference::English,
+            LanguagePreference::Turkish,
+        ] {
+            assert_eq!(language_from_choice(language_choice(language)), language);
+        }
+        assert_eq!(language_choice(LanguagePreference::System), 0);
+        assert_eq!(
+            language_from_choice(99),
+            LanguagePreference::System,
+            "an unknown entry follows Windows"
+        );
     }
 
     #[test]
