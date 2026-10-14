@@ -20,11 +20,17 @@ A small, free Windows screenshot editor. Press PrintScreen, draw on the capture,
 
 Ctrl+U uploads the capture to your Worker and copies the link. Anyone you send it to can open it in a browser. The share page has **Download**, **Open original**, **Copy link** and a **Report** button that opens Cloudflare's abuse form, plus a **Get isolmaSS** button for the recipient. A password-protected link shows the same page once it is unlocked.
 
-![Uploading with Ctrl+U and opening the link in a browser](docs/media/share.gif)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/share-dark.gif">
+  <img src="docs/media/share-light.gif" alt="Uploading with Ctrl+U, then the share page in a browser">
+</picture>
 
 The Cloudflare window shows your Worker's usage, sets your limits and lists your images. Deleting an image stops its link at once.
 
-![Cloudflare window: usage, limits, and deleting an image](docs/media/cloudflare.gif)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/cloudflare-dark.gif">
+  <img src="docs/media/cloudflare-light.gif" alt="Cloudflare window: usage, limits, and deleting an image">
+</picture>
 
 **Setup is a one-time wizard.** The first upload asks you to sign in to Cloudflare in your browser and approve two permissions; the app then creates the Worker for you. You don't paste keys or use a command line. Passwords for new uploads, upload and storage limits, and automatic expiry are built in. Details: [docs/CLOUDFLARE.md](docs/CLOUDFLARE.md).
 
@@ -34,7 +40,10 @@ When the upload card says *Uploaded · link copied*, you can also **drag the ima
 
 PrintScreen freezes every monitor; drag a region or click a window. **Ctrl+A** selects the whole monitor under the pointer. **Capture last region** in the tray menu reopens the editor on the region you last copied, saved, uploaded or pinned, until the app quits.
 
-![Dragging a region over a dashboard](docs/media/capture.gif)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/capture-dark.gif">
+  <img src="docs/media/capture-light.gif" alt="Dragging a region over a note window and resizing it">
+</picture>
 
 ## Annotate
 
@@ -42,19 +51,28 @@ Ten tools, each with a one-letter shortcut: frame, ellipse, arrow, line, pen, hi
 
 Text can have several lines (**Shift+Enter** adds a line break, Enter finishes) and an optional filled background box (**Ctrl+B**), so a caption stays readable on a busy screenshot.
 
-![Frame, arrow, pen, highlighter, text and numbered steps](docs/media/annotate.gif)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/annotate-dark.gif">
+  <img src="docs/media/annotate-light.gif" alt="Frame, text with a background box, arrow, ellipse and numbered steps">
+</picture>
 
 ## Edit after drawing
 
 Press **V**, click any drawing, then drag it, drag its handles or press Delete. Ctrl+Z brings it back. The selection box sits outside thick strokes instead of cutting through them.
 
-![Selecting, moving and resizing an arrow and a frame, deleting and undoing](docs/media/edit.gif)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/edit-dark.gif">
+  <img src="docs/media/edit-light.gif" alt="Selecting, moving and resizing an arrow and a frame, deleting and undoing">
+</picture>
 
 ## Hide sensitive details
 
 Blur is only a visual effect. For secrets use **Redact** (M): it replaces pixels with solid ones and is applied last, so nothing shows through in the exported image.
 
-![Blurring an email address and redacting an API key](docs/media/redact.gif)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/redact-dark.gif">
+  <img src="docs/media/redact-light.gif" alt="Ctrl+Shift+R covering the email and phone, redacting the API key and blurring the message">
+</picture>
 
 **Ctrl+Shift+R** finds email addresses and phone numbers in the selection and covers each with a Redact box, as one undo step. It errs on the side of privacy and also covers other long digit sequences that look like phone numbers, such as order numbers; Ctrl+Z undoes it, or delete a single box. Check the result: text recognition can miss what it cannot read.
 
