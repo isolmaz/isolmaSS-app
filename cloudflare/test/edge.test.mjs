@@ -89,6 +89,22 @@ describe('rate limiting of viewers', () => {
     expect(limiter.keys).toEqual(['198.51.100.4', 'unknown']);
   });
 
+  it('spends a token on a download too, and refuses it when the budget is exhausted', async () => {
+    const id = await upload(png());
+    const limiter = countingLimiter();
+    const response = await call(`/i/${id}?download=1`, { headers: { 'CF-Connecting-IP': '198.51.100.5' } }, { VIEW_LIMITER: limiter });
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Content-Disposition')).toMatch(/^attachment;/);
+    expect(limiter.keys).toEqual(['198.51.100.5']);
+    for (const path of [`/i/${id}?download=1`, `/i/${id}.png?download=1`]) {
+      const refused = await call(path, {}, { STORE: untouchedStore, VIEW_LIMITER: countingLimiter(false) });
+      expect(refused.status).toBe(429);
+      expect(refused.headers.get('Content-Type')).toBe(HTML);
+      expect(refused.headers.get('Retry-After')).toBe('60');
+      expect(refused.headers.get('Content-Disposition')).toBeNull();
+    }
+  });
+
   it('answers an exhausted budget with an HTML page and Retry-After, before the Durable Object', async () => {
     const response = await call('/i/' + 'C'.repeat(32), {}, { STORE: untouchedStore, VIEW_LIMITER: countingLimiter(false) });
     expect(response.status).toBe(429);
@@ -190,16 +206,16 @@ describe('failures behind the edge', () => {
 });
 
 describe('every page', () => {
-  it('has the Windows 11 look, a favicon, light and dark themes and no script', async () => {
+  it('has the Windows 11 look, the brand bar, a favicon, light and dark themes and a script only on the share page', async () => {
     const id = await upload(png());
     const protectedId = await upload(png(), { password: PASSWORD });
     const pages = [
-      await call('/'),
-      await call(`/i/${'H'.repeat(32)}`),
-      await call(`/i/${protectedId}`),
-      await navigate(`/i/${id}`),
+      { page: await call('/'), scripted: false },
+      { page: await call(`/i/${'H'.repeat(32)}`), scripted: false },
+      { page: await call(`/i/${protectedId}`), scripted: false },
+      { page: await navigate(`/i/${id}`), scripted: true },
     ];
-    for (const page of pages) {
+    for (const { page, scripted } of pages) {
       const html = await page.text();
       expect(page.headers.get('X-Robots-Tag')).toBe(ROBOTS);
       expect(html).toContain('<meta name="color-scheme" content="light dark">');
@@ -213,14 +229,27 @@ describe('every page', () => {
       expect(html).toContain(':focus-visible{outline:2px solid var(--fg);outline-offset:2px}');
       expect(html).toContain('border-radius:8px');
       expect(html).toContain('border-radius:4px');
-      expect(html).toContain('<footer>Shared with isolmaSS</footer>');
-      expect(html).not.toContain('<script');
-      expect(page.headers.get('Content-Security-Policy')).toMatch(/^default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action '(self|none)'$/);
+      expect(html).toContain('<header class="top"><a class="brand" href="https://ss.isolmaz.com">');
+      expect(html).toContain('<a class="btn primary" href="https://ss.isolmaz.com/download">Get isolmaSS — free</a>');
+      expect(html).toContain('<footer>Shared with <a href="https://ss.isolmaz.com">isolmaSS</a> · Free screenshot tool for Windows</footer>');
+      expect(html.match(/<script/g)?.length ?? 0).toBe(scripted ? 1 : 0);
+      expect(page.headers.get('Set-Cookie')).toBeNull();
+      const script = scripted ? " script-src 'nonce-[A-Za-z0-9_-]{32}';" : '';
+      expect(page.headers.get('Content-Security-Policy')).toMatch(new RegExp(
+        `^default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none';${script} form-action '(self|none)'$`));
     }
   });
 
-  it('has a Turkish footer for a Turkish browser', async () => {
+  it('has a Turkish brand bar and footer for a Turkish browser', async () => {
     const html = await (await call('/', { headers: { 'Accept-Language': 'tr' } })).text();
-    expect(html).toContain('<footer>isolmaSS ile paylaşıldı</footer>');
+    expect(html).toContain(`<a class="btn primary" href="https://ss.isolmaz.com/download">isolmaSS'i ücretsiz edinin</a>`);
+    expect(html).toContain('<footer><a href="https://ss.isolmaz.com">isolmaSS</a> ile paylaşıldı · Windows için ücretsiz ekran görüntüsü aracı</footer>');
+  });
+
+  it('shows the brand bar on the error pages too', async () => {
+    const gone = await (await call(`/i/${'H'.repeat(32)}`)).text();
+    expect(gone).toContain('This screenshot is no longer available');
+    expect(gone).toContain('<a class="btn primary" href="https://ss.isolmaz.com/download">Get isolmaSS — free</a>');
+    expect(gone).not.toContain('abuse.cloudflare.com');
   });
 });
