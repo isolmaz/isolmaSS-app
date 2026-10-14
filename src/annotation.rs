@@ -2465,6 +2465,36 @@ mod tests {
     }
 
     #[test]
+    fn a_single_point_highlight_is_a_disc_and_degenerate_requests_change_nothing() {
+        let original = [100, 100, 100, 255];
+        let mut pixels = original.repeat(40 * 20);
+        render_highlight(&mut pixels, 40, 20, &[(20, 10)], [200, 0, 0, 255], 2);
+        // Radius 4: the marker blend of the highlighter test, centred on the point.
+        assert_eq!(pixel_at(&pixels, 40, 20, 10), [138, 62, 62, 255]);
+        assert_eq!(pixel_at(&pixels, 40, 24, 10), [138, 62, 62, 255]);
+        assert_eq!(pixel_at(&pixels, 40, 25, 10), original);
+        assert_eq!(pixel_at(&pixels, 40, 20, 15), original);
+
+        let untouched = original.repeat(40 * 20);
+        let line = [(5, 5), (30, 15)];
+        for (width, height, points, buffer_len) in [
+            (0, 20, &line[..], untouched.len()),
+            (40, 0, &line[..], untouched.len()),
+            (40, 20, &[][..], untouched.len()),
+            // A buffer too short for width x height pixels.
+            (40, 20, &line[..], untouched.len() - 4),
+        ] {
+            let mut pixels = untouched[..buffer_len].to_vec();
+            render_highlight(&mut pixels, width, height, points, [200, 0, 0, 255], 2);
+            assert_eq!(
+                pixels,
+                untouched[..buffer_len],
+                "{width}x{height} {points:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_highlight_entirely_off_the_image_changes_nothing() {
         let mut pixels = vec![100u8; 40 * 20 * 4];
         let original = pixels.clone();

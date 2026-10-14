@@ -962,9 +962,7 @@ mod tests {
     }
 
     fn english() -> std::sync::MutexGuard<'static, ()> {
-        let guard = crate::i18n::TEST_LANGUAGE_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let guard = crate::i18n::TEST_LANGUAGE_LOCK.lock().unwrap();
         crate::i18n::set_preference(crate::i18n::LanguagePreference::English);
         guard
     }
@@ -1289,7 +1287,8 @@ mod tests {
         ] {
             let error = Error::from(failure);
             assert_eq!(error.code(), windows::core::HRESULT::from_win32(31));
-            assert!(error.message().contains(message), "{}", error.message());
+            let text = error.message();
+            assert!(text.contains(message), "{text}");
         }
         crate::i18n::set_preference(crate::i18n::LanguagePreference::System);
     }
@@ -1329,12 +1328,10 @@ mod tests {
                 windows::core::HRESULT::from_win32(87),
                 "{width}x{height}"
             );
+            let text = error.message();
             assert!(
-                error
-                    .message()
-                    .contains("The virtual screen has no capturable area."),
-                "{}",
-                error.message()
+                text.contains("The virtual screen has no capturable area."),
+                "{text}"
             );
         }
         assert!(DibSection::new(bogus_dc(), 4, 4).is_err());

@@ -194,14 +194,16 @@ fn draw_arrow(
             pen.0,
             shaft.as_ptr(),
             shaft.len() as i32,
-        ))?;
-        ok(GdipFillPolygon(
-            graphics.0,
-            brush.0.cast(),
-            head.as_ptr(),
-            head.len() as i32,
-            FillModeAlternate,
         ))
+        .and_then(|()| {
+            ok(GdipFillPolygon(
+                graphics.0,
+                brush.0.cast(),
+                head.as_ptr(),
+                head.len() as i32,
+                FillModeAlternate,
+            ))
+        })
     }
 }
 
