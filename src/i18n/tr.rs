@@ -362,6 +362,10 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Could not open the folder", "Klasör açılamadı"),
     ("Could not open the link", "Bağlantı açılamadı"),
     (
+        "Could not open the pin window: {}",
+        "Sabitleme penceresi açılamadı: {}",
+    ),
+    (
         "Could not open the save dialog",
         "Kaydet penceresi açılamadı",
     ),
@@ -385,6 +389,10 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     (
         "Could not prepare the protected keys: {}",
         "Korumalı anahtarlar hazırlanamadı: {}",
+    ),
+    (
+        "Could not prepare the screenshot for pinning: {}",
+        "Ekran görüntüsü sabitlemeye hazırlanamadı: {}",
     ),
     (
         "Could not prepare the screenshot for upload: {}",
@@ -526,6 +534,10 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Kurulum dosyası indiriliyor ve doğrulanıyor…",
     ),
     ("Downloading update", "Güncelleme indiriliyor"),
+    (
+        "Drag the image into another app",
+        "Görseli başka bir uygulamaya sürükleyin",
+    ),
     ("Duplicate OAuth parameter.", "Yinelenen OAuth parametresi."),
     ("Editor", "Düzenleyici"),
     ("Ellipse", "Elips"),
@@ -712,6 +724,8 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Pen", "Kalem"),
     ("Permission granted", "İzin alındı"),
     ("Pick color", "Renk seç"),
+    ("Pin failed", "Sabitlenemedi"),
+    ("Pin to screen", "Ekrana sabitle"),
     ("Pink", "Pembe"),
     ("Press keys · Esc cancels", "Tuşlara basın · Esc iptal"),
     ("Purple", "Mor"),
@@ -729,6 +743,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     ("Retention (days)", "Saklama (gün)"),
     ("Save", "Kaydet"),
+    ("Save as…", "Farklı kaydet…"),
     ("Save failed", "Kaydetme başarısız"),
     ("Save limits", "Sınırları kaydet"),
     ("Save password", "Şifreyi kaydet"),

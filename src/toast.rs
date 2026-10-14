@@ -4,6 +4,7 @@
 //! focus and lives on the UI thread after the editor has closed.
 use crate::upload::{Prepared, WM_UPLOAD_DONE, WM_UPLOAD_PROGRESS};
 use std::cell::Cell;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -20,7 +21,9 @@ use windows::Win32::Graphics::Gdi::{
     DeleteObject, EndPaint, FillRect, GetMonitorInfoW, HDC, HGDIOBJ, InvalidateRect,
     MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, PAINTSTRUCT, SRCCOPY, SelectObject,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, w};
 
@@ -136,6 +139,15 @@ struct State {
     motion: Option<Motion>,
     /// The Copy button reads "Copied" until `TIMER_COPIED` fires.
     copied_flash: bool,
+    /// Where a press on the card body started, in client pixels, until it ends or turns
+    /// into a drag.
+    drag_press: Option<POINT>,
+    /// The copy of the uploaded image that drops receive, made by the card's first drag.
+    staged: Option<PathBuf>,
+    /// When a drop target last accepted the image; its copy is kept a little longer then.
+    dropped_at: Option<Instant>,
+    /// A drag out of the card is running; the card stays until it ends.
+    dragging: bool,
 }
 
 impl State {
@@ -211,6 +223,16 @@ pub fn show_upload(prepared: Prepared, anchor: POINT) {
     }
 }
 
+/// Destroys the open card at once, without its fade-out; the app is quitting.
+pub fn close_now() {
+    let current = CURRENT.with(Cell::get);
+    if current != 0 {
+        unsafe {
+            let _ = DestroyWindow(HWND(current as *mut _));
+        }
+    }
+}
+
 /// Pumps messages until the current toast has closed. Used by one-shot
 /// command-line captures, whose process would otherwise end mid-upload.
 pub fn wait_until_closed() {
@@ -252,6 +274,10 @@ fn create(prepared: Prepared, anchor: POINT) -> Result<(), String> {
         animated,
         motion: None,
         copied_flash: false,
+        drag_press: None,
+        staged: None,
+        dropped_at: None,
+        dragging: false,
     });
     let mut ex_style = WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE;
     if animated {
@@ -279,6 +305,7 @@ fn create(prepared: Prepared, anchor: POINT) -> Result<(), String> {
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, state as isize);
     }
     CURRENT.with(|current| current.set(hwnd.0 as isize));
+    add_drag_tip(hwnd);
     let state = unsafe { &mut *state };
     // Size and place on the work area of the capture's monitor.
     let monitor = unsafe { MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST) };
@@ -520,6 +547,9 @@ fn failed_height(hwnd: HWND, dpi: u32, detail: &str) -> i32 {
 /// Fades the toast out and destroys it afterwards; at once when it is not
 /// animated. Callers must not touch `state` after a direct destroy.
 fn close(hwnd: HWND, state: &mut State) {
+    if state.dragging {
+        return;
+    }
     if !state.animated {
         unsafe {
             let _ = DestroyWindow(hwnd);
@@ -896,6 +926,136 @@ fn middle_ellipsis(hdc: HDC, text: &str, width: i32) -> Vec<u16> {
     full
 }
 
+/// Whether a press at `point` can start a drag of the uploaded image: the finished card's
+/// body, anywhere but on its buttons, until it starts to fade out.
+fn draggable(state: &State, hwnd: HWND, point: POINT) -> bool {
+    matches!(state.phase, Phase::Done { .. })
+        && !state.closing()
+        && hit(state, hwnd, point).is_none()
+}
+
+/// Adds the tooltip that names the drag. It asks for its text (`TTN_GETDISPINFOW`) each
+/// time it is about to show, so it stays silent over the buttons and on unfinished cards.
+fn add_drag_tip(hwnd: HWND) {
+    use windows::Win32::UI::Controls::{
+        ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, TOOLTIPS_CLASSW,
+        TTF_IDISHWND, TTF_SUBCLASS, TTM_ADDTOOLW, TTS_ALWAYSTIP, TTS_NOPREFIX, TTTOOLINFOW,
+    };
+    use windows::core::PWSTR;
+    let init = INITCOMMONCONTROLSEX {
+        dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
+        dwICC: ICC_WIN95_CLASSES,
+    };
+    let tip = unsafe {
+        let _ = InitCommonControlsEx(&init);
+        CreateWindowExW(
+            WS_EX_TOPMOST,
+            TOOLTIPS_CLASSW,
+            PCWSTR::null(),
+            WINDOW_STYLE(TTS_ALWAYSTIP | TTS_NOPREFIX) | WS_POPUP,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            hwnd,
+            None,
+            HINSTANCE::default(),
+            None,
+        )
+    };
+    let Ok(tip) = tip else {
+        return;
+    };
+    let tool = TTTOOLINFOW {
+        cbSize: std::mem::size_of::<TTTOOLINFOW>() as u32,
+        uFlags: TTF_IDISHWND | TTF_SUBCLASS,
+        hwnd,
+        uId: hwnd.0 as usize,
+        // LPSTR_TEXTCALLBACKW
+        lpszText: PWSTR(-1isize as *mut u16),
+        ..Default::default()
+    };
+    unsafe {
+        SendMessageW(
+            tip,
+            TTM_ADDTOOLW,
+            WPARAM(0),
+            LPARAM(std::ptr::from_ref(&tool) as isize),
+        );
+    }
+}
+
+/// Fills in the drag tooltip's text when the pointer is over the draggable part of the card.
+fn answer_tip(hwnd: HWND, state: &State, info: &mut windows::Win32::UI::Controls::NMTTDISPINFOW) {
+    use windows::Win32::Graphics::Gdi::ScreenToClient;
+    use windows::core::PWSTR;
+    let mut point = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut point);
+        let _ = ScreenToClient(hwnd, &mut point);
+    }
+    info.szText = [0; 80];
+    if draggable(state, hwnd, point) {
+        let text = crate::i18n::t("Drag the image into another app");
+        for (slot, unit) in info.szText.iter_mut().zip(text.encode_utf16().take(79)) {
+            *slot = unit;
+        }
+    }
+    info.lpszText = PWSTR(info.szText.as_mut_ptr());
+}
+
+/// Drags the uploaded image (a copy of its file) and the share link out of the card into
+/// another app. OLE runs its own modal loop meanwhile, so the card's state is looked up
+/// again afterwards: nothing may hold on to it across the drag.
+fn start_drag(hwnd: HWND) {
+    let find = || unsafe { (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut State).as_mut() };
+    let Some(state) = find() else {
+        return;
+    };
+    let Phase::Done { url, .. } = &state.phase else {
+        return;
+    };
+    let link = url.clone();
+    let staged = crate::drag::staged_copy(
+        &mut state.staged,
+        state.prepared.path(),
+        &crate::drag::directory(),
+        &crate::drag::file_stem_now(),
+        state.prepared.extension(),
+    );
+    // Without a copy of the image the drop still carries the link.
+    let file = match staged {
+        Ok(path) => Some(path),
+        Err(error) => {
+            crate::diagnostics::record("drag", &error.to_string());
+            None
+        }
+    };
+    state.dragging = true;
+    unsafe {
+        let _ = KillTimer(hwnd, TIMER_CLOSE);
+    }
+    let payload = crate::drag::Payload::new(file.as_deref(), &link);
+    let dropped = crate::drag::run(payload).unwrap_or_else(|error| {
+        crate::diagnostics::record("drag", &error.to_string());
+        false
+    });
+    let Some(state) = find() else {
+        return;
+    };
+    if dropped {
+        state.dropped_at = Some(Instant::now());
+    }
+    state.dragging = false;
+    state.hovering = false;
+    state.hot = None;
+    state.pressed = None;
+    arm_close(hwnd, state);
+    unsafe {
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+}
+
 fn point_from(lparam: LPARAM) -> POINT {
     POINT {
         x: (lparam.0 & 0xffff) as i16 as i32,
@@ -1009,6 +1169,22 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
+            let point = point_from(lparam);
+            if let Some(origin) = state.drag_press
+                && crate::overlay::exceeds_drag_threshold(
+                    (origin.x, origin.y),
+                    (point.x, point.y),
+                    crate::overlay::drag_threshold(state.dpi),
+                )
+            {
+                state.drag_press = None;
+                unsafe {
+                    let _ = ReleaseCapture();
+                }
+                // Runs the drag loop; `state` must not be used afterwards.
+                start_drag(hwnd);
+                return LRESULT(0);
+            }
             if !state.hovering {
                 state.hovering = true;
                 let mut track = TRACKMOUSEEVENT {
@@ -1042,13 +1218,25 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
-            state.pressed = hit(state, hwnd, point_from(lparam));
+            let point = point_from(lparam);
+            state.pressed = hit(state, hwnd, point);
+            if draggable(state, hwnd, point) {
+                state.drag_press = Some(point);
+                unsafe {
+                    SetCapture(hwnd);
+                }
+            }
             unsafe {
                 let _ = InvalidateRect(hwnd, None, false);
             }
             LRESULT(0)
         }
         WM_LBUTTONUP => {
+            if state.drag_press.take().is_some() {
+                unsafe {
+                    let _ = ReleaseCapture();
+                }
+            }
             let action = hit(state, hwnd, point_from(lparam));
             let pressed = state.pressed.take();
             unsafe {
@@ -1056,6 +1244,20 @@ unsafe extern "system" fn wnd_proc(
             }
             if let Some(action) = action.filter(|action| Some(*action) == pressed) {
                 run(hwnd, state, action);
+            }
+            LRESULT(0)
+        }
+        WM_CAPTURECHANGED => {
+            state.drag_press = None;
+            LRESULT(0)
+        }
+        WM_NOTIFY => {
+            use windows::Win32::UI::Controls::{NMHDR, NMTTDISPINFOW, TTN_GETDISPINFOW};
+            let header = unsafe { &*(lparam.0 as *const NMHDR) };
+            if header.code == TTN_GETDISPINFOW {
+                answer_tip(hwnd, state, unsafe {
+                    &mut *(lparam.0 as *mut NMTTDISPINFOW)
+                });
             }
             LRESULT(0)
         }
@@ -1068,6 +1270,15 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_NCDESTROY => {
+            // The dragged copy of the image goes with the card, once an app that has just
+            // received it has had time to read it; the folder's old copies go too.
+            if let Some(copy) = state.staged.take() {
+                crate::drag::discard(
+                    copy,
+                    crate::drag::grace_left(state.dropped_at.map(|at| at.elapsed())),
+                );
+            }
+            crate::drag::sweep_in_background();
             unsafe {
                 let _ = KillTimer(hwnd, TIMER_ANIMATE);
                 let _ = KillTimer(hwnd, TIMER_CLOSE);

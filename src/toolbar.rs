@@ -15,6 +15,8 @@ pub enum ToolbarAction {
     Save,
     Copy,
     Upload,
+    /// Listed in the command menu and bound to Ctrl+T only; the toolbar has no button for it.
+    Pin,
     Settings,
     Cancel,
 }
@@ -654,6 +656,7 @@ impl Toolbar {
                         ToolbarAction::Save => 0xe74e,
                         ToolbarAction::Copy => 0xe8c8,
                         ToolbarAction::Upload => 0xe753,
+                        ToolbarAction::Pin => 0xe718,
                         ToolbarAction::Settings => 0xe713,
                         ToolbarAction::Cancel => 0xe711,
                     };
@@ -684,6 +687,7 @@ impl Toolbar {
                 ToolbarItem::Action(ToolbarAction::Save) => crate::i18n::t("Save"),
                 ToolbarItem::Action(ToolbarAction::Copy) => crate::i18n::t("Copy"),
                 ToolbarItem::Action(ToolbarAction::Upload) => crate::i18n::t("Upload"),
+                ToolbarItem::Action(ToolbarAction::Pin) => crate::i18n::t("Pin to screen"),
                 ToolbarItem::Action(ToolbarAction::Settings) => crate::i18n::t("Settings"),
                 ToolbarItem::Action(ToolbarAction::Cancel) => crate::i18n::t("Cancel"),
                 ToolbarItem::Color => crate::i18n::t("Color"),
@@ -798,6 +802,7 @@ fn shortcut(item: ToolbarItem) -> Option<&'static str> {
         ToolbarItem::Action(ToolbarAction::Save) => "Ctrl+S",
         ToolbarItem::Action(ToolbarAction::Copy) => "Ctrl+C",
         ToolbarItem::Action(ToolbarAction::Upload) => "Ctrl+U",
+        ToolbarItem::Action(ToolbarAction::Pin) => "Ctrl+T",
         ToolbarItem::Action(ToolbarAction::Settings) => "Ctrl+,",
         ToolbarItem::Action(ToolbarAction::Cancel) => "Esc",
         ToolbarItem::MoreTools
@@ -952,6 +957,7 @@ fn build_command_menu(buttons: &[ToolbarButton]) -> windows::core::Result<Option
             ToolbarItem::Action(ToolbarAction::Upload) => {
                 crate::i18n::t("Upload and copy link").to_owned()
             }
+            ToolbarItem::Action(ToolbarAction::Pin) => crate::i18n::t("Pin to screen").to_owned(),
             ToolbarItem::Action(ToolbarAction::Settings) => crate::i18n::t("Settings").to_owned(),
             ToolbarItem::Action(ToolbarAction::Cancel) => crate::i18n::t("Cancel").to_owned(),
             ToolbarItem::Color => crate::i18n::t("Choose color…").to_owned(),

@@ -347,6 +347,7 @@ fn every_toolbar_command_shows_its_keyboard_shortcut() {
         (ToolbarAction::Save, "Ctrl+S"),
         (ToolbarAction::Copy, "Ctrl+C"),
         (ToolbarAction::Upload, "Ctrl+U"),
+        (ToolbarAction::Pin, "Ctrl+T"),
         (ToolbarAction::Settings, "Ctrl+,"),
         (ToolbarAction::Cancel, "Esc"),
     ] {
@@ -1003,6 +1004,7 @@ fn menu_label(item: ToolbarItem) -> String {
         Action(Save) => "Save screenshot".into(),
         Action(Copy) => "Copy to clipboard".into(),
         Action(Upload) => "Upload and copy link".into(),
+        Action(Pin) => "Pin to screen".into(),
         Action(Settings) => "Settings".into(),
         Action(Cancel) => "Cancel".into(),
         Color => "Choose color…".into(),
@@ -1112,6 +1114,52 @@ fn a_command_id_selects_the_item_behind_it_and_dismissal_selects_nothing() {
     );
     assert_eq!(menu.item(-1), None);
     assert_eq!(menu.item(last + 1), None);
+}
+
+#[test]
+fn the_command_menu_lists_pin_to_screen_by_its_label() {
+    let _english = English::new();
+    let pin = ToolbarItem::Action(ToolbarAction::Pin);
+    let buttons = [ToolbarButton {
+        item: pin,
+        rect: Rect::default(),
+        is_enabled: true,
+        is_checked: false,
+    }];
+    let menu = build_command_menu(&buttons)
+        .expect("the menu is built")
+        .expect("there is a button");
+    assert_eq!(menu_string(menu.menu.0, 1, MF_BYCOMMAND), "Pin to screen");
+    assert_eq!(menu_label(pin), "Pin to screen");
+    assert_eq!(menu.item(1), Some(pin));
+}
+
+#[test]
+fn the_pin_command_has_its_own_glyph_and_a_tooltip() {
+    let mut toolbar = standard(false, false);
+    let cancel = ToolbarItem::Action(ToolbarAction::Cancel);
+    let rect = rect_of(&toolbar, cancel);
+    let before = render(&toolbar, None).pixels();
+    toolbar
+        .buttons
+        .iter_mut()
+        .find(|button| button.item == cancel)
+        .expect("the Cancel button")
+        .item = ToolbarItem::Action(ToolbarAction::Pin);
+    let canvas = render(&toolbar, None);
+    let glyph = canvas
+        .changed_since(&before)
+        .expect("the Pin glyph replaces the Cancel glyph");
+    assert!(within(glyph, rect), "{glyph:?} stays inside the button");
+    let resting = canvas.pixels();
+    toolbar.hovered_item = Some(ToolbarItem::Action(ToolbarAction::Pin));
+    let hovered = render(&toolbar, None)
+        .changed_since(&resting)
+        .expect("hovering changes the picture");
+    assert!(
+        !within(hovered, rect),
+        "the tooltip opens beside the button"
+    );
 }
 
 #[test]
