@@ -66,7 +66,10 @@ fn sensitive_lines() -> Vec<OcrLine> {
     ]
 }
 
-const EMAIL_RECT: Rect = Rect::new(108, 118, 213, 136);
+// The selection starts at (100, 100). A word box spans [left, right) x [top, bottom) of the
+// selection's pixels, so the redaction is the box moved by that origin and grown by the
+// 2 px of padding on every side: x 10..110 becomes 108..212, y 20..34 becomes 118..136.
+const EMAIL_RECT: Rect = Rect::new(108, 118, 212, 136);
 const PHONE_RECT: Rect = Rect::new(108, 148, 172, 166);
 
 /// A state with a real back buffer, a selection and one rectangle, that stays open after
@@ -146,8 +149,7 @@ fn ctrl_shift_c_copies_the_text_of_the_selection() {
     press(&mut state, &window, 'c', CTRL | SHIFT);
     assert_eq!(job_intent(&state), Some(Intent::CopyText));
     settle(&mut state, &window);
-    let copied = clipboard_text().expect("text is on the clipboard");
-    assert_eq!(copied.replace("\r\n", "\n"), "Hello\nworld");
+    assert_eq!(raw_clipboard_text().as_deref(), Some("Hello\r\nworld"));
     assert!(state.recognition.job.is_none());
     assert!(state.committed_result);
     assert!(window.exists());

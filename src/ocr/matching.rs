@@ -2,13 +2,16 @@
 //! text joined from its words, so a number the engine split into several words
 //! ("+90 532 123 45 67") is still found, and every match maps back to the words it spans.
 use super::{OcrLine, OcrWord, WordBox};
-use std::ops::RangeInclusive;
 
 /// Put between two words too far apart to belong together, such as neighbouring table
 /// columns; no match spans it.
 const BREAK: char = '\n';
 /// A phone number has 7 to 15 digits (E.164 allows 15).
-const PHONE_DIGITS: RangeInclusive<usize> = 7..=15;
+const MIN_PHONE_DIGITS: usize = 7;
+const MAX_PHONE_DIGITS: usize = 15;
+/// Without a `+`, an area code in parentheses or a `00` prefix, a number written in groups
+/// has at most this many digits; a longer run is two numbers side by side.
+const MAX_NATIONAL_DIGITS: usize = 13;
 
 /// The union of the word boxes of every e-mail address and phone number in `lines`, line by
 /// line in reading order.
@@ -164,10 +167,107 @@ fn find_phones(chars: &[char]) -> Vec<(usize, usize)> {
             continue;
         }
         let end = phone_span_end(chars, index);
-        if is_phone(chars, index, end) {
-            found.push((index, end));
-        }
+        found.extend(phones_in_run(chars, index, end));
         index = end;
+    }
+    found
+}
+
+/// The numbers in the run `start..end` of digits and phone separators. A run may hold
+/// several numbers, a number next to a date or an order number, or parts that no phone
+/// number is written with, so the groups of digits are split into the numbers that cover
+/// the most digits. A number is never cut out of the middle of a date.
+fn phones_in_run(chars: &[char], start: usize, end: usize) -> Vec<(usize, usize)> {
+    let groups = digit_groups(chars, start, end);
+    let blocked = date_groups(chars, &groups);
+    // `best[i]`: the digits the numbers made of groups `i..` cover at most, and the last
+    // group and first character of the number starting at group `i` that achieves it.
+    let mut best: Vec<(usize, Option<(usize, usize)>)> = vec![(0, None); groups.len() + 1];
+    for i in (0..groups.len()).rev() {
+        let mut top: (usize, Option<(usize, usize)>) = (best[i + 1].0, None);
+        let candidates = run_candidates(chars, start, &groups, &blocked, i);
+        for (last, first, digits) in candidates.into_iter().rev() {
+            let covered = digits + best[last + 1].0;
+            if covered > top.0 || (covered == top.0 && top.1.is_none()) {
+                top = (covered, Some((last, first)));
+            }
+        }
+        best[i] = top;
+    }
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i < groups.len() {
+        match best[i].1 {
+            Some((last, first)) => {
+                found.push((first, groups[last].1));
+                i = last + 1;
+            }
+            None => i += 1,
+        }
+    }
+    found
+}
+
+/// The character range of each group of digits in `start..end`.
+fn digit_groups(chars: &[char], start: usize, end: usize) -> Vec<(usize, usize)> {
+    let mut groups = Vec::new();
+    let mut index = start;
+    while index < end {
+        if !chars[index].is_ascii_digit() {
+            index += 1;
+            continue;
+        }
+        let from = index;
+        while index < end && chars[index].is_ascii_digit() {
+            index += 1;
+        }
+        groups.push((from, index));
+    }
+    groups
+}
+
+/// Which groups belong to a date written with one separator between day, month and year:
+/// 15.01.2024, 2024-01-15.
+fn date_groups(chars: &[char], groups: &[(usize, usize)]) -> Vec<bool> {
+    let mut blocked = vec![false; groups.len()];
+    for (index, trio) in groups.windows(3).enumerate() {
+        let first = &chars[trio[0].1..trio[1].0];
+        let second = &chars[trio[1].1..trio[2].0];
+        let [a, b, c] = [trio[0], trio[1], trio[2]].map(|(from, to)| &chars[from..to]);
+        if first == second && matches!(first, ['.'] | ['-']) && is_date(a, b, c) {
+            blocked[index..index + 3].fill(true);
+        }
+    }
+    blocked
+}
+
+/// The numbers that start at group `from`: for each group they could end at, `(that group,
+/// the first character, the digits)`, a leading `+` or `(` included.
+fn run_candidates(
+    chars: &[char],
+    run_start: usize,
+    groups: &[(usize, usize)],
+    blocked: &[bool],
+    from: usize,
+) -> Vec<(usize, usize, usize)> {
+    let plain = groups[from].0;
+    let prefixed = (plain > run_start && matches!(chars[plain - 1], '+' | '(')).then(|| plain - 1);
+    let mut found = Vec::new();
+    let mut digits = 0;
+    for last in from..groups.len() {
+        let joined = last == from || valid_separator(&chars[groups[last - 1].1..groups[last].0]);
+        digits += groups[last].1 - groups[last].0;
+        if blocked[last] || !joined || digits > MAX_PHONE_DIGITS {
+            break;
+        }
+        let end = groups[last].1;
+        if let Some(first) = prefixed
+            .into_iter()
+            .chain(Some(plain))
+            .find(|&first| is_phone(chars, first, end))
+        {
+            found.push((last, first, digits));
+        }
     }
     found
 }
@@ -206,16 +306,18 @@ fn is_phone(chars: &[char], start: usize, end: usize) -> bool {
 }
 
 /// Whether the text around `start..end` leaves it a number of its own: not the tail of a
-/// word or an amount of money, not part of a decimal, a time or a percentage.
+/// word or an amount of money, not part of a decimal, a time or a percentage, and not the
+/// digits of a `+` number whose sign is not part of the match.
 fn standalone(chars: &[char], start: usize, end: usize) -> bool {
     let before = start.checked_sub(1).map(|index| chars[index]);
     let after = chars.get(end).copied();
     let is_digit = |index: usize| chars.get(index).is_some_and(char::is_ascii_digit);
-    let glued_before = before
-        .is_some_and(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '$' | '€' | '£' | '¥' | '₺'))
-        || (matches!(before, Some(',' | ':')) && start.checked_sub(2).is_some_and(is_digit));
+    let glued_before = before.is_some_and(|ch| {
+        ch.is_alphanumeric() || matches!(ch, '_' | '+' | '$' | '€' | '£' | '¥' | '₺')
+    }) || (matches!(before, Some(',' | '.' | ':'))
+        && start.checked_sub(2).is_some_and(is_digit));
     let glued_after = after.is_some_and(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '%' | ':'))
-        || (after == Some(',') && is_digit(end + 1));
+        || (matches!(after, Some(',' | '.')) && is_digit(end + 1));
     !glued_before && !glued_after
 }
 
@@ -223,6 +325,8 @@ fn standalone(chars: &[char], start: usize, end: usize) -> bool {
 struct Phone<'a> {
     /// A `+` prefix or an area code in parentheses says the writer meant a phone number.
     formatted: bool,
+    /// Starts with the `00` of an international call.
+    international: bool,
     groups: Vec<&'a [char]>,
     separators: Vec<&'a [char]>,
 }
@@ -260,6 +364,7 @@ impl<'a> Phone<'a> {
         }
         Some(Self {
             formatted: plus || area_code,
+            international: groups[0].starts_with(&['0', '0']),
             groups,
             separators,
         })
@@ -269,7 +374,12 @@ impl<'a> Phone<'a> {
     /// an amount or a list of figures.
     fn plausible(&self) -> bool {
         let digits: usize = self.groups.iter().map(|group| group.len()).sum();
-        if !PHONE_DIGITS.contains(&digits) {
+        let most = if self.formatted || self.international {
+            MAX_PHONE_DIGITS
+        } else {
+            MAX_NATIONAL_DIGITS
+        };
+        if !(MIN_PHONE_DIGITS..=most).contains(&digits) {
             return false;
         }
         if self.formatted {
@@ -292,6 +402,8 @@ impl<'a> Phone<'a> {
             && dotted_phone
             && !thousands
             && !self.is_date()
+            && !self.is_time_range()
+            && !self.is_year_range()
     }
 
     /// Every separator is the single character `wanted`.
@@ -311,25 +423,52 @@ impl<'a> Phone<'a> {
                 .all(|group| group.len() <= 3 && number(group) <= 255)
     }
 
-    /// Day, month and year in either order and with any separator: 15.01.2024, 01/15/2024,
+    /// Day, month and year in either order and with any separator: 15.01.2024, 15 01 2024,
     /// 2024-01-15.
     fn is_date(&self) -> bool {
-        let [a, b, c] = self.groups.as_slice() else {
+        matches!(self.groups.as_slice(), [a, b, c] if is_date(a, b, c))
+    }
+
+    /// Opening hours: 09.00-18.00.
+    fn is_time_range(&self) -> bool {
+        let [a, b, c, d] = self.groups.as_slice() else {
             return false;
         };
-        let (x, y, z) = (number(a), number(b), number(c));
-        match (a.len(), b.len(), c.len()) {
-            (1..=2, 1..=2, 4) => {
-                (1900..=2099).contains(&z)
-                    && (1..=31).contains(&x)
-                    && (1..=31).contains(&y)
-                    && x.min(y) <= 12
-            }
-            (4, 1..=2, 1..=2) => {
-                (1900..=2099).contains(&x) && (1..=12).contains(&y) && (1..=31).contains(&z)
-            }
-            _ => false,
+        let separators: &[&[char]] = &self.separators;
+        separators == [&['.'][..], &['-'][..], &['.'][..]]
+            && [a, c]
+                .iter()
+                .all(|hour| hour.len() <= 2 && number(hour) <= 24)
+            && [b, d]
+                .iter()
+                .all(|minute| minute.len() == 2 && number(minute) <= 59)
+    }
+
+    /// Two years: 2020-2024.
+    fn is_year_range(&self) -> bool {
+        let [from, to] = self.groups.as_slice() else {
+            return false;
+        };
+        [from, to]
+            .iter()
+            .all(|year| year.len() == 4 && (1900..=2099).contains(&number(year)))
+    }
+}
+
+/// Whether three groups of digits read as day, month and year in either order.
+fn is_date(a: &[char], b: &[char], c: &[char]) -> bool {
+    let (x, y, z) = (number(a), number(b), number(c));
+    match (a.len(), b.len(), c.len()) {
+        (1..=2, 1..=2, 4) => {
+            (1900..=2099).contains(&z)
+                && (1..=31).contains(&x)
+                && (1..=31).contains(&y)
+                && x.min(y) <= 12
         }
+        (4, 1..=2, 1..=2) => {
+            (1900..=2099).contains(&x) && (1..=12).contains(&y) && (1..=31).contains(&z)
+        }
+        _ => false,
     }
 }
 

@@ -120,6 +120,7 @@ fn phone_numbers_are_found_in_the_usual_notations() {
         (vec!["06.12.34.56.78"], 0),
         (vec!["Tel:05321234567"], 0),
         (vec!["+90", "532", "123", "45", "67"], 4),
+        (vec!["0090", "532", "123", "45", "67"], 4),
         (vec!["(212)", "555-0199"], 1),
         (vec!["(212)555-0199"], 0),
         (vec!["+1", "(212)", "555-0199"], 2),
@@ -148,7 +149,7 @@ fn two_numbers_in_a_line_are_two_matches() {
 }
 
 #[test]
-fn dates_times_amounts_versions_and_other_figures_are_not_phone_numbers() {
+fn dates_times_ranges_amounts_versions_and_other_figures_are_not_phone_numbers() {
     for words in [
         vec!["2024"],
         vec!["12:30"],
@@ -172,20 +173,71 @@ fn dates_times_amounts_versions_and_other_figures_are_not_phone_numbers() {
         vec!["192.168.100.200"],
         vec!["10.20.30.40"],
         vec!["3.14159265"],
-        vec!["4111", "1111", "1111", "1111"],
         vec!["ABC1234567"],
         vec!["1", "2", "3", "4", "5", "6", "7", "8"],
         vec!["(12.04.2024)"],
-        vec!["(555-1234)"],
         vec!["(212)"],
-        vec!["(555", "123-4567"],
         vec!["123+4567890"],
+        vec!["09.00-18.00"],
+        vec!["9.00-18.00"],
+        vec!["Open", "09:00-18:00"],
+        vec!["Open", "09:00", "-", "18:00"],
+        vec!["2020-2024"],
+        vec!["\u{a9}", "2019-2024"],
+        vec!["Since", "1998", "2024"],
         vec!["555--1234"],
         vec!["555", "-", "1234"],
         vec!["123-45"],
     ] {
         assert!(found(&words).is_empty(), "{words:?}");
     }
+}
+
+#[test]
+fn numbers_in_parentheses_are_found_without_them() {
+    // 7 digits with a dash is a legitimate local number, so it counts even in parentheses.
+    for (words, first, last) in [
+        (
+            vec!["Ahmet", "Y\u{131}lmaz", "(0532", "123", "45", "67)"],
+            2,
+            5,
+        ),
+        (vec!["John", "(555-123-4567)"], 1, 1),
+        (vec!["(555-1234)"], 0, 0),
+        // The engine lost the closing parenthesis of the area code.
+        (vec!["(555", "123-4567"], 0, 1),
+    ] {
+        assert_eq!(
+            found(&words),
+            vec![around(&words, first, last)],
+            "{words:?}"
+        );
+    }
+}
+
+#[test]
+fn a_rejected_run_does_not_hide_the_numbers_inside_it() {
+    let dash = [
+        "Tel:", "0532", "123", "45", "67", "-", "0533", "765", "43", "21",
+    ];
+    assert_eq!(found(&dash), vec![around(&dash, 1, 4), around(&dash, 6, 9)]);
+    let date = ["15.01.2024", "0532", "123", "45", "67"];
+    assert_eq!(found(&date), vec![around(&date, 1, 4)]);
+    let side_by_side = ["0212", "345", "67", "89", "0532", "123", "45", "67"];
+    assert_eq!(
+        found(&side_by_side),
+        vec![around(&side_by_side, 0, 3), around(&side_by_side, 4, 7)]
+    );
+}
+
+#[test]
+fn an_order_number_before_a_number_never_leaves_digits_uncovered() {
+    let words = ["Order", "12345", "0532", "123", "45", "67"];
+    // The digits cannot be told apart, so they are covered in two pieces.
+    assert_eq!(
+        found(&words),
+        vec![around(&words, 1, 2), around(&words, 3, 5)]
+    );
 }
 
 #[test]
