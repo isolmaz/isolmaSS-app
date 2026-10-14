@@ -72,7 +72,7 @@ pub fn prepare(
         settings.save_format,
         settings.jpeg_quality,
     )
-    .and_then(|_| std::fs::metadata(&output).map_err(|error| error.to_string()))
+    .and_then(|_| std::fs::metadata(&output).map_err(crate::save::describe))
     .map_err(|error| crate::i18n::tf("Could not prepare the screenshot for upload: {}", &[&error]))?
     .len();
     Ok(Prepared {
@@ -83,15 +83,9 @@ pub fn prepare(
     })
 }
 
-/// Sends the prepared screenshot through `request`, the HTTPS call to the Worker
-/// ([`send`] passes [`cloudflare_setup::api_request`]), and returns its share link.
-fn send_with<R>(
-    prepared: &Prepared,
-    progress: UploadProgress<'_>,
-    request: R,
-) -> Result<String, String>
-where
-    R: FnOnce(
+/// The shape of [`cloudflare_setup::api_request`]: origin, path, method, bearer token,
+/// content type, image password, body and progress callback; the status and body back.
+type ApiRequest<'a> = dyn FnMut(
         &str,
         &str,
         &str,
@@ -100,8 +94,16 @@ where
         Option<&str>,
         RequestBody<'_>,
         UploadProgress<'_>,
-    ) -> Result<(u32, Vec<u8>), String>,
-{
+    ) -> Result<(u32, Vec<u8>), String>
+    + 'a;
+
+/// Sends the prepared screenshot through `request`, the HTTPS call to the Worker
+/// ([`send`] passes [`cloudflare_setup::api_request`]), and returns its share link.
+fn send_with(
+    prepared: &Prepared,
+    progress: UploadProgress<'_>,
+    request: &mut ApiRequest<'_>,
+) -> Result<String, String> {
     let type_name = match prepared.format {
         SaveFormat::Png => "image/png",
         SaveFormat::Jpeg => "image/jpeg",
@@ -163,7 +165,7 @@ fn browser_target(url: &str) -> Result<Vec<u16>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::test_env::{Sandbox, TempDir};
+    use crate::settings::test_env::{Sandbox, TempDir, lock};
     use std::sync::Mutex;
 
     const ORIGIN: &str = "https://isolmass-share-abc.example.workers.dev";
@@ -404,25 +406,21 @@ mod tests {
                 b"encoded image",
             );
             let reported = Mutex::new(Vec::new());
-            let progress = |sent: u64, total: u64| {
-                reported
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner())
-                    .push((sent, total))
-            };
+            let progress = |sent: u64, total: u64| lock(&reported).push((sent, total));
             let mut seen = None;
             let link = send_with(
                 &upload,
                 Some(&progress),
-                |origin, path, method, bearer, content_type, password, body, progress| {
-                    let RequestBody::File(file) = body else {
-                        panic!("the screenshot is sent from its file");
-                    };
+                &mut |origin, path, method, bearer, content_type, password, body, progress| {
+                    let mut sent_file = None;
+                    if let RequestBody::File(file) = body {
+                        sent_file = Some(std::fs::read(file).unwrap());
+                    }
                     seen = Some((
                         (origin.to_string(), path.to_string(), method.to_string()),
                         (bearer.to_string(), content_type.map(str::to_string)),
                         password.map(str::to_string),
-                        std::fs::read(file).unwrap(),
+                        sent_file,
                     ));
                     progress.expect("the progress callback is passed on")(13, 26);
                     Ok((201, receipt(ORIGIN, &id, &id)))
@@ -448,11 +446,12 @@ mod tests {
                 )
             );
             assert_eq!(password.as_deref(), Some("correct horse battery"));
-            assert_eq!(body, b"encoded image");
             assert_eq!(
-                *reported.lock().unwrap_or_else(|poison| poison.into_inner()),
-                [(13, 26)]
+                body.as_deref(),
+                Some(b"encoded image".as_slice()),
+                "the screenshot is sent from its file"
             );
+            assert_eq!(*lock(&reported), [(13, 26)]);
         }
     }
 
@@ -460,11 +459,15 @@ mod tests {
     fn send_reports_network_failures_unchanged() {
         let dir = TempDir::new("upload_offline");
         let upload = prepared(&dir, SaveFormat::Png, None, b"image");
-        let error = send_with(&upload, None, |_, _, _, _, _, password, _, progress| {
-            assert_eq!(password, None, "no image password configured");
-            assert!(progress.is_none());
-            Err("offline".to_string())
-        })
+        let error = send_with(
+            &upload,
+            None,
+            &mut |_, _, _, _, _, password, _, progress| {
+                assert_eq!(password, None, "no image password configured");
+                assert!(progress.is_none());
+                Err("offline".to_string())
+            },
+        )
         .unwrap_err();
         assert_eq!(error, "offline");
     }
@@ -475,16 +478,16 @@ mod tests {
         let dir = TempDir::new("upload_rejected_file");
         let upload = prepared(&dir, SaveFormat::Png, None, &vec![0; 1_500_000]);
         let rejected = |status: u32, body: &[u8]| {
-            send_with(&upload, None, |_, _, _, _, _, _, _, _| {
+            send_with(&upload, None, &mut |_, _, _, _, _, _, _, _| {
                 Ok((status, body.to_vec()))
             })
             .unwrap_err()
         };
         assert!(rejected(401, b"{}").contains("no longer matches your Worker"));
+        let too_large = rejected(413, b"");
         assert!(
-            rejected(413, b"").contains("(1.5 MB)"),
-            "the size of the capture is reported: {}",
-            rejected(413, b"")
+            too_large.contains("(1.5 MB)"),
+            "the size of the capture is reported: {too_large}"
         );
         assert!(rejected(500, b"").contains("temporarily unavailable"));
         assert_eq!(
@@ -498,7 +501,10 @@ mod tests {
         let dir = TempDir::new("upload_receipt");
         let upload = prepared(&dir, SaveFormat::Png, None, b"image");
         let answer = |body: Vec<u8>| {
-            send_with(&upload, None, |_, _, _, _, _, _, _, _| Ok((201, body))).unwrap_err()
+            send_with(&upload, None, &mut |_, _, _, _, _, _, _, _| {
+                Ok((201, body.clone()))
+            })
+            .unwrap_err()
         };
         let id = "B2".repeat(16);
         assert_eq!(

@@ -103,10 +103,9 @@ pub(crate) struct GdiPlusBitmap(pub(crate) *mut c_void);
 
 impl Drop for GdiPlusBitmap {
     fn drop(&mut self) {
-        if !self.0.is_null() {
-            unsafe {
-                let _ = GdipDisposeImage(self.0);
-            }
+        // GDI+ answers a null image with an error status, which is ignored here.
+        unsafe {
+            let _ = GdipDisposeImage(self.0);
         }
     }
 }
@@ -172,6 +171,14 @@ fn screenshots_directory(
     }
 }
 
+/// Bytes of a 32-bit `width` x `height` image, or an error when the size overflows.
+fn pixel_bytes(width: usize, height: usize) -> Result<usize, String> {
+    width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| crate::i18n::t("The screenshot dimensions are too large.").to_string())
+}
+
 fn extract_selection(
     buffer: &[u8],
     full_width: i32,
@@ -187,10 +194,7 @@ fn extract_selection(
     let height = clamped.height();
     let source_stride = full_width as usize * 4;
     let destination_stride = width as usize * 4;
-    let required = (full_width as usize)
-        .checked_mul(full_height as usize)
-        .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or_else(|| crate::i18n::t("The screenshot dimensions are too large.").to_string())?;
+    let required = pixel_bytes(full_width as usize, full_height as usize)?;
     if buffer.len() < required {
         return Err(
             crate::i18n::t("The screenshot buffer is smaller than its dimensions.").to_string(),
@@ -242,48 +246,63 @@ fn remove_temporary(path: &Path) {
 /// There is deliberately no age-based sweeper: it could delete another process's
 /// in-flight temporary or a user's own dotfile in a shared folder.
 fn write_temporary(
-    directory: &Path,
+    temporary: &Path,
     buffer: &[u8],
     full_width: i32,
     full_height: i32,
     selection: &Rect,
     format: SaveFormat,
     jpeg_quality: u8,
-) -> Result<PathBuf, String> {
-    let temporary = directory.join(format!(
+) -> Result<(), String> {
+    // A name that is already taken belongs to someone else and is never removed.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(temporary)
+        .map_err(describe)?;
+    let result = encode_image(
+        buffer,
+        full_width,
+        full_height,
+        selection,
+        temporary,
+        format,
+        jpeg_quality,
+    )
+    .and_then(|_| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(temporary)
+            .and_then(|file| file.sync_all())
+            .map_err(describe)
+    });
+    if result.is_err() {
+        remove_temporary(temporary);
+    }
+    result
+}
+
+/// The name of a new temporary file in `directory`, unique to this process and instant.
+fn temporary_path(directory: &Path) -> PathBuf {
+    directory.join(format!(
         ".isolmass-{}-{}.tmp",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos())
-    ));
-    let result = (|| {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .map_err(|error| error.to_string())?;
-        encode_image(
-            buffer,
-            full_width,
-            full_height,
-            selection,
-            &temporary,
-            format,
-            jpeg_quality,
-        )?;
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&temporary)
-            .and_then(|file| file.sync_all())
-            .map_err(|error| error.to_string())
-    })();
-    match result {
-        Ok(()) => Ok(temporary),
-        Err(error) => {
-            remove_temporary(&temporary);
-            Err(error)
-        }
+    ))
+}
+
+/// An I/O error as the message shown to the user.
+pub(crate) fn describe(error: std::io::Error) -> String {
+    error.to_string()
+}
+
+/// The folder that holds `path`; the current folder for a bare file name.
+fn parent_directory(path: &Path) -> &Path {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
     }
 }
 
@@ -298,12 +317,9 @@ pub fn save_buffer_to_image(
     format: SaveFormat,
     jpeg_quality: u8,
 ) -> Result<PathBuf, String> {
-    let directory = output_path
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let temporary = write_temporary(
-        directory,
+    let temporary = temporary_path(parent_directory(output_path));
+    write_temporary(
+        &temporary,
         buffer,
         full_width,
         full_height,
@@ -436,21 +452,28 @@ fn unique_path(directory: &Path, filename: &str, format: SaveFormat, suffixes: u
     ))
 }
 
-/// Moves `source` to `destination` without replacing anything. A name that someone
-/// else took in the meantime is swapped for the next from `next_name`, at most 128 times.
+/// How many names are tried when moving a finished screenshot into place.
+const PLACE_ATTEMPTS: u32 = 128;
+
+/// Moves the `temporary` file to `destination` without replacing anything. A name that
+/// someone else took in the meantime is swapped for a fresh unique name in `directory`,
+/// at most `attempts` times in total. The temporary is removed when it cannot be placed.
 fn place_unique(
-    source: &Path,
+    temporary: &Path,
     mut destination: PathBuf,
-    mut next_name: impl FnMut() -> PathBuf,
+    directory: &Path,
+    format: SaveFormat,
+    attempts: u32,
 ) -> Result<PathBuf, String> {
-    for _ in 0..128 {
-        match move_file(source, &destination, MOVEFILE_WRITE_THROUGH) {
+    for _ in 0..attempts {
+        match move_file(temporary, &destination, MOVEFILE_WRITE_THROUGH) {
             Ok(()) => return Ok(destination),
             // ERROR_FILE_EXISTS and ERROR_ALREADY_EXISTS.
             Err(error) if matches!(error.code().0 as u32, 0x80070050 | 0x800700b7) => {
-                destination = next_name()
+                destination = unique_output_path(directory, format)
             }
             Err(error) => {
+                remove_temporary(temporary);
                 return Err(crate::i18n::tf(
                     "Could not finalize the screenshot: {}",
                     &[&error],
@@ -458,6 +481,7 @@ fn place_unique(
             }
         }
     }
+    remove_temporary(temporary);
     Err(crate::i18n::t("Could not reserve a unique screenshot filename.").to_string())
 }
 
@@ -487,8 +511,9 @@ pub fn save_screenshot(
     })?;
 
     let output_path = unique_output_path(&directory, format);
-    let temporary = write_temporary(
-        &directory,
+    let temporary = temporary_path(&directory);
+    write_temporary(
+        &temporary,
         buffer,
         full_width,
         full_height,
@@ -496,25 +521,19 @@ pub fn save_screenshot(
         format,
         jpeg_quality,
     )?;
-    match place_unique(&temporary, output_path, || {
-        unique_output_path(&directory, format)
-    }) {
-        Ok(destination) => {
-            recent::saved(&destination);
-            Ok(destination)
-        }
-        Err(error) => {
-            remove_temporary(&temporary);
-            Err(error)
-        }
-    }
+    let destination = place_unique(&temporary, output_path, &directory, format, PLACE_ATTEMPTS)?;
+    recent::saved(&destination);
+    Ok(destination)
 }
 
 pub fn recent_screenshots(directory: &Path, limit: usize) -> std::io::Result<Vec<PathBuf>> {
     if limit == 0 {
         return Ok(Vec::new());
     }
-    Ok(newest_screenshots(std::fs::read_dir(directory)?, limit))
+    Ok(newest_screenshots(
+        &mut std::fs::read_dir(directory)?,
+        limit,
+    ))
 }
 
 /// The `limit` (at most 100) most recently modified screenshots among `entries`, newest
@@ -522,7 +541,7 @@ pub fn recent_screenshots(directory: &Path, limit: usize) -> std::io::Result<Vec
 /// runs; entries that were removed or became unreadable since listing are skipped so
 /// one bad file cannot discard every successful result.
 fn newest_screenshots(
-    entries: impl Iterator<Item = std::io::Result<std::fs::DirEntry>>,
+    entries: &mut dyn Iterator<Item = std::io::Result<std::fs::DirEntry>>,
     limit: usize,
 ) -> Vec<PathBuf> {
     let mut newest = std::collections::BinaryHeap::new();
@@ -564,17 +583,11 @@ fn screenshot_candidate(
     {
         return Ok(None);
     }
-    let metadata = entry.metadata().map_err(|error| at_path(&path, error))?;
+    let metadata = entry.metadata()?;
     if !metadata.is_file() {
         return Ok(None);
     }
-    let modified = metadata.modified().map_err(|error| at_path(&path, error))?;
-    Ok(Some((modified, path)))
-}
-
-/// The same error, with the file it concerns in the message.
-fn at_path(path: &Path, error: std::io::Error) -> std::io::Error {
-    std::io::Error::new(error.kind(), format!("'{}': {error}", path.display()))
+    Ok(Some((metadata.modified()?, path)))
 }
 
 #[cfg(test)]
@@ -868,9 +881,9 @@ mod tests {
     #[test]
     fn a_failed_gdi_plus_startup_reports_its_status() {
         // A failed startup has no token to shut down, so it is never wrapped in one.
-        let Err(error) = GdiPlusToken::from_startup(18, 0) else {
-            panic!("status 18 is a failure");
-        };
+        let startup = GdiPlusToken::from_startup(18, 0);
+        assert!(startup.is_err(), "status 18 is a failure");
+        let error = startup.err().unwrap_or_default();
         assert!(
             error.starts_with("GDI+ startup failed with status "),
             "{error}"
@@ -1029,14 +1042,15 @@ mod tests {
         std::fs::write(&source, b"new image").unwrap();
         std::fs::write(&taken, b"existing image").unwrap();
 
-        let mut asked = 0;
-        let placed = place_unique(&source, taken.clone(), || {
-            asked += 1;
-            dir.path().join("free.png")
-        })
-        .expect("placed under the next name");
-        assert_eq!(placed, dir.path().join("free.png"));
-        assert_eq!(asked, 1);
+        let placed = place_unique(&source, taken.clone(), dir.path(), SaveFormat::Png, 2)
+            .expect("placed under the next name");
+        assert_ne!(placed, taken);
+        assert_eq!(placed.parent(), Some(dir.path()));
+        let name = placed.file_name().unwrap().to_str().unwrap();
+        assert!(
+            name.starts_with("Screenshot_") && name.ends_with(".png"),
+            "{name}"
+        );
         assert_eq!(std::fs::read(&placed).unwrap(), b"new image");
         assert_eq!(
             std::fs::read(&taken).unwrap(),
@@ -1045,47 +1059,98 @@ mod tests {
         );
         assert!(!source.exists(), "the source was moved");
 
-        // A free name is used as given and the callback is never consulted.
+        // A free name is used as given.
         std::fs::write(&source, b"second image").unwrap();
-        let direct = place_unique(&source, dir.path().join("direct.png"), || {
-            unreachable!("the first name was free")
-        })
-        .expect("placed directly");
+        let wanted = dir.path().join("direct.png");
+        let direct = place_unique(&source, wanted.clone(), dir.path(), SaveFormat::Png, 1)
+            .expect("placed directly");
+        assert_eq!(direct, wanted);
         assert_eq!(std::fs::read(direct).unwrap(), b"second image");
     }
 
     #[test]
-    fn placing_gives_up_after_128_taken_names_and_reports_other_failures() {
+    fn placing_gives_up_when_the_attempts_run_out_and_reports_other_failures() {
         let dir = TempDir::new("save_place_fail");
         let source = dir.path().join("source.tmp");
         let taken = dir.path().join("taken.png");
         std::fs::write(&source, b"image").unwrap();
         std::fs::write(&taken, b"existing").unwrap();
 
-        let mut asked = 0;
-        let error = place_unique(&source, taken.clone(), || {
-            asked += 1;
-            taken.clone()
-        })
-        .expect_err("every name is taken");
+        let error = place_unique(&source, taken.clone(), dir.path(), SaveFormat::Png, 1)
+            .expect_err("the only attempt hits a taken name");
         assert_eq!(
             error,
             crate::i18n::t("Could not reserve a unique screenshot filename.")
         );
-        assert_eq!(asked, 128);
-        assert!(
-            source.exists(),
-            "the source stays for the caller to clean up"
-        );
+        assert!(!source.exists(), "the temporary is removed");
+        assert_eq!(std::fs::read(&taken).unwrap(), b"existing");
+        assert_eq!(names(dir.path()), ["taken.png"]);
 
+        std::fs::write(&source, b"image").unwrap();
         let missing = dir.path().join("missing").join("shot.png");
-        let error = place_unique(&source, missing, || unreachable!("not a name clash"))
+        let error = place_unique(&source, missing, dir.path(), SaveFormat::Png, 5)
             .expect_err("missing folder");
         assert!(
             error.starts_with(
                 crate::i18n::tf("Could not finalize the screenshot: {}", &[&""]).as_str()
             ),
             "{error}"
+        );
+        assert!(!source.exists(), "the temporary is removed");
+    }
+
+    #[test]
+    fn a_taken_temporary_name_is_reported_and_left_alone() {
+        let dir = TempDir::new("save_temporary_taken");
+        let temporary = temporary_path(dir.path());
+        assert_eq!(temporary.parent(), Some(dir.path()));
+        let name = temporary.file_name().unwrap().to_str().unwrap();
+        assert!(
+            name.starts_with(&format!(".isolmass-{}-", std::process::id()))
+                && name.ends_with(".tmp"),
+            "{name}"
+        );
+        std::fs::write(&temporary, b"someone else's").unwrap();
+
+        let error = write_temporary(
+            &temporary,
+            &capture(4, 4),
+            4,
+            4,
+            &everything(4, 4),
+            SaveFormat::Png,
+            90,
+        )
+        .unwrap_err();
+        let reason = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .unwrap_err();
+        assert_eq!(error, describe(reason));
+        assert_eq!(std::fs::read(&temporary).unwrap(), b"someone else's");
+    }
+
+    #[test]
+    fn a_bare_file_name_is_saved_in_the_current_folder() {
+        assert_eq!(parent_directory(Path::new("shot.png")), Path::new("."));
+        assert_eq!(
+            parent_directory(Path::new(r"C:\a\shot.png")),
+            Path::new(r"C:\a")
+        );
+        assert_eq!(parent_directory(Path::new(r"C:\")), Path::new("."));
+    }
+
+    #[test]
+    fn overflowing_image_sizes_are_refused() {
+        assert_eq!(pixel_bytes(3, 5), Ok(60));
+        assert_eq!(
+            pixel_bytes(usize::MAX, 2),
+            Err(crate::i18n::t("The screenshot dimensions are too large.").to_string())
+        );
+        assert_eq!(
+            pixel_bytes(usize::MAX / 2, 1),
+            Err(crate::i18n::t("The screenshot dimensions are too large.").to_string())
         );
     }
 
@@ -1287,10 +1352,10 @@ mod tests {
             Err(std::io::Error::from(ErrorKind::NotFound)),
             Err(std::io::Error::from(ErrorKind::PermissionDenied)),
         ];
-        let entries = failures
+        let mut entries = failures
             .into_iter()
             .chain(std::fs::read_dir(dir.path()).unwrap());
-        let found = newest_screenshots(entries, 2);
+        let found = newest_screenshots(&mut entries, 2);
         assert_eq!(file_names(&found), ["e.png", "c.jpeg"]);
     }
 
@@ -1318,15 +1383,5 @@ mod tests {
                 .kind(),
             ErrorKind::TimedOut
         );
-    }
-
-    #[test]
-    fn errors_name_the_file_they_concern() {
-        let error = at_path(
-            Path::new(r"C:\shots\a.png"),
-            std::io::Error::new(ErrorKind::PermissionDenied, "locked"),
-        );
-        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
-        assert_eq!(error.to_string(), r"'C:\shots\a.png': locked");
     }
 }

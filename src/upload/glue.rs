@@ -7,7 +7,7 @@ use crate::cloudflare_setup::{self, UploadProgress};
 /// Sends the prepared screenshot (blocking) and returns its share link.
 /// `progress` receives `(bytes sent, total bytes)` while the file is written.
 pub fn send(prepared: &Prepared, progress: UploadProgress<'_>) -> Result<String, String> {
-    send_with(prepared, progress, cloudflare_setup::api_request)
+    send_with(prepared, progress, &mut cloudflare_setup::api_request)
 }
 
 /// Opens a validated share link in the default browser.

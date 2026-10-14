@@ -198,8 +198,7 @@ impl Settings {
             })?;
         std::fs::create_dir_all(parent)?;
 
-        let json = serde_json::to_vec_pretty(self)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let json = serde_json::to_vec_pretty(self)?;
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos());
