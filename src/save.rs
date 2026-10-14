@@ -179,7 +179,7 @@ fn pixel_bytes(width: usize, height: usize) -> Result<usize, String> {
         .ok_or_else(|| crate::i18n::t("The screenshot dimensions are too large.").to_string())
 }
 
-fn extract_selection(
+pub(crate) fn extract_selection(
     buffer: &[u8],
     full_width: i32,
     full_height: i32,

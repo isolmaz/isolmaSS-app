@@ -479,7 +479,11 @@ fn the_command_menu_lists_every_tool_even_when_the_strip_is_collapsed() {
             .any(|b| b.item == ToolbarItem::Tool(ToolKind::Text))
     );
     let menu = state.command_menu_buttons().expect("a toolbar is laid out");
-    assert_eq!(menu.len(), shown.len() + MORE_TOOLS.len());
+    assert_eq!(
+        menu.len(),
+        shown.len() + MORE_TOOLS.len() + 1,
+        "the hidden tools and Pin"
+    );
     let items: Vec<ToolbarItem> = menu.iter().map(|b| b.item).collect();
     let undo = items
         .iter()
@@ -512,12 +516,112 @@ fn the_command_menu_lists_every_tool_even_when_the_strip_is_collapsed() {
 }
 
 #[test]
-fn an_expanded_strip_needs_no_extra_menu_entries() {
+fn an_expanded_strip_needs_no_extra_tool_entries() {
     let mut state = state_with_toolbar();
     state.tools_expanded = true;
     state.composite_scene();
     let shown = state.toolbar.as_ref().unwrap().buttons.len();
-    assert_eq!(state.command_menu_buttons().unwrap().len(), shown);
+    assert_eq!(state.command_menu_buttons().unwrap().len(), shown + 1);
+}
+
+#[test]
+fn the_command_menu_offers_pin_to_screen_right_after_upload() {
+    let state = state_with_toolbar();
+    let items: Vec<ToolbarItem> = state
+        .command_menu_buttons()
+        .unwrap()
+        .iter()
+        .map(|button| button.item)
+        .collect();
+    let upload = items
+        .iter()
+        .position(|item| *item == ToolbarItem::Action(ToolbarAction::Upload))
+        .unwrap();
+    assert_eq!(items[upload + 1], ToolbarItem::Action(ToolbarAction::Pin));
+    assert_eq!(
+        items
+            .iter()
+            .filter(|item| **item == items[upload + 1])
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn choosing_pin_in_the_command_menu_asks_for_a_pin_instead_of_clicking() {
+    let window = TestWindow::new();
+    let mut state = state_with_toolbar();
+    let buttons = state.command_menu_buttons().unwrap();
+    state.apply_command_menu_choice(
+        window.0,
+        &buttons,
+        Ok(Some(ToolbarItem::Action(ToolbarAction::Pin))),
+    );
+    assert!(window.take(WM_EDITOR_PIN).is_some());
+    assert!(
+        !window.has(WM_LBUTTONDOWN),
+        "no click is replayed at the menu entry's empty rectangle"
+    );
+}
+
+#[test]
+fn the_pin_command_asks_the_window_to_pin() {
+    let window = TestWindow::new();
+    let mut state = state_with_rectangle();
+    activate(&mut state, &window, ToolbarItem::Action(ToolbarAction::Pin));
+    assert!(window.take(WM_EDITOR_PIN).is_some());
+    assert!(!state.committed_result, "the pin itself is made later");
+}
+
+#[test]
+fn a_pin_is_the_exported_selection_at_its_screen_position() {
+    let folder = TempDir::new("export-pin");
+    let mut state = export_state(&folder);
+    Rc::get_mut(&mut state.capture).expect("one owner").x = -40;
+    Rc::get_mut(&mut state.capture).expect("one owner").y = 30;
+    state.settings.save_format = crate::settings::SaveFormat::Jpeg;
+    state.settings.jpeg_quality = 55;
+    let pin = state.begin_pin().expect("a pin image");
+    assert_eq!((pin.width, pin.height), (400, 300));
+    assert_eq!(pin.origin, (-40 + 100, 30 + 100));
+    assert_eq!(pin.pixels.len(), 400 * 300 * 4);
+    assert!(
+        pin.pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|pixel| pixel[3] == 255)
+    );
+    assert_eq!(pin.format, crate::settings::SaveFormat::Jpeg);
+    assert_eq!(pin.jpeg_quality, 55);
+    // The corner of the selection is bare capture; the rectangle's outline differs from it.
+    let corner = &pin.pixels[..3];
+    assert!(
+        pin.pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| &pixel[..3] != corner),
+        "the annotation is part of the pinned pixels"
+    );
+    assert!(state.toolbar.is_some(), "the editor scene is drawn again");
+    assert!(!state.committed_result, "closing the editor commits it");
+}
+
+#[test]
+fn a_pin_needs_a_selection_inside_the_capture() {
+    let folder = TempDir::new("export-pin-none");
+    let mut state = export_state(&folder);
+    state.committed_selection = None;
+    assert_eq!(
+        state.begin_pin().err(),
+        Some(crate::i18n::t("Select a screen region first.").to_string())
+    );
+    state.committed_selection = Some(Rect::new(1000, 1000, 1100, 1100));
+    let error = state.begin_pin().err().expect("nothing to pin");
+    let prefix = crate::i18n::tf("Could not prepare the screenshot for pinning: {}", &[&""]);
+    assert!(error.starts_with(&prefix), "{error}");
+    assert!(state.toolbar.is_some(), "the editor scene is drawn again");
 }
 
 #[test]

@@ -628,6 +628,35 @@ fn ctrl_u_reports_missing_cloud_keys() {
 }
 
 #[test]
+fn ctrl_t_asks_the_window_to_pin_the_selection() {
+    let window = TestWindow::new();
+    let mut state = state_with_rectangle();
+    press(&mut state, &window, key('t'), CTRL);
+    assert!(window.take(WM_EDITOR_PIN).is_some());
+    assert!(!state.committed_result, "the pin is made by the window");
+    assert_eq!(state.active_tool, ToolKind::Rectangle, "not the Text tool");
+}
+
+#[test]
+fn ctrl_t_needs_an_active_selection() {
+    let window = TestWindow::new();
+    let mut state = state_with_rectangle();
+    state.discard_session();
+    press(&mut state, &window, key('t'), CTRL);
+    assert!(!window.has(WM_EDITOR_PIN));
+}
+
+#[test]
+fn ctrl_t_while_typing_commits_the_text_then_asks_for_the_pin() {
+    let window = TestWindow::new();
+    let mut state = editing_state("Hello");
+    press(&mut state, &window, key('t'), CTRL);
+    assert!(state.text_edit().is_none());
+    assert_eq!(state.object_count(), 2);
+    assert!(window.take(WM_EDITOR_PIN).is_some());
+}
+
+#[test]
 fn ctrl_c_copies_the_selection_to_the_clipboard() {
     let window = TestWindow::new();
     let folder = TempDir::new("keys-copy");
