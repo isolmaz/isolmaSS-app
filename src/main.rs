@@ -7,11 +7,13 @@ mod cloud_settings_window;
 mod cloudflare_oauth;
 mod cloudflare_setup;
 mod diagnostics;
+mod drag;
 mod drawing;
 mod hotkey;
 mod i18n;
 mod instance;
 mod overlay;
+mod pin;
 mod save;
 mod settings;
 mod settings_window;
@@ -363,6 +365,9 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
         }
     }
     updater::run_startup_work(settings.check_updates_automatically);
+    std::thread::spawn(|| {
+        drag::sweep();
+    });
     if open_settings {
         tray::queue_command(TrayCommand::Settings);
     }
@@ -533,6 +538,7 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
         let _ = KillTimer(tray::window_handle(), CAPTURE_TIMER);
     }
     tray::capture_finished();
+    pin::close_all();
     drop(services);
     drop(runtime.take());
     drop(tray_manager);
@@ -568,6 +574,7 @@ fn run_capture_once() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     toast::wait_until_closed();
+    pin::wait_until_closed();
     Ok(())
 }
 
