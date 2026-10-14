@@ -39,7 +39,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 pub(super) fn remove_staged_update(path: &Path) {
     for file in [path.to_path_buf(), path.with_extension("exe.sig")] {
         if let Err(error) = std::fs::remove_file(&file)
-            && error.kind() != std::io::ErrorKind::NotFound
+            && super::cleanup_failure_matters(&error)
         {
             crate::diagnostics::record("update cleanup", &error.to_string());
         }

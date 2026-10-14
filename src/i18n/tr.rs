@@ -1054,8 +1054,12 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "200'den fazla Cloudflare hesabı var; güvenli hesap seçimi için liste sınırı aşıldı.",
     ),
     (
-        "This computer's Worker was not found in the authorized accounts. Pick the account that holds the Worker on the Cloudflare consent page.",
-        "İzin verilen hesaplarda bu bilgisayarın Worker'ı bulunamadı. Cloudflare izin sayfasında Worker'ın bulunduğu hesabı seçin.",
+        "This computer's Worker ({}) is not in the accounts allowed on the Cloudflare page ({}). Press “Update Worker” again and allow the account that owns it.",
+        "Bu bilgisayarın Worker'ı ({}) Cloudflare sayfasında izin verilen hesaplarda değil ({}). “Worker'ı güncelle” düğmesine yeniden basın ve Worker'ın bulunduğu hesaba izin verin.",
+    ),
+    (
+        "Could not look up this computer's Worker on Cloudflare ({}).",
+        "Bu bilgisayarın Worker'ı Cloudflare'de aranamadı ({}).",
     ),
     ("This version was skipped.", "Bu sürüm atlandı."),
     (

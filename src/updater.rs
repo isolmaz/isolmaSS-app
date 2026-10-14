@@ -580,12 +580,21 @@ fn is_stale_update_file(name: &str, current: [u64; 3]) -> bool {
         .is_some_and(|version| version <= current)
 }
 
+/// Whether a failed cleanup is worth a log line. A file that is already gone needs nothing, and
+/// one still in use (the installer that just started this version is still finishing) is
+/// removed on a later start.
+fn cleanup_failure_matters(error: &std::io::Error) -> bool {
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    error.kind() != std::io::ErrorKind::NotFound
+        && error.raw_os_error() != Some(ERROR_SHARING_VIOLATION)
+}
+
 /// Deletes the leftovers in `root`, which may not exist yet.
 fn remove_stale_files_in(root: &Path, current: [u64; 3]) {
     let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) => {
-            if error.kind() != std::io::ErrorKind::NotFound {
+            if cleanup_failure_matters(&error) {
                 crate::diagnostics::record("update cleanup", &error.to_string());
             }
             return;
@@ -597,7 +606,7 @@ fn remove_stale_files_in(root: &Path, current: [u64; 3]) {
             .to_str()
             .is_some_and(|name| is_stale_update_file(name, current))
             && let Err(error) = std::fs::remove_file(entry.path())
-            && error.kind() != std::io::ErrorKind::NotFound
+            && cleanup_failure_matters(&error)
         {
             crate::diagnostics::record("update cleanup", &error.to_string());
         }
