@@ -34,12 +34,26 @@ describe('password form', () => {
     expect(html).not.toMatch(/<[a-z][^>]*\brole="alert"/i);
   });
 
+  it('carries the brand and the call to action but none of the actions of the image', async () => {
+    const id = await upload(png(), { password: PASSWORD });
+    const html = await (await navigate(`/i/${id}`)).text();
+    expect(html).toContain('<a class="brand" href="https://ss.isolmaz.com">');
+    expect(html).toContain('<a class="btn primary" href="https://ss.isolmaz.com/download">Get isolmaSS — free</a>');
+    expect(html).toContain('<footer>Shared with <a href="https://ss.isolmaz.com">isolmaSS</a> · Free screenshot tool for Windows</footer>');
+    expect(html).not.toContain('?download=1');
+    expect(html).not.toContain('id="copy"');
+    expect(html).not.toContain('abuse.cloudflare.com');
+    expect(html).not.toContain('<script');
+    expect(html).not.toContain('<img');
+  });
+
   it('is Turkish when the browser prefers Turkish', async () => {
     const id = await upload(png(), { password: PASSWORD });
     const html = await (await navigate(`/i/${id}`, { 'Accept-Language': 'tr-TR,tr;q=0.9,en;q=0.8' })).text();
     expect(html).toContain('<html lang="tr">');
     expect(html).toContain('Bu ekran görüntüsü şifreli');
     expect(html).toContain('<label for="password">Şifre</label>');
+    expect(html).toContain(`<a class="btn primary" href="https://ss.isolmaz.com/download">isolmaSS'i ücretsiz edinin</a>`);
   });
 
   it('is shown for the raw address too, because the cookie is scoped to /i/<id>', async () => {
@@ -133,21 +147,94 @@ describe('correct password', () => {
     expect(expires - Date.now() / 1000).toBeLessThanOrEqual(3600);
   });
 
-  it('serves the image to a GET carrying the cookie, privately and without storing it', async () => {
+  it.each([
+    ['an embed of the page address', '', { 'Sec-Fetch-Dest': 'image' }],
+    ['no browser hints', '', {}],
+    ['a navigation to ?raw=1', '?raw=1', { 'Sec-Fetch-Dest': 'document' }],
+    ['a navigation to the raw address', '.png', { 'Sec-Fetch-Dest': 'document' }],
+  ])('serves the image to %s carrying the cookie, privately and without storing it', async (_name, suffix, hints) => {
     const bytes = png({ size: 300 });
     const id = await upload(bytes, { password: PASSWORD });
     const cookie = cookieOf(await unlock(id, PASSWORD));
-    for (const path of [`/i/${id}`, `/i/${id}.png`]) {
-      const response = await call(path, { headers: { Cookie: cookie, 'Sec-Fetch-Dest': 'document' } });
+    const response = await call(`/i/${id}${suffix}`, { headers: { Cookie: cookie, ...hints } });
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Content-Type')).toBe('image/png');
+    expect(response.headers.get('Cache-Control')).toBe('private, no-store');
+    expect(response.headers.get('Vary')).toBe('Cookie');
+    expect(response.headers.get('Content-Length')).toBe('300');
+    expect(response.headers.get('X-Robots-Tag')).toBe(ROBOTS);
+    expect(response.headers.get('ETag')).toBeNull();
+    expect(response.headers.get('Content-Disposition')).toMatch(/^inline; filename="isolmaSS-\d{4}-\d{2}-\d{2}_\d{2}-\d{2}\.png"$/);
+    expect(await bytesOf(response)).toEqual(bytes);
+  });
+
+  it('shows the share page, with its actions, to a navigation carrying the cookie', async () => {
+    const id = await upload(png({ width: 800, height: 600 }), { password: PASSWORD });
+    const cookie = cookieOf(await unlock(id, PASSWORD));
+    const response = await navigate(`/i/${id}`, { Cookie: cookie });
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Content-Type')).toBe('text/html; charset=utf-8');
+    expect(response.headers.get('Cache-Control')).toBe('no-store, max-age=0');
+    expect(response.headers.get('Vary')).toBe('Cookie');
+    expect(response.headers.get('X-Robots-Tag')).toBe(ROBOTS);
+    expect(response.headers.get('Set-Cookie')).toBeNull();
+    const policy = response.headers.get('Content-Security-Policy');
+    const [, nonce] = /script-src 'nonce-([A-Za-z0-9_-]{32})'/.exec(policy);
+    expect(policy).toBe(
+      `default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; script-src 'nonce-${nonce}'; form-action 'none'`);
+    const html = await response.text();
+    const raw = `/i/${id}?raw=1`;
+    expect(html).toContain(`<a class="shot" href="${raw}"><img src="${raw}" alt="Shared screenshot" width="800" height="600"></a>`);
+    expect(html).toContain(`<a class="btn" href="/i/${id}?download=1">Download</a>`);
+    expect(html).toContain(`<a class="btn" href="${raw}" target="_blank" rel="noopener">Open original</a>`);
+    expect(html).toContain(`data-url="https://share.test/i/${id}"`);
+    expect(html).toContain(`<script nonce="${nonce}">`);
+    expect(html).toContain('<a class="btn primary" href="https://ss.isolmaz.com/download">Get isolmaSS — free</a>');
+    expect(html).toContain('rel="noopener noreferrer" title="Report abuse to Cloudflare"');
+    // No unfurler holds the cookie, so the share must not advertise an image it could not fetch.
+    expect(html).not.toContain('og:image');
+    expect(html).not.toContain('twitter:image');
+    expect(html).not.toContain(`/i/${id}.png`);
+  });
+
+  it('counts the unlocked page as a view but not a HEAD of it', async () => {
+    const id = await upload(png(), { password: PASSWORD });
+    const cookie = cookieOf(await unlock(id, PASSWORD));
+    await call(`/i/${id}`, { method: 'HEAD', headers: { Cookie: cookie, 'Sec-Fetch-Dest': 'document' } });
+    expect((await sql('SELECT views FROM images WHERE id=?', id))[0].views).toBe(0);
+    await navigate(`/i/${id}`, { Cookie: cookie });
+    expect((await sql('SELECT views FROM images WHERE id=?', id))[0].views).toBe(1);
+  });
+
+  it('serves the download only to a visitor carrying the cookie', async () => {
+    const bytes = png({ size: 300 });
+    const id = await upload(bytes, { password: PASSWORD });
+    const cookie = cookieOf(await unlock(id, PASSWORD));
+    for (const path of [`/i/${id}?download=1`, `/i/${id}.png?download=1`]) {
+      const response = await navigate(path, { Cookie: cookie });
       expect(response.status).toBe(200);
       expect(response.headers.get('Content-Type')).toBe('image/png');
+      expect(response.headers.get('Content-Disposition')).toMatch(/^attachment; filename="isolmaSS-\d{4}-\d{2}-\d{2}_\d{2}-\d{2}\.png"$/);
       expect(response.headers.get('Cache-Control')).toBe('private, no-store');
       expect(response.headers.get('Vary')).toBe('Cookie');
-      expect(response.headers.get('Content-Length')).toBe('300');
-      expect(response.headers.get('X-Robots-Tag')).toBe(ROBOTS);
       expect(response.headers.get('ETag')).toBeNull();
-      expect(response.headers.get('Content-Disposition')).toMatch(/^inline; filename="isolmaSS-\d{4}-\d{2}-\d{2}_\d{2}-\d{2}\.png"$/);
       expect(await bytesOf(response)).toEqual(bytes);
+    }
+  });
+
+  it('answers a download or ?raw=1 without a valid cookie with the password form, never with bytes', async () => {
+    const id = await upload(png(), { password: PASSWORD });
+    const other = await upload(png(), { password: PASSWORD });
+    const foreign = cookieOf(await unlock(other, PASSWORD));
+    for (const query of ['download=1', 'raw=1']) {
+      for (const headers of [{}, { Cookie: foreign }, { Cookie: 'u=1.short' }]) {
+        for (const path of [`/i/${id}?${query}`, `/i/${id}.png?${query}`]) {
+          const response = await navigate(path, headers);
+          expect(response.headers.get('Content-Type')).toBe('text/html; charset=utf-8');
+          expect(response.headers.get('Content-Disposition')).toBeNull();
+          expect(await response.text()).toContain(`action="/i/${id}/unlock"`);
+        }
+      }
     }
   });
 
