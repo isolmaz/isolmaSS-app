@@ -815,6 +815,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("System", "Sistem"),
     ("Teal", "Camgöbeği"),
     ("Text", "Metin"),
+    ("Text background", "Metin arka planı"),
     ("Text copied", "Metin kopyalandı"),
     ("Text recognition failed", "Metin tanıma başarısız"),
     (

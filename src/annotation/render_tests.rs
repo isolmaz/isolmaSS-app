@@ -376,17 +376,28 @@ fn step_badges_are_a_filled_circle_with_a_contrasting_number() {
     }
 }
 
-#[test]
-fn text_is_drawn_in_its_color_inside_its_measured_box() {
-    let text = AnnotationObject::new(
+fn text_object(
+    pos: (i32, i32),
+    content: &str,
+    color: [u8; 4],
+    font_size: i32,
+    background: bool,
+) -> AnnotationObject {
+    AnnotationObject::new(
         1,
         AnnotationKind::Text {
-            pos: (10, 10),
-            text: "HI".to_string(),
-            color: COLOR,
-            font_size: 40,
+            pos,
+            text: content.to_string(),
+            color,
+            font_size,
+            background,
         },
-    );
+    )
+}
+
+#[test]
+fn text_is_drawn_in_its_color_inside_its_measured_box() {
+    let text = text_object((10, 10), "HI", COLOR, 40, false);
     let canvas = drawn(160, 90, |dc| text.render_gdi(dc));
     let allowed = text.bounds().inflate(3, 3);
     let changed = canvas.changed();
@@ -396,6 +407,87 @@ fn text_is_drawn_in_its_color_inside_its_measured_box() {
         "{allowed:?}"
     );
     assert!(canvas.count(INK) > 0);
+}
+
+#[test]
+fn every_line_of_a_text_is_drawn_one_line_height_apart() {
+    let text = text_object((10, 10), "HI\nHI\nHI", COLOR, 30, false);
+    let pitch = crate::drawing::line_height(30);
+    let canvas = drawn(120, 140, |dc| text.render_gdi(dc));
+    let allowed = text.bounds().inflate(3, 3);
+    assert_eq!(allowed.height(), 3 * pitch + 6);
+    let changed = canvas.changed();
+    assert!(
+        changed.iter().all(|&(x, y)| allowed.contains(x, y)),
+        "{allowed:?}"
+    );
+    // Identical lines leave identical marks, each exactly one pitch below the last.
+    let in_line = |line: i32| {
+        changed
+            .iter()
+            .filter(|&&(_, y)| (10 + line * pitch..10 + (line + 1) * pitch).contains(&y))
+            .map(|&(x, y)| (x, y - line * pitch))
+            .collect::<Vec<_>>()
+    };
+    let first = in_line(0);
+    assert!(first.len() > 20, "the first line is drawn");
+    assert_eq!(in_line(1), first);
+    assert_eq!(in_line(2), first);
+    assert!(canvas.count(INK) > 0);
+}
+
+#[test]
+fn a_background_box_is_the_color_behind_text_in_white_on_dark_fills() {
+    let boxed = text_object((30, 30), "HI\nHI", COLOR, 40, true);
+    let canvas = drawn(200, 160, |dc| boxed.render_gdi(dc));
+    let bounds = boxed.bounds();
+    let unboxed = text_object((30, 30), "HI\nHI", COLOR, 40, false);
+    assert_eq!(bounds, unboxed.bounds().inflate(10, 10));
+    let middle = (bounds.top + bounds.bottom) / 2;
+    // The padding strip around the text is the fill itself; beyond the box is untouched.
+    assert_eq!(canvas.pixel(bounds.left + 3, middle), INK);
+    assert_eq!(canvas.pixel(bounds.right - 4, middle), INK);
+    assert_eq!(canvas.pixel(bounds.left + 20, bounds.top + 3), INK);
+    assert_eq!(canvas.pixel(bounds.left + 20, bounds.bottom - 4), INK);
+    assert_eq!(canvas.pixel(bounds.left - 2, middle), BACKGROUND);
+    assert_eq!(canvas.pixel(bounds.right + 1, middle), BACKGROUND);
+    // The corners are rounded off.
+    for (x, y) in [
+        (bounds.left, bounds.top),
+        (bounds.right - 1, bounds.top),
+        (bounds.left, bounds.bottom - 1),
+        (bounds.right - 1, bounds.bottom - 1),
+    ] {
+        assert_eq!(canvas.pixel(x, y), BACKGROUND, "({x}, {y})");
+    }
+    // Everything drawn stays inside the box, and the text is white over the dark fill.
+    assert!(
+        canvas.changed().iter().all(|&(x, y)| bounds.contains(x, y)),
+        "{bounds:?}"
+    );
+    assert!(canvas.count(WHITE) > 20, "white text");
+    assert_eq!(canvas.count([0, 0, 0]), 0, "no black text");
+}
+
+#[test]
+fn a_background_box_gets_black_text_on_light_fills() {
+    let amber = [0, 200, 255, 255];
+    let boxed = text_object((30, 30), "HI", amber, 40, true);
+    let canvas = drawn(160, 100, |dc| boxed.render_gdi(dc));
+    let bounds = boxed.bounds();
+    let middle = (bounds.top + bounds.bottom) / 2;
+    assert_eq!(canvas.pixel(bounds.left + 3, middle), [0, 200, 255]);
+    assert!(canvas.count([0, 0, 0]) > 20, "black text");
+    assert_eq!(canvas.count(WHITE), 0, "no white text");
+}
+
+#[test]
+fn text_without_a_box_is_drawn_in_its_own_color_whatever_the_brightness() {
+    let amber = [0, 200, 255, 255];
+    let plain = text_object((30, 30), "HI", amber, 40, false);
+    let canvas = drawn(160, 100, |dc| plain.render_gdi(dc));
+    assert!(canvas.count([0, 200, 255]) > 20);
+    assert_eq!(canvas.count([0, 0, 0]), 0);
 }
 
 #[test]

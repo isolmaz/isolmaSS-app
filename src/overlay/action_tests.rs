@@ -139,6 +139,24 @@ fn the_colour_button_opens_the_picker_without_ending_the_text() {
 }
 
 #[test]
+fn the_text_background_switch_restyles_the_open_text_box_without_ending_it() {
+    let window = TestWindow::new();
+    let mut state = state_with_rectangle();
+    state.set_text_edit(Some(TextEditState::new(
+        (200, 200),
+        "Note".to_string(),
+        [0, 0, 0, 255],
+        22,
+        None,
+    )));
+    activate(&mut state, &window, ToolbarItem::TextBackground);
+    assert!(state.text_edit().expect("the box stays open").background);
+    assert!(state.settings.text_background);
+    assert_eq!(state.object_count(), 1);
+    assert!(state.scene_dirty);
+}
+
+#[test]
 fn the_settings_button_asks_for_the_settings_window() {
     let window = TestWindow::new();
     let mut state = state_with_rectangle();

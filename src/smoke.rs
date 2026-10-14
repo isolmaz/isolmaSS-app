@@ -301,6 +301,7 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         true,
         false,
         96,
+        None,
     );
     assert!(
         tb.buttons
@@ -391,6 +392,7 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
             text: "Hello Rust".to_string(),
             color: [40, 40, 235, 255],
             font_size: 20,
+            background: false,
         },
     );
     assert!(text_obj.hit_test((60, 85)));
@@ -1010,6 +1012,7 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
             text: edit_state.text.clone(),
             color: edit_state.color,
             font_size: edit_state.font_size,
+            background: edit_state.background,
         },
     );
     assert!(text_obj.hit_test((55, 55)));

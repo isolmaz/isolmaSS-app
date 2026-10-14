@@ -45,6 +45,7 @@ fn toolbar_for(
         false,
         true,
         dpi,
+        None,
     )
 }
 
@@ -145,6 +146,7 @@ fn style_controls_can_be_left_out_and_each_takes_its_own_width() {
             true,
             true,
             96,
+            None,
         )
         .action_bounds
         .width()
@@ -172,6 +174,7 @@ fn style_controls_can_be_left_out_and_each_takes_its_own_width() {
         true,
         true,
         96,
+        None,
     );
     assert!(
         bare.buttons
@@ -195,6 +198,7 @@ fn the_wheel_cannot_open_without_a_thickness_button() {
         true,
         true,
         96,
+        None,
     );
     assert!(toolbar.wheel_bounds.is_none());
     assert!(
@@ -644,6 +648,7 @@ fn the_more_tools_button_is_lit_while_expanded_or_hiding_the_active_tool() {
         true,
         true,
         DPI,
+        None,
     );
     assert_color(lit(&hidden), t.accent_tint, 2, "hidden active tool");
 }
@@ -865,6 +870,141 @@ fn tooltips_open_beside_the_rail_and_below_the_bar_in_card_colour() {
 // Tool icons
 // ---------------------------------------------------------------------------
 
+fn text_toolbar(text_background: Option<bool>, dpi: u32) -> Toolbar {
+    Toolbar::layout(
+        &SELECTION,
+        VIEWPORT,
+        ToolKind::Text,
+        PRESET_COLORS[0],
+        5,
+        false,
+        true,
+        false,
+        false,
+        true,
+        true,
+        dpi,
+        text_background,
+    )
+}
+
+#[test]
+fn the_text_background_switch_is_a_square_button_after_the_style_controls() {
+    let item = ToolbarItem::TextBackground;
+    let without = text_toolbar(None, 96);
+    assert!(without.buttons.iter().all(|button| button.item != item));
+    for on in [false, true] {
+        let toolbar = text_toolbar(Some(on), 96);
+        assert_eq!(
+            toolbar.action_bounds.width() - without.action_bounds.width(),
+            32 + 8,
+            "the button and its gap"
+        );
+        let button = toolbar.buttons.iter().find(|b| b.item == item).unwrap();
+        assert_eq!(button.is_checked, on);
+        assert!(button.is_enabled);
+        assert_eq!((button.rect.width(), button.rect.height()), (32, 32));
+        assert_eq!(toolbar.hit_test(centre(button.rect)), Some(item));
+        let swatch = rect_of(&toolbar, ToolbarItem::Color);
+        let save = rect_of(&toolbar, ToolbarItem::Action(ToolbarAction::Save));
+        assert!(swatch.right < button.rect.left && button.rect.right < save.left);
+    }
+    assert_eq!(shortcut(item), Some("Ctrl+B"));
+}
+
+#[test]
+fn the_text_background_icon_is_a_letter_in_a_box_that_fills_while_it_is_on() {
+    let _theme = ForcedTheme::new(ThemePreference::Light);
+    let t = tokens_for(Theme::Light);
+    let item = ToolbarItem::TextBackground;
+    for on in [false, true] {
+        let toolbar = text_toolbar(Some(on), DPI);
+        let canvas = render(&toolbar, None);
+        let rect = rect_of(&toolbar, item);
+        let (cx, cy) = centre(rect);
+        let inner = Rect::new(cx - 14, cy - 14, cx + 14, cy + 14);
+        // Sampled inside the box, left of the letter.
+        let inside = canvas.pixel(cx - 16, cy);
+        if on {
+            assert_color(fill_of(&canvas, rect), t.accent_tint, 2, "selected button");
+            assert_color(inside, t.accent_ink, 3, "filled box");
+            assert_ink(
+                &canvas,
+                inner,
+                t.accent_ink,
+                t.accent_tint,
+                &[t.accent_ink],
+                "letter",
+            );
+        } else {
+            assert_color(fill_of(&canvas, rect), t.card, 2, "idle button");
+            assert_color(inside, t.card, 3, "empty box");
+            assert_ink(&canvas, inner, t.card, t.text, &[t.accent_ink], "letter");
+        }
+    }
+}
+
+#[test]
+fn hovering_the_text_background_switch_shows_a_tooltip_outside_the_button() {
+    let viewport = Rect::new(0, 0, 1100, 700);
+    let mut toolbar = Toolbar::layout(
+        &Rect::new(100, 300, 500, 560),
+        viewport,
+        ToolKind::Text,
+        PRESET_COLORS[0],
+        5,
+        false,
+        true,
+        false,
+        false,
+        true,
+        true,
+        96,
+        Some(false),
+    );
+    let resting = render_in(&toolbar, viewport, None).pixels();
+    toolbar.hovered_item = Some(ToolbarItem::TextBackground);
+    let changed = render_in(&toolbar, viewport, None)
+        .changed_since(&resting)
+        .expect("hovering changes the picture");
+    let button = rect_of(&toolbar, ToolbarItem::TextBackground);
+    assert!(
+        !within(changed, button),
+        "the tooltip opens beside the button"
+    );
+    assert!(within(changed, viewport));
+}
+
+#[test]
+fn the_command_menu_lists_the_text_background_switch_under_text() {
+    let _english = English::new();
+    let toolbar = text_toolbar(Some(true), 96);
+    let menu = build_command_menu(&toolbar.buttons)
+        .expect("the menu is built")
+        .expect("there are buttons");
+    let index = toolbar
+        .buttons
+        .iter()
+        .position(|button| button.item == ToolbarItem::TextBackground)
+        .unwrap();
+    let id = index as u32 + 1;
+    assert_eq!(
+        menu_string(menu.menu.0, id, MF_BYCOMMAND),
+        "Text background"
+    );
+    assert_ne!(
+        unsafe { GetMenuState(menu.menu.0, id, MF_BYCOMMAND) } & MF_CHECKED.0,
+        0
+    );
+    assert_eq!(menu.item(id as i32), Some(ToolbarItem::TextBackground));
+    // It opens its own group, headed "Text".
+    let position = (0..unsafe { GetMenuItemCount(menu.menu.0) })
+        .find(|&position| unsafe { GetMenuItemID(menu.menu.0, position) } == id)
+        .expect("the item is in the menu");
+    let heading = menu_string(menu.menu.0, position as u32 - 1, MF_BYPOSITION);
+    assert_eq!(heading, "Text");
+}
+
 #[test]
 fn the_step_icon_is_a_filled_badge_with_its_number_in_the_surface_colour() {
     let canvas = Canvas::new(64, 64, WHITE);
@@ -1013,6 +1153,7 @@ fn menu_label(item: ToolbarItem) -> String {
         Action(Cancel) => "Cancel".into(),
         Color => "Choose color…".into(),
         Thickness => "Line width…".into(),
+        TextBackground => "Text background".into(),
         ThicknessOption(value) => format!("{value} px"),
     }
 }
