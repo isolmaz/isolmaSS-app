@@ -726,7 +726,7 @@ pub fn start_hotkey_listener(
             let _ = join_handle.join();
             return Err(windows::core::Error::new(
                 windows::core::HRESULT(-1),
-                crate::i18n::t("Hotkey thread exited unexpectedly"),
+                crate::i18n::t("Shortcut thread exited unexpectedly"),
             ));
         }
     };

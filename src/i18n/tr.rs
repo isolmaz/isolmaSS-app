@@ -12,7 +12,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     (
         "'{}' is unavailable: {}\nKeep the previous shortcut '{}'? If you choose No, you can capture from the tray until you record a new shortcut.",
-        "'{}' kullanılamıyor: {}\nÖnceki '{}' kısayolu korunsun mu? Hayır seçerseniz yeni bir kısayol kaydedene kadar tepsiden yakalayabilirsiniz.",
+        "'{}' kullanılamıyor: {}\nÖnceki '{}' kısayolu korunsun mu? Hayır seçerseniz yeni bir kısayol atayana kadar bildirim alanındaki simgeden yakalayabilirsiniz.",
     ),
     ("1 second", "1 saniye"),
     (
@@ -24,11 +24,11 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("5 seconds", "5 saniye"),
     (
         "A Worker update is available. Press Update Worker.",
-        "Worker güncellemesi hazır. Worker'ı güncelle'ye basın.",
+        "Worker güncellemesi hazır. “Worker'ı güncelle” düğmesine basın.",
     ),
     (
         "Access to the Cloudflare Workers subdomain was denied.",
-        "Cloudflare Workers alt alanına erişim reddedildi.",
+        "Cloudflare Workers alt alan adına erişim reddedildi.",
     ),
     (
         "An update is already downloading or installing.",
@@ -47,7 +47,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Başka bir işlem isolmaSS ayarlarını güncelliyor; yeniden kaydetmeyi deneyin.",
     ),
     ("Arrow", "Ok"),
-    ("At the limit", "Sınırda"),
+    ("At the limit", "Sınıra ulaşınca"),
     ("Black", "Siyah"),
     ("Blue", "Mavi"),
     ("Blur", "Bulanıklaştır"),
@@ -79,7 +79,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Check now", "Şimdi denetle"),
     (
         "Check the error message in the app.",
-        "Uygulamadaki hata mesajını kontrol edin.",
+        "Uygulamadaki hata iletisini kontrol edin.",
     ),
     (
         "Checking for the latest signed release…",
@@ -100,7 +100,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     (
         "Choose what happens at the limit.",
-        "Sınırda davranışı seçin.",
+        "Sınıra ulaşıldığında ne olacağını seçin.",
     ),
     (
         "Clipboard text exceeded 32768 bytes and was truncated.",
@@ -123,15 +123,15 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Cloudflare account", "Cloudflare hesabı"),
     (
         "Cloudflare callback did not match this request.",
-        "Cloudflare geri dönüşü bu istekle eşleşmiyor.",
+        "Cloudflare geri çağırması bu istekle eşleşmiyor.",
     ),
     (
         "Cloudflare callback host does not match.",
-        "Cloudflare geri dönüş adresi eşleşmiyor.",
+        "Cloudflare geri çağırma sunucusu eşleşmiyor.",
     ),
     (
         "Cloudflare could not provide a free workers.dev subdomain; try again.",
-        "Cloudflare boşta bir workers.dev alt alan adı veremedi; tekrar deneyin.",
+        "Cloudflare kullanılabilir bir workers.dev alt alan adı veremedi; tekrar deneyin.",
     ),
     (
         "Cloudflare did not respond: {}",
@@ -176,11 +176,11 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     (
         "Cloudflare returned an invalid Workers subdomain.",
-        "Cloudflare geçersiz Workers alt alanı döndürdü.",
+        "Cloudflare geçersiz Workers alt alan adı döndürdü.",
     ),
     (
         "Cloudflare returned an invalid access token.",
-        "Cloudflare geçersiz erişim anahtarı verdi.",
+        "Cloudflare geçersiz erişim belirteci verdi.",
     ),
     (
         "Cloudflare returned an invalid authorization code.",
@@ -210,11 +210,11 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Connect Cloudflare in Settings > Sharing before uploading.",
         "Yüklemeden önce Ayarlar > Paylaşım bölümünden Cloudflare bağlantısını kurun.",
     ),
-    ("Connect to Cloudflare…", "Cloudflare'a bağlan…"),
+    ("Connect to Cloudflare…", "Cloudflare'e bağlan…"),
     ("Connected", "Bağlı"),
     (
         "Connected · No images uploaded yet.",
-        "Bağlı · Henüz yüklenmiş resim yok.",
+        "Bağlı · Henüz yüklenmiş görsel yok.",
     ),
     (
         "Connected · Statistics are up to date.",
@@ -223,11 +223,11 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Connected · {}", "Bağlı · {}"),
     (
         "Connected. The screenshot is uploading now.",
-        "Bağlantı kuruldu. Görüntü şimdi yükleniyor.",
+        "Bağlantı kuruldu. Ekran görüntüsü şimdi yükleniyor.",
     ),
     (
         "Connected. You can now use Upload.",
-        "Bağlantı kuruldu. Artık Yükle düğmesini kullanabilirsiniz.",
+        "Bağlantı kuruldu. Artık “Yükle” düğmesini kullanabilirsiniz.",
     ),
     ("Connecting", "Bağlanıyor"),
     ("Connection", "Bağlantı"),
@@ -250,7 +250,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     (
         "Could not check the Cloudflare Workers subdomain ({}).{}",
-        "Cloudflare Workers alt alanı denetlenemedi ({}).{}",
+        "Cloudflare Workers alt alan adı denetlenemedi ({}).{}",
     ),
     (
         "Could not close the editor: {}",
@@ -346,11 +346,11 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Could not open Settings", "Ayarlar açılamadı"),
     (
         "Could not open local port 38481 for the Cloudflare callback: {}",
-        "Cloudflare dönüş bağlantısı için yerel port 38481 açılamadı: {}",
+        "Cloudflare geri çağırması için yerel port 38481 açılamadı: {}",
     ),
     (
         "Could not open the Cloudflare sign-in page in the browser.",
-        "Cloudflare oturum sayfası tarayıcıda açılamadı.",
+        "Cloudflare giriş sayfası tarayıcıda açılamadı.",
     ),
     (
         "Could not open the Windows startup registry key (error {}).",
@@ -363,8 +363,11 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Could not open the save dialog",
         "Kaydet penceresi açılamadı",
     ),
-    ("Could not open the screenshot", "Görüntü açılamadı"),
-    ("Could not open the tray menu", "Tepsi menüsü açılamadı"),
+    ("Could not open the screenshot", "Ekran görüntüsü açılamadı"),
+    (
+        "Could not open the tray menu",
+        "Bildirim alanı menüsü açılamadı",
+    ),
     (
         "Could not open the update options. Try again.",
         "Güncelleme seçenekleri açılamadı. Yeniden deneyin.",
@@ -387,7 +390,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     (
         "Could not reach Cloudflare; check your internet connection: {}",
-        "Cloudflare'a ulaşılamadı; internet bağlantınızı denetleyin: {}",
+        "Cloudflare'e ulaşılamadı; internet bağlantınızı denetleyin: {}",
     ),
     (
         "Could not read Cloudflare data: {}",
@@ -407,7 +410,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     (
         "Could not read the Cloudflare subdomain.",
-        "Cloudflare alt alanı okunamadı.",
+        "Cloudflare alt alan adı okunamadı.",
     ),
     (
         "Could not read the existing startup registration.",
@@ -460,7 +463,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Could not save the setup", "Kurulum kaydedilemedi"),
     (
         "Could not send data to Cloudflare: {}",
-        "Cloudflare'a veri gönderilemedi: {}",
+        "Cloudflare'e veri gönderilemedi: {}",
     ),
     (
         "Could not send the screenshot: {}",
@@ -500,7 +503,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     (
         "Could not update the Worker; see the message for details.",
-        "Worker güncellenemedi; ayrıntı uyarıda.",
+        "Worker güncellenemedi; ayrıntılar açılan iletide.",
     ),
     (
         "Could not write the staged update: {}",
@@ -513,8 +516,8 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Default color", "Varsayılan renk"),
     ("Delay", "Gecikme"),
     ("Delete", "Sil"),
-    ("Delete image", "Resmi sil"),
-    ("Deleting image…", "Resim siliniyor…"),
+    ("Delete image", "Görseli sil"),
+    ("Deleting image…", "Görsel siliniyor…"),
     ("Disconnect", "Bağlantıyı kaldır"),
     (
         "Downloading and verifying the installer…",
@@ -525,7 +528,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Editor", "Düzenleyici"),
     (
         "Enter a positive whole number in every field.",
-        "Bütün alanlara pozitif tam sayı girin.",
+        "Her alana pozitif bir tam sayı girin.",
     ),
     (
         "Enter a value from 1 to 64 pixels.",
@@ -533,7 +536,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     (
         "Finish the open capture to install.",
-        "Kurulum için açık yakalamayı tamamlayın.",
+        "Kurulum için açık yakalama işlemini tamamlayın.",
     ),
     (
         "Finish the open task to install and restart.",
@@ -551,23 +554,23 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Highlighter", "Vurgulayıcı"),
     ("History", "Geçmiş"),
     (
-        "Hotkey thread exited unexpectedly",
+        "Shortcut thread exited unexpectedly",
         "Kısayol iş parçacığı beklenmedik şekilde sonlandı",
     ),
-    ("Image deleted.", "Resim silindi."),
-    ("Image password", "Resim şifresi"),
+    ("Image deleted.", "Görsel silindi."),
+    ("Image password", "Görsel şifresi"),
     (
         "Image password for new uploads (empty: none)",
-        "Yeni yüklemeler için resim şifresi (boş: şifresiz)",
+        "Yeni yüklemeler için görsel şifresi (boş: şifresiz)",
     ),
-    ("Image size (MB)", "Resim boyutu (MB)"),
-    ("Images", "Resimler"),
+    ("Image size (MB)", "Görsel boyutu (MB)"),
+    ("Images", "Görseller"),
     (
         "In the browser, authorize the account that holds the Worker; the address, links and images stay.",
-        "Tarayıcıda Worker'ın bulunduğu hesaba izin verin; adres, linkler ve resimler aynen kalır.",
+        "Tarayıcıda Worker'ın bulunduğu hesaba izin verin; adres, bağlantılar ve görseller aynen kalır.",
     ),
-    ("Indigo", "Çivit"),
-    ("Install", "Yükle"),
+    ("Indigo", "Çivit mavisi"),
+    ("Install", "Şimdi kur"),
     ("Install in this account", "Bu hesaba kur"),
     (
         "Installing a new Worker in {}; keep this window open…",
@@ -576,7 +579,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Installing update", "Güncelleme kuruluyor"),
     (
         "Invalid Cloudflare API target or access token.",
-        "Geçersiz Cloudflare API hedefi veya erişim anahtarı.",
+        "Geçersiz Cloudflare API hedefi veya erişim belirteci.",
     ),
     (
         "Invalid Cloudflare account ID.",
@@ -584,17 +587,17 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     (
         "Invalid Cloudflare callback method.",
-        "Cloudflare geri dönüş yöntemi geçersiz.",
+        "Cloudflare geri çağırma yöntemi geçersiz.",
     ),
     (
         "Invalid Cloudflare callback path.",
-        "Cloudflare geri dönüş yolu geçersiz.",
+        "Cloudflare geri çağırma yolu geçersiz.",
     ),
     (
         "Invalid Cloudflare callback request.",
-        "Cloudflare geri dönüş isteği geçersiz.",
+        "Cloudflare geri çağırma isteği geçersiz.",
     ),
-    ("Invalid image password.", "Geçersiz resim şifresi."),
+    ("Invalid image password.", "Geçersiz görsel şifresi."),
     ("Invalid limit", "Geçersiz sınır"),
     ("Invalid link.", "Geçersiz bağlantı."),
     (
@@ -620,7 +623,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     ("Language", "Dil"),
     ("Later", "Daha sonra"),
-    ("Latest images kept", "Saklanan son resim"),
+    ("Latest images kept", "Saklanan son görsel"),
     ("Light", "Açık"),
     ("Light blue", "Açık mavi"),
     ("Light green", "Açık yeşil"),
@@ -637,38 +640,38 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     (
         "Load the current limits with Refresh first.",
-        "Önce güncel sınırları Yenile ile yükleyin.",
+        "Önce “Yenile” düğmesiyle güncel sınırları alın.",
     ),
     (
         "Loading statistics and images…",
-        "İstatistikler ve resimler yükleniyor…",
+        "İstatistikler ve görseller yükleniyor…",
     ),
     ("Loading statistics…", "İstatistikler yükleniyor…"),
     (
         "Looking for the latest signed release. You can keep using isolmaSS.",
-        "En yeni imzalı sürüm aranıyor. isolmaSS'yi kullanmaya devam edebilirsiniz.",
+        "En yeni imzalı sürüm aranıyor. isolmaSS'i kullanmaya devam edebilirsiniz.",
     ),
     (
         "Malformed Cloudflare callback.",
-        "Cloudflare geri dönüşü bozuk.",
+        "Cloudflare geri çağırması bozuk.",
     ),
     ("Manage connection…", "Bağlantıyı yönet…"),
     (
         "Missing Cloudflare callback.",
-        "Cloudflare geri dönüşü eksik.",
+        "Cloudflare geri çağırması eksik.",
     ),
     ("More tools", "Diğer araçlar"),
     ("No", "Hayır"),
     (
         "No Cloudflare account can be used with this permission.",
-        "Cloudflare'da bu izinle kullanılabilen bir hesap bulunamadı.",
+        "Cloudflare'de bu izinle kullanılabilen bir hesap bulunamadı.",
     ),
     ("No connection found.", "Bağlantı bulunamadı."),
     (
         "No free Worker name was found; try again.",
         "Boş bir Worker adı bulunamadı; tekrar deneyin.",
     ),
-    ("No screenshots yet", "Henüz görüntü yok"),
+    ("No screenshots yet", "Henüz ekran görüntüsü yok"),
     ("None", "Yok"),
     (
         "None of the authorized accounts give you Workers access. Connect again and pick an account where you can use Workers on the Cloudflare consent page; if it persists, make sure the app's OAuth client is public.",
@@ -688,7 +691,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Numbered steps", "Numaralandır"),
     ("OK", "Tamam"),
     ("Off", "Kapalı"),
-    ("Olive", "Zeytin"),
+    ("Olive", "Zeytin yeşili"),
     ("On", "Açık"),
     (
         "Only releases signed by the publisher are installed. Installing restarts the app.",
@@ -696,10 +699,10 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     (
         "Only this computer's Cloudflare connection is removed; the Worker and images in the cloud stay. Continue?",
-        "Yalnızca bu bilgisayardaki Cloudflare bağlantısı silinecek; buluttaki Worker ve resimler kalacak. Devam edilsin mi?",
+        "Yalnızca bu bilgisayardaki Cloudflare bağlantısı silinecek; buluttaki Worker ve görseller kalacak. Devam edilsin mi?",
     ),
     ("Open", "Aç"),
-    ("Open image", "Resmi aç"),
+    ("Open image", "Görseli aç"),
     ("Orange", "Turuncu"),
     ("Paste failed", "Metin yapıştırma başarısız"),
     ("Pen", "Kalem"),
@@ -708,8 +711,8 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Press keys · Esc cancels", "Tuşlara basın · Esc iptal"),
     ("Purple", "Mor"),
     ("Quit requested", "Çıkış istendi"),
-    ("Recent screenshots", "Son görüntüler"),
-    ("Record shortcut", "Kısayolu kaydet"),
+    ("Recent screenshots", "Son ekran görüntüleri"),
+    ("Record shortcut", "Kısayol ata"),
     ("Red", "Kırmızı"),
     ("Redact", "Karart"),
     ("Redact (opaque)", "Karart (opak)"),
@@ -729,16 +732,16 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Save your work first. After verification isolmaSS closes, installs the update and starts again. Continue?",
         "Önce çalışmanızı kaydedin. Doğrulamadan sonra isolmaSS kapanır, güncelleme kurulur ve uygulama yeniden başlatılır. Devam edilsin mi?",
     ),
-    ("Saving", "Kaydetme"),
+    ("Saving", "Kayıt"),
     ("Saving limits…", "Sınırlar kaydediliyor…"),
-    ("Screenshot saved", "Görüntü kaydedildi"),
+    ("Screenshot saved", "Ekran görüntüsü kaydedildi"),
     (
         "Select a screen region first.",
         "Önce bir ekran bölgesi seçin.",
     ),
     (
         "Select an image in the list first.",
-        "Önce listeden bir resim seçin.",
+        "Önce listeden bir görsel seçin.",
     ),
     ("Select and move", "Seç ve taşı"),
     ("Select/move", "Seç/taşı"),
@@ -758,7 +761,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     (
         "Setup did not finish. Choose Continue with Cloudflare again.",
-        "Kurulum tamamlanamadı. Yeniden Cloudflare ile devam edin.",
+        "Kurulum tamamlanamadı. “Cloudflare ile devam et” düğmesine yeniden basın.",
     ),
     ("Sharing", "Paylaşım"),
     ("Shortcut", "Kısayol"),
@@ -770,10 +773,10 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     (
         "Sign in to Cloudflare in the browser and grant permission. Nothing is uploaded meanwhile.",
-        "Tarayıcıda Cloudflare'a giriş yapıp izin verin. Görüntü bu sırada yüklenmez.",
+        "Tarayıcıda Cloudflare'e giriş yapıp izin verin. Bu sırada hiçbir şey yüklenmez.",
     ),
     ("Skip this version", "Bu sürümü atla"),
-    ("Snap to windows", "Pencereye yapış"),
+    ("Snap to windows", "Pencerelere yapış"),
     ("Start with Windows", "Windows ile başlat"),
     ("Stop new uploads", "Yeni yüklemeleri durdur"),
     ("Stopped", "İşlem durdu"),
@@ -786,7 +789,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     (
         "The Cloudflare address, keys or image password is invalid.",
-        "Cloudflare adresi, anahtarları veya resim şifresi geçersiz.",
+        "Cloudflare adresi, anahtarları veya görsel şifresi geçersiz.",
     ),
     (
         "The Cloudflare connection closed before the upload finished.",
@@ -798,7 +801,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     (
         "The Cloudflare connection was cancelled; the screenshot stayed local.",
-        "Cloudflare bağlantısı iptal edildi; görüntü yerelde kaldı.",
+        "Cloudflare bağlantısı iptal edildi; ekran görüntüsü yerelde kaldı.",
     ),
     (
         "The Cloudflare keys could not be opened for this Windows user: {}",
@@ -806,7 +809,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     (
         "The Cloudflare operation failed; see the message for details.",
-        "Cloudflare işlemi başarısız; ayrıntı uyarıda.",
+        "Cloudflare işlemi başarısız; ayrıntılar açılan iletide.",
     ),
     (
         "The Cloudflare request has an invalid address or key.",
@@ -846,7 +849,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     (
         "The Worker was updated but the new version is not answering yet; press Refresh in a few seconds.",
-        "Worker güncellendi ancak yeni sürüm henüz yanıt vermiyor; birkaç saniye sonra Yenile'ye basın.",
+        "Worker güncellendi ancak yeni sürüm henüz yanıt vermiyor; birkaç saniye sonra “Yenile” düğmesine basın.",
     ),
     ("The Worker was updated.", "Worker güncellendi."),
     (
@@ -891,7 +894,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     (
         "The isolmaSS tray icon could not be restored after Explorer restarted.",
-        "Gezgin yeniden başladıktan sonra isolmaSS bildirim alanı simgesi geri yüklenemedi.",
+        "Dosya Gezgini yeniden başladıktan sonra isolmaSS bildirim alanı simgesi geri yüklenemedi.",
     ),
     (
         "The key file has no folder.",
@@ -903,11 +906,11 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     (
         "The link will stop working permanently. Continue?",
-        "Bağlantı geri alınamaz biçimde kapanacak. Devam edilsin mi?",
+        "Bağlantı kalıcı olarak çalışmaz hâle gelecek. Devam edilsin mi?",
     ),
     (
         "The password for new uploads is stored protected on this computer.",
-        "Yeni yüklemelerin şifresi bu bilgisayarda korumalı saklandı.",
+        "Yeni yüklemelerin şifresi bu bilgisayarda korumalı olarak saklanıyor.",
     ),
     (
         "The password needs at least 12 characters and at most 128 UTF-8 bytes; leave it empty for none.",
@@ -1057,15 +1060,15 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("This version was skipped.", "Bu sürüm atlandı."),
     (
         "Today: uploads {} · views {}\r\nThis month: uploads {} · views {}\r\nActive images: {} · {} MB\r\nWatch your Cloudflare account's overall usage in its dashboard.",
-        "Bugün: {} yükleme · {} görüntülenme\r\nBu ay: {} yükleme · {} görüntülenme\r\nAktif resim: {} · {} MB\r\nCloudflare hesabınızın genel kullanımını kendi panelinizden izleyin.",
+        "Bugün: {} yükleme · {} görüntülenme\r\nBu ay: {} yükleme · {} görüntülenme\r\nEtkin görsel: {} · {} MB\r\nCloudflare hesabınızın genel kullanımını kendi panelinizden izleyin.",
     ),
     (
         "Too many update redirects.",
         "Çok fazla güncelleme yönlendirmesi.",
     ),
     ("Tools", "Araçlar"),
-    ("Total storage (MB)", "Toplam alan (MB)"),
-    ("Tray icon", "Tepsi simgesi"),
+    ("Total storage (MB)", "Toplam depolama alanı (MB)"),
+    ("Tray icon", "Bildirim alanı simgesi"),
     ("Try again", "Tekrar dene"),
     ("Undo", "Geri al"),
     (
@@ -1078,7 +1081,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     (
         "Unrecognized Cloudflare callback path.",
-        "Cloudflare geri dönüş yolu tanınmıyor.",
+        "Cloudflare geri çağırma yolu tanınmıyor.",
     ),
     (
         "Unsupported Cloudflare content type.",
@@ -1096,7 +1099,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Güncelleme işlemi iptal edildi.",
     ),
     ("Update ready", "Güncelleme hazır"),
-    ("Updates", "Güncelleme"),
+    ("Updates", "Güncellemeler"),
     (
         "Updating the Worker; keep this window open…",
         "Worker güncelleniyor; pencereyi kapatmayın…",
@@ -1106,7 +1109,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Upload failed", "Yüklenemedi"),
     (
         "Upload sends the screenshot to the Worker in your own Cloudflare account and copies the link. Images go to no other server.",
-        "Yükle düğmesi ekran görüntüsünü kendi Cloudflare hesabınızdaki Worker'a gönderir ve bağlantıyı panoya kopyalar. Görüntüler başka bir sunucuya gitmez.",
+        "“Yükle” düğmesi ekran görüntüsünü kendi Cloudflare hesabınızdaki Worker'a gönderir ve bağlantıyı panoya kopyalar. Ekran görüntüleri başka bir sunucuya gitmez.",
     ),
     ("Uploaded", "Yüklendi"),
     ("Uploaded · link copied", "Yüklendi · bağlantı kopyalandı"),
@@ -1117,7 +1120,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     (
         "Verified. Save or close Settings to install.",
-        "Doğrulandı. Kurulum için ayarları kaydedip pencereyi kapatın.",
+        "Doğrulandı. Kurulum için Ayarlar'ı kaydedin ya da kapatın.",
     ),
     (
         "Verifying the signed installer. isolmaSS restarts after installation.",
@@ -1127,10 +1130,10 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("View warning (daily)", "Görüntüleme uyarısı (günlük)"),
     (
         "Viewing is never blocked; limits count this Worker only and do not guarantee the bill.",
-        "Görüntüleme hiç engellenmez; sınırlar yalnızca bu Worker'ı sayar ve faturayı garanti etmez.",
+        "Görüntüleme hiç engellenmez; sınırlar yalnızca bu Worker'ı sayar ve faturanın bu sınırda kalacağını garanti etmez.",
     ),
     ("Warn only", "Yalnızca uyar"),
-    ("Warn/stop at (%)", "Uyarı/durma (%)"),
+    ("Warn/stop at (%)", "Uyarı/durdurma eşiği (%)"),
     ("White", "Beyaz"),
     ("WinHTTP could not start: {}", "WinHTTP başlatılamadı: {}"),
     (
@@ -1194,7 +1197,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Yes", "Evet"),
     (
         "Your screenshots are uploaded only to the Worker in your own Cloudflare account. Nothing is sent until you connect.",
-        "Ekran görüntüleriniz yalnızca kendi Cloudflare hesabınızdaki Worker'a yüklenir. Bağlanana kadar hiçbir görüntü gönderilmez.",
+        "Ekran görüntüleriniz yalnızca kendi Cloudflare hesabınızdaki Worker'a yüklenir. Bağlanana kadar hiçbir ekran görüntüsü gönderilmez.",
     ),
     ("isolmaSS Settings", "isolmaSS Ayarları"),
     (
@@ -1205,9 +1208,9 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "isolmaSS could not complete the operation",
         "isolmaSS işlemi tamamlayamadı",
     ),
-    ("isolmaSS is up to date", "Uygulama güncel"),
-    ("isolmaSS update", "isolmaSS güncelleme"),
-    ("isolmaSS upload", "isolmaSS yükleme"),
+    ("isolmaSS is up to date", "isolmaSS güncel"),
+    ("isolmaSS update", "isolmaSS güncellemesi"),
+    ("isolmaSS upload", "isolmaSS yüklemesi"),
     (
         "isolmaSS will quit after the current capture or window closes.",
         "Geçerli yakalama veya pencere kapandıktan sonra isolmaSS sonlanacak.",
@@ -1231,7 +1234,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     (
         "{} Capture from the tray or choose another shortcut in Settings.",
-        "{} Tepsiden yakalayın veya Ayarlar'dan başka bir kısayol seçin.",
+        "{} Bildirim alanı simgesinden yakalayın veya Ayarlar'dan başka bir kısayol seçin.",
     ),
     (
         "{} Your computer could not resolve {}. Try again in a few seconds; if it persists, check the DNS servers of your network adapter (especially unreachable IPv6 DNS addresses).",
@@ -1270,16 +1273,16 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Windows language", "Windows dili"),
     (
         "Applies after you save and reopen Settings.",
-        "Kaydedip yeniden açınca uygulanır.",
+        "Kaydedip Ayarlar'ı yeniden açınca uygulanır.",
     ),
     (
         "{} is reserved. Choose another shortcut.",
-        "{} ayrılmıştır. Başka bir kısayol seçin.",
+        "{} ayrılmış bir kısayoldur. Başka bir kısayol seçin.",
     ),
     ("{} · Change", "{} · Değiştir"),
     (
         "No uploads yet. Use Upload in the editor to share a screenshot.",
-        "Henüz yüklenen görsel yok. Ekran görüntüsünü paylaşmak için düzenleyicide Yükle'yi kullanın.",
+        "Henüz yüklenen görsel yok. Ekran görüntüsünü paylaşmak için düzenleyicide “Yükle” düğmesini kullanın.",
     ),
     (
         "Recent images · Double-click to open",
@@ -1289,12 +1292,12 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Finishing…", "Tamamlanıyor…"),
     ("Copied", "Kopyalandı"),
     (
-        "This computer's access key no longer matches your Worker. Reconnect in Settings › Sharing.",
-        "Bu bilgisayarın erişim anahtarı artık Worker'ınızla eşleşmiyor. Ayarlar › Paylaşım bölümünden yeniden bağlanın.",
+        "This computer's upload key no longer matches your Worker. Reconnect in Settings › Sharing.",
+        "Bu bilgisayarın yükleme anahtarı artık Worker'ınızla eşleşmiyor. Ayarlar › Paylaşım bölümünden yeniden bağlanın.",
     ),
     (
         "This capture ({} MB) is larger than your Worker's per-image limit. Switch to JPEG in Settings › Saving or raise the limit in Cloudflare › Limits.",
-        "Bu ekran görüntüsü ({} MB), Worker'ınızın görsel başına sınırından büyük. Ayarlar › Kaydetme bölümünde JPEG'e geçin veya Cloudflare › Sınırlar bölümünden sınırı artırın.",
+        "Bu ekran görüntüsü ({} MB), Worker'ınızın görsel başına sınırından büyük. Ayarlar › Kayıt bölümünde JPEG'e geçin veya Cloudflare › Sınırlar bölümünden sınırı artırın.",
     ),
     (
         "Today's upload limit is reached. It resets at {}, or raise it in Cloudflare › Limits.",
