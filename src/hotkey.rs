@@ -182,6 +182,9 @@ pub fn is_windows_snipping_tool_disabled() -> bool {
 
 pub const WM_OVERLAY_KEYDOWN: u32 = WM_USER + 201;
 pub const WM_OVERLAY_CHAR: u32 = WM_USER + 202;
+/// Posted to the Settings window while it records a shortcut when the running
+/// shortcut is pressed: `wparam` is the virtual key, `lparam` the `MOD_*` bits.
+pub const WM_RECORD_HOTKEY: u32 = WM_USER + 203;
 
 struct HookState {
     event_tx: SyncSender<Instant>,
@@ -192,6 +195,16 @@ static HOOK_STATE: Mutex<Option<HookState>> = Mutex::new(None);
 static TARGET_VK: AtomicU32 = AtomicU32::new(0);
 static TARGET_MODS: AtomicU32 = AtomicU32::new(0);
 static SNAPSHOT_HANDLED: AtomicBool = AtomicBool::new(false);
+static RECORDING_WINDOW: AtomicIsize = AtomicIsize::new(0);
+
+/// Names the window that is recording a new shortcut, or `None` when it stops.
+/// The running shortcut is registered with the system (and swallowed by the
+/// hook), so it never arrives as a key message; while a window records, the
+/// hook posts it [`WM_RECORD_HOTKEY`] instead of triggering a capture. The key
+/// stays swallowed, so the Snipping Tool does not open mid-recording.
+pub fn set_recording_window(window: Option<HWND>) {
+    RECORDING_WINDOW.store(window.map_or(0, |hwnd| hwnd.0 as isize), Ordering::SeqCst);
+}
 
 static OVERLAY_SUSPENSIONS: AtomicU32 = AtomicU32::new(0);
 
@@ -416,7 +429,17 @@ pub unsafe fn process_keyboard_hook(
     if is_down {
         if mods_match {
             let was_down = SNAPSHOT_HANDLED.swap(true, Ordering::SeqCst);
-            if !was_down {
+            let recording = RECORDING_WINDOW.load(Ordering::SeqCst);
+            if !was_down && recording != 0 {
+                let _ = unsafe {
+                    PostMessageW(
+                        HWND(recording as *mut _),
+                        WM_RECORD_HOTKEY,
+                        WPARAM(kb.vkCode as usize),
+                        LPARAM(current_mods as isize),
+                    )
+                };
+            } else if !was_down {
                 // First keydown: dispatch capture event to listener channel
                 let event_tx = HOOK_STATE
                     .lock()
@@ -734,8 +757,14 @@ pub fn create_test_kbdllhookstruct(vk: u32) -> KBDLLHOOKSTRUCT {
 mod tests {
     use super::*;
 
+    /// The hook reads process-wide state; tests that drive it run one at a time.
+    static HOOK_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn test_overlay_keyboard_routing_in_hook() {
+        let _serial = HOOK_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let kb_esc = create_test_kbdllhookstruct(VK_ESCAPE.0 as u32);
         let lparam_esc = LPARAM(&kb_esc as *const _ as isize);
         let wparam_down = WPARAM(WM_KEYDOWN as usize);
@@ -825,6 +854,84 @@ mod tests {
         OVERLAY_ACTIVE.store(false, Ordering::SeqCst);
         set_overlay_text_editing(false);
     }
+    #[test]
+    fn running_shortcut_is_handed_to_the_recording_window() {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, HWND_MESSAGE, PM_REMOVE, WINDOW_STYLE,
+        };
+        let _serial = HOOK_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let window = unsafe {
+            CreateWindowExW(
+                Default::default(),
+                windows::core::w!("STATIC"),
+                windows::core::w!(""),
+                WINDOW_STYLE(0),
+                0,
+                0,
+                0,
+                0,
+                HWND_MESSAGE,
+                None,
+                HINSTANCE::default(),
+                None,
+            )
+        }
+        .expect("message-only window");
+        // Alt in the combination keeps the editor-shortcut routing out of the way.
+        const F9: u32 = 0x78;
+        let mods = MOD_CONTROL.0 | MOD_ALT.0;
+        TARGET_VK.store(F9, Ordering::SeqCst);
+        TARGET_MODS.store(mods | MOD_NOREPEAT.0, Ordering::SeqCst);
+        SNAPSHOT_HANDLED.store(false, Ordering::SeqCst);
+        let kb = create_test_kbdllhookstruct(F9);
+        let lparam = LPARAM(&kb as *const _ as isize);
+        let take_message = || {
+            let mut msg = MSG::default();
+            let found = unsafe {
+                PeekMessageW(
+                    &mut msg,
+                    window,
+                    WM_RECORD_HOTKEY,
+                    WM_RECORD_HOTKEY,
+                    PM_REMOVE,
+                )
+            }
+            .as_bool();
+            found.then_some(msg)
+        };
+
+        set_recording_window(Some(window));
+        let pressed =
+            unsafe { process_keyboard_hook(0, WPARAM(WM_KEYDOWN as usize), lparam, mods) };
+        let handed_over = take_message();
+        let repeated =
+            unsafe { process_keyboard_hook(0, WPARAM(WM_KEYDOWN as usize), lparam, mods) };
+        let repeat_handed_over = take_message();
+        let released = unsafe { process_keyboard_hook(0, WPARAM(WM_KEYUP as usize), lparam, mods) };
+        set_recording_window(None);
+
+        TARGET_VK.store(0, Ordering::SeqCst);
+        TARGET_MODS.store(0, Ordering::SeqCst);
+        SNAPSHOT_HANDLED.store(false, Ordering::SeqCst);
+        unsafe {
+            let _ = DestroyWindow(window);
+        }
+
+        for (name, result) in [
+            ("key down", pressed),
+            ("key repeat", repeated),
+            ("key up", released),
+        ] {
+            assert_eq!(result, LRESULT(1), "{name} stays swallowed");
+        }
+        let message = handed_over.expect("the running shortcut is posted to the window");
+        assert_eq!(message.wParam.0, F9 as usize);
+        assert_eq!(message.lParam.0 as u32, mods);
+        assert!(repeat_handed_over.is_none(), "a held key is posted once");
+    }
+
     #[test]
     fn recorder_shortcuts_require_supported_key_and_modifier() {
         for description in ["PrintScreen", "Ctrl+F24", "Alt+7", "Win+Shift+PrintScreen"] {

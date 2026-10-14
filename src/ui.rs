@@ -3,13 +3,31 @@ use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
 
+/// The picker's 16 "Custom colors" slots, kept for the life of the process so
+/// colors the user adds are still there the next time it opens.
+static CUSTOM_COLORS: std::sync::Mutex<Option<[COLORREF; 16]>> = std::sync::Mutex::new(None);
+
+/// Slot 0 holds the last custom color; empty slots show white, as in the stock picker.
+fn initial_custom_colors() -> [COLORREF; 16] {
+    let mut colors = [COLORREF(0x00FF_FFFF); 16];
+    if let Some(settings) = crate::settings::Settings::config_path()
+        .and_then(|path| crate::settings::Settings::load_from_path(&path).ok())
+    {
+        colors[0] = crate::annotation::bgra_to_colorref(settings.last_custom_color);
+    }
+    colors
+}
+
 /// Native Windows color picker; cancellation is distinct from a dialog failure.
 pub fn choose_color(owner: HWND, initial: [u8; 4]) -> Result<Option<[u8; 4]>> {
     use windows::Win32::UI::Controls::Dialogs::{
         CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW, ChooseColorW, CommDlgExtendedError,
     };
     let _suspend = crate::hotkey::OverlayInputSuspension::new();
-    let mut custom = [COLORREF(0); 16];
+    let mut custom = *CUSTOM_COLORS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .get_or_insert_with(initial_custom_colors);
     let mut dialog = CHOOSECOLORW {
         lStructSize: std::mem::size_of::<CHOOSECOLORW>() as u32,
         hwndOwner: owner,
@@ -18,7 +36,11 @@ pub fn choose_color(owner: HWND, initial: [u8; 4]) -> Result<Option<[u8; 4]>> {
         Flags: CC_RGBINIT | CC_FULLOPEN,
         ..Default::default()
     };
-    if !unsafe { ChooseColorW(&mut dialog).as_bool() } {
+    let accepted = unsafe { ChooseColorW(&mut dialog).as_bool() };
+    *CUSTOM_COLORS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = Some(custom);
+    if !accepted {
         let error = unsafe { CommDlgExtendedError() };
         return if error.0 == 0 {
             Ok(None)
@@ -173,6 +195,32 @@ fn combo_dropped(target: HWND) -> bool {
         && unsafe { SendMessageW(target, CB_GETDROPPEDSTATE, WPARAM(0), LPARAM(0)) }.0 != 0
 }
 
+/// Posted by [`window_loop`] to a tabbed dialog for Ctrl+Tab / Ctrl+PageDown
+/// (`wparam` 1) and Ctrl+Shift+Tab / Ctrl+PageUp (`wparam` −1, which is
+/// `usize::MAX`). The dialog answers with [`next_tab`].
+pub const WM_SWITCH_TAB: u32 = WM_APP + 120;
+
+/// The tab a [`WM_SWITCH_TAB`] `wparam` selects from `current`, wrapping around
+/// the `count` tabs.
+pub fn next_tab(current: usize, count: usize, wparam: WPARAM) -> usize {
+    let step = (wparam.0 as isize).signum();
+    (current as isize + step).rem_euclid(count as isize) as usize
+}
+
+/// The tab-switch direction (1 or −1) a key press asks for, if any.
+fn tab_step(key: u32, ctrl: bool, shift: bool) -> Option<isize> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_NEXT, VK_PRIOR, VK_TAB};
+    if !ctrl {
+        return None;
+    }
+    match key {
+        key if key == VK_TAB.0 as u32 => Some(if shift { -1 } else { 1 }),
+        key if key == VK_NEXT.0 as u32 => Some(1),
+        key if key == VK_PRIOR.0 as u32 => Some(-1),
+        _ => None,
+    }
+}
+
 pub fn window_loop(hwnd: HWND, kind: WindowKind) -> Result<()> {
     let dialog = kind != WindowKind::Overlay;
     let mut msg = MSG::default();
@@ -208,6 +256,19 @@ pub fn window_loop(hwnd: HWND, kind: WindowKind) -> Result<()> {
                 PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0))?;
             }
             continue;
+        }
+        // The property-sheet shortcuts change tabs; IsDialogMessage would turn
+        // Ctrl+Tab into plain focus navigation.
+        if dialog && msg.message == WM_KEYDOWN && !combo_dropped(msg.hwnd) {
+            use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_SHIFT};
+            let held = |key: u16| unsafe { GetKeyState(key as i32) } < 0;
+            if let Some(step) = tab_step(msg.wParam.0 as u32, held(VK_CONTROL.0), held(VK_SHIFT.0))
+            {
+                unsafe {
+                    PostMessageW(hwnd, WM_SWITCH_TAB, WPARAM(step as usize), LPARAM(0))?;
+                }
+                continue;
+            }
         }
         if !dialog || !unsafe { IsDialogMessageW(hwnd, &msg).as_bool() } {
             unsafe {
@@ -305,22 +366,54 @@ pub fn info(owner: HWND, title: &str, message: &str) {
 
 pub fn confirm(owner: HWND, title: &str, message: &str) -> bool {
     use windows::Win32::UI::Controls::TD_INFORMATION_ICON;
-    let _suspend = crate::hotkey::OverlayInputSuspension::new();
-    let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
-    let message: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
-    // No is the default, as in the message-box fallback below.
     let buttons = [
         (IDYES.0, crate::i18n::t("Yes")),
         (IDNO.0, crate::i18n::t("No")),
     ];
-    match task_dialog(
+    ask(
         owner,
-        &title,
-        &message,
+        title,
+        message,
         TD_INFORMATION_ICON,
         &buttons,
-        IDNO.0,
-    ) {
+        MB_ICONQUESTION,
+    )
+}
+
+/// Confirmation whose commit button names the action (Windows guidance), with
+/// Cancel as the default. `destructive` marks an irreversible action with the
+/// warning icon.
+pub fn confirm_action(
+    owner: HWND,
+    title: &str,
+    message: &str,
+    commit_label: &str,
+    destructive: bool,
+) -> bool {
+    use windows::Win32::UI::Controls::{TD_INFORMATION_ICON, TD_WARNING_ICON};
+    let buttons = [(IDYES.0, commit_label), (IDNO.0, crate::i18n::t("Cancel"))];
+    let (icon, fallback_icon) = if destructive {
+        (TD_WARNING_ICON, MB_ICONWARNING)
+    } else {
+        (TD_INFORMATION_ICON, MB_ICONINFORMATION)
+    };
+    ask(owner, title, message, icon, &buttons, fallback_icon)
+}
+
+/// Two-button question: `buttons` is `[(IDYES, commit), (IDNO, cancel)]`, and the
+/// second one is the default, as in the message-box fallback below.
+fn ask(
+    owner: HWND,
+    title: &str,
+    message: &str,
+    icon: PCWSTR,
+    buttons: &[(i32, &str); 2],
+    fallback_icon: MESSAGEBOX_STYLE,
+) -> bool {
+    let _suspend = crate::hotkey::OverlayInputSuspension::new();
+    let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+    let message: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
+    match task_dialog(owner, &title, &message, icon, buttons, IDNO.0) {
         Ok(selected) => selected == IDYES.0,
         Err(error) => {
             crate::diagnostics::record("confirmation dialog", &error.to_string());
@@ -329,7 +422,7 @@ pub fn confirm(owner: HWND, title: &str, message: &str) -> bool {
                     owner,
                     PCWSTR(message.as_ptr()),
                     PCWSTR(title.as_ptr()),
-                    MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
+                    MB_YESNO | fallback_icon | MB_DEFBUTTON2,
                 )
             };
             if selected.0 == 0 {
@@ -340,5 +433,33 @@ pub fn confirm(owner: HWND, title: &str, message: &str) -> bool {
             }
             selected == IDYES
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_NEXT, VK_PRIOR, VK_TAB};
+
+    #[test]
+    fn tab_switch_wraps_in_both_directions() {
+        let forward = WPARAM(1);
+        let backward = WPARAM(usize::MAX);
+        assert_eq!(next_tab(0, 5, forward), 1);
+        assert_eq!(next_tab(4, 5, forward), 0);
+        assert_eq!(next_tab(2, 5, backward), 1);
+        assert_eq!(next_tab(0, 5, backward), 4);
+    }
+
+    #[test]
+    fn tab_shortcuts_need_control() {
+        let (tab, next, prior) = (VK_TAB.0 as u32, VK_NEXT.0 as u32, VK_PRIOR.0 as u32);
+        assert_eq!(tab_step(tab, true, false), Some(1));
+        assert_eq!(tab_step(tab, true, true), Some(-1));
+        assert_eq!(tab_step(next, true, false), Some(1));
+        assert_eq!(tab_step(prior, true, false), Some(-1));
+        assert_eq!(tab_step(tab, false, false), None);
+        assert_eq!(tab_step(tab, false, true), None);
+        assert_eq!(tab_step(0x41, true, false), None);
     }
 }

@@ -7,8 +7,8 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, HMENU, MENU_ITEM_FLAGS, MF_GRAYED, MF_SEPARATOR,
-    MF_STRING, PostMessageW, SetForegroundWindow, TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTALIGN,
-    TPM_RIGHTBUTTON, TrackPopupMenuEx, WM_NULL,
+    MF_STRING, PostMessageW, SetForegroundWindow, SetMenuDefaultItem, TPM_BOTTOMALIGN,
+    TPM_RETURNCMD, TPM_RIGHTALIGN, TPM_RIGHTBUTTON, TrackPopupMenuEx, WM_NULL,
 };
 use windows::core::{PCWSTR, Result};
 
@@ -43,28 +43,29 @@ pub(super) fn show(
     let _suspension = crate::hotkey::OverlayInputSuspension::new();
     let menu = PopupMenu(unsafe { CreatePopupMenu()? });
     let capture = if hotkey.is_empty() {
-        crate::i18n::t("Take screenshot").to_owned()
+        crate::i18n::t("&Take screenshot").to_owned()
     } else {
-        format!("{}\t{hotkey}", crate::i18n::t("Take screenshot"))
+        format!("{}\t{hotkey}", crate::i18n::t("&Take screenshot"))
     };
     append(menu.0, CAPTURE, &capture, MF_STRING)?;
-    append(menu.0, SETTINGS, crate::i18n::t("Settings"), MF_STRING)?;
+    // Left-clicking the icon captures, so the menu marks that item as default (bold).
+    unsafe { SetMenuDefaultItem(menu.0, CAPTURE as u32, 0)? };
+    append(menu.0, SETTINGS, crate::i18n::t("&Settings"), MF_STRING)?;
     append(
         menu.0,
         OPEN_FOLDER,
-        crate::i18n::t("Screenshots folder"),
+        crate::i18n::t("Screenshots &folder"),
         MF_STRING,
     )?;
-    append(
-        menu.0,
-        CHECK_UPDATES,
-        if crate::updater::is_checking() {
-            crate::i18n::t("Checking for updates…")
-        } else {
-            crate::i18n::t("Check for updates")
-        },
-        MF_STRING,
-    )?;
+    let (check_label, check_flags) = if crate::updater::is_checking() {
+        (
+            crate::i18n::t("Checking for &updates…"),
+            MF_STRING | MF_GRAYED,
+        )
+    } else {
+        (crate::i18n::t("Check for &updates"), MF_STRING)
+    };
+    append(menu.0, CHECK_UPDATES, check_label, check_flags)?;
     unsafe { AppendMenuW(menu.0, MF_SEPARATOR, 0, PCWSTR::null())? };
     append(
         menu.0,
@@ -90,7 +91,7 @@ pub(super) fn show(
         }
     }
     unsafe { AppendMenuW(menu.0, MF_SEPARATOR, 0, PCWSTR::null())? };
-    append(menu.0, EXIT, crate::i18n::t("Quit isolmaSS"), MF_STRING)?;
+    append(menu.0, EXIT, crate::i18n::t("&Quit isolmaSS"), MF_STRING)?;
 
     unsafe {
         let _ = SetForegroundWindow(owner);
