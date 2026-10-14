@@ -1,4 +1,6 @@
 use crate::capture::Rect;
+use std::borrow::Cow;
+use std::ops::Range;
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{DEFAULT_CHARSET, LOGFONTW};
 
@@ -101,6 +103,33 @@ fn nearest_boundary(count: usize, x: i32, prefix_width: impl Fn(usize) -> i32) -
     }
 }
 
+/// Width of the first `columns` characters of one `line`.
+fn columns_width(line: &str, columns: usize, font_size: i32) -> i32 {
+    let end = line
+        .char_indices()
+        .nth(columns)
+        .map_or(line.len(), |(index, _)| index);
+    if end == 0 {
+        0
+    } else {
+        crate::drawing::measure_text(&line[..end], font_size).0
+    }
+}
+
+/// Text as the editor stores it: line breaks as LF (CRLF and CR are one break each) and
+/// tabs as four spaces.
+fn normalize(text: &str) -> Cow<'_, str> {
+    if text.contains(['\r', '\t']) {
+        Cow::Owned(
+            text.replace("\r\n", "\n")
+                .replace('\r', "\n")
+                .replace('\t', "    "),
+        )
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
 /// Air between the text and the frame drawn around the box being edited.
 pub(super) fn text_box_margin(dpi: u32) -> i32 {
     (4 * dpi as i32 / 96).max(1)
@@ -109,11 +138,14 @@ pub(super) fn text_box_margin(dpi: u32) -> i32 {
 #[derive(Debug, Clone)]
 pub struct TextEditState {
     pub pos: (i32, i32),
+    /// Lines separated by `\n`.
     pub text: String,
     pub(super) original_text: String,
     pub caret: usize,
     pub color: [u8; 4],
     pub font_size: i32,
+    /// Draws the box behind the text, which is then black or white.
+    pub background: bool,
     pub editing_id: Option<usize>,
     pub caret_visible: bool,
     pub anchor: Option<usize>,
@@ -139,6 +171,7 @@ impl TextEditState {
             caret,
             color,
             font_size,
+            background: false,
             editing_id,
             caret_visible: true,
             anchor: None,
@@ -146,6 +179,12 @@ impl TextEditState {
             undo: Vec::new(),
             redo: Vec::new(),
         }
+    }
+
+    /// The same box with the background box on or off.
+    pub fn with_background(mut self, background: bool) -> Self {
+        self.background = background;
+        self
     }
 
     fn remember(&mut self) {
@@ -173,6 +212,8 @@ impl TextEditState {
     }
 
     pub fn insert_text(&mut self, text: &str) {
+        let text = normalize(text);
+        let text: &str = &text;
         if text.is_empty() {
             return;
         }
@@ -196,11 +237,7 @@ impl TextEditState {
     }
 
     pub fn insert_char(&mut self, ch: char) {
-        if ch == '\t' {
-            self.insert_text("    ");
-        } else {
-            self.insert_text(ch.encode_utf8(&mut [0; 4]));
-        }
+        self.insert_text(ch.encode_utf8(&mut [0; 4]));
     }
 
     pub fn backspace(&mut self) -> bool {
@@ -372,29 +409,53 @@ impl TextEditState {
         self.caret_visible = true;
     }
 
-    /// Width of the first `count` characters.
-    fn prefix_width(&self, count: usize) -> i32 {
-        if count == 0 {
-            0
-        } else {
-            let end = self.byte_index(count);
-            crate::drawing::measure_text(&self.text[..end], self.font_size).0
-        }
+    /// Every line with the range of characters it holds, its line break excluded.
+    fn lines(&self) -> impl Iterator<Item = (Range<usize>, &str)> {
+        let mut start = 0;
+        self.text.split('\n').map(move |line| {
+            let end = start + line.chars().count();
+            let span = start..end;
+            start = end + 1;
+            (span, line)
+        })
     }
 
-    /// Horizontal distance from the box origin to the caret.
-    pub(super) fn caret_offset(&self) -> i32 {
-        self.prefix_width(self.caret)
+    /// Height of one line.
+    pub(super) fn line_height(&self) -> i32 {
+        crate::drawing::line_height(self.font_size)
     }
 
-    /// The text's extent, at least one em wide so an empty box is still a target.
+    /// The line that holds character offset `at`: its index, character range and text. An
+    /// offset just before a line break belongs to the line that break ends.
+    fn line_of(&self, at: usize) -> (usize, Range<usize>, &str) {
+        let at = at.min(self.text.chars().count());
+        self.lines()
+            .enumerate()
+            .find(|(_, (span, _))| at <= span.end)
+            .map(|(row, (span, line))| (row, span, line))
+            .expect("every offset of the text lies on a line")
+    }
+
+    /// Distance from the box origin to the caret: along its line, and down to the line's top.
+    pub(super) fn caret_offset(&self) -> (i32, i32) {
+        let (row, span, line) = self.line_of(self.caret);
+        let column = self.caret.min(span.end) - span.start;
+        (
+            columns_width(line, column, self.font_size),
+            row as i32 * self.line_height(),
+        )
+    }
+
+    /// The extent of the text and its background box, at least one em wide so an empty box
+    /// is still a target.
     pub(super) fn bounds(&self) -> Rect {
         let (width, height) = crate::drawing::measure_text(&self.text, self.font_size);
+        let padding = crate::annotation::text_padding(self.font_size, self.background);
         Rect::new(
-            self.pos.0,
-            self.pos.1,
-            self.pos.0 + width.max(self.font_size),
-            self.pos.1 + height,
+            self.pos.0 - padding,
+            self.pos.1 - padding,
+            self.pos.0 + width.max(self.font_size) + padding,
+            self.pos.1 + height + padding,
         )
     }
 
@@ -404,21 +465,83 @@ impl TextEditState {
         self.bounds().inflate(margin, margin).contains(pt.0, pt.1)
     }
 
-    /// Character boundary nearest to the horizontal position `x`.
-    pub(super) fn caret_at(&self, x: i32) -> usize {
-        nearest_boundary(self.text.chars().count(), x - self.pos.0, |count| {
-            self.prefix_width(count)
-        })
+    /// Character boundary nearest to `pt`: on the line at its height (the first line above
+    /// the text, the last below it), at the column nearest its horizontal position.
+    pub(super) fn caret_at(&self, pt: (i32, i32)) -> usize {
+        let row = ((pt.1 - self.pos.1).max(0) / self.line_height()) as usize;
+        let (span, line) = self
+            .lines()
+            .nth(row)
+            .or_else(|| self.lines().last())
+            .expect("a text has a first line");
+        span.start
+            + nearest_boundary(span.end - span.start, pt.0 - self.pos.0, |columns| {
+                columns_width(line, columns, self.font_size)
+            })
+    }
+
+    /// Moves the caret one line up or down, to the column nearest its horizontal position.
+    /// It stays where it is above the first line and below the last one.
+    pub fn move_line(&mut self, down: bool, extend: bool) {
+        let (row, _, _) = self.line_of(self.caret);
+        let x = self.caret_offset().0;
+        let neighbour = if down {
+            Some(row + 1)
+        } else {
+            row.checked_sub(1)
+        };
+        let target = match neighbour.and_then(|neighbour| self.lines().nth(neighbour)) {
+            Some((span, line)) => {
+                span.start
+                    + nearest_boundary(span.end - span.start, x, |columns| {
+                        columns_width(line, columns, self.font_size)
+                    })
+            }
+            None => self.caret,
+        };
+        self.move_to(target, extend);
+    }
+
+    /// Moves the caret to the start or the end of its line.
+    pub fn move_line_edge(&mut self, end: bool, extend: bool) {
+        let (_, span, _) = self.line_of(self.caret);
+        self.move_to(if end { span.end } else { span.start }, extend);
+    }
+
+    /// Highlight rectangles of the selection, one for each line it touches, each with the
+    /// text of its line. A selected line break widens the highlight of its line a little so
+    /// that empty lines show as well.
+    pub(super) fn selection_lines(&self) -> impl Iterator<Item = (Rect, &str)> {
+        let range = self.selection().unwrap_or(0..0);
+        let (origin, font_size, height) = (self.pos, self.font_size, self.line_height());
+        let break_width = (font_size / 4).max(2);
+        self.lines()
+            .enumerate()
+            .filter_map(move |(row, (span, line))| {
+                let from = range.start.clamp(span.start, span.end);
+                let to = range.end.clamp(span.start, span.end);
+                let breaks = range.start <= span.end && span.end < range.end;
+                if from == to && !breaks {
+                    return None;
+                }
+                let top = origin.1 + row as i32 * height;
+                let left = origin.0 + columns_width(line, from - span.start, font_size);
+                let right = origin.0
+                    + columns_width(line, to - span.start, font_size)
+                    + if breaks { break_width } else { 0 };
+                Some((Rect::new(left, top, right, top + height), line))
+            })
     }
 
     /// Moves the IME composition window to the caret; otherwise Windows opens it, and
     /// the candidate list, at the origin of the virtual screen.
     pub(super) fn place_ime_window(&self, hwnd: HWND) {
+        let (x, y) = self.caret_offset();
         let form = ime::CompositionForm {
             style: ime::CFS_POINT,
             current_pos: POINT {
-                x: self.pos.0 + self.caret_offset(),
-                y: self.pos.1,
+                x: self.pos.0 + x,
+                y: self.pos.1 + y,
             },
             area: RECT::default(),
         };
@@ -717,6 +840,60 @@ mod tests {
     }
 
     #[test]
+    fn pasted_line_breaks_stay_as_one_lf_each_and_tabs_become_spaces() {
+        let mut state = edit("");
+        state.insert_text("a\r\nb\rc\nd\r\n\r\ne\tf");
+        assert_eq!(state.text, "a\nb\nc\nd\n\ne    f");
+        assert_eq!(state.caret, state.text.chars().count());
+        // One paste is one undoable edit.
+        state.undo();
+        assert_eq!(state.text, "");
+    }
+
+    #[test]
+    fn pasting_lines_replaces_the_selection_and_text_without_breaks_is_untouched() {
+        let mut state = edit("one two");
+        state.anchor = Some(3);
+        state.caret = 4;
+        state.insert_text("\r\n");
+        assert_eq!((state.text.as_str(), state.caret), ("one\ntwo", 4));
+        state.insert_text("plain");
+        assert_eq!(state.text, "one\nplaintwo");
+    }
+
+    #[test]
+    fn the_size_limit_counts_the_line_breaks_as_stored() {
+        let mut state = edit(&"a".repeat(16_382));
+        // CRLF twice is two stored bytes, which fit exactly.
+        state.insert_text("\r\n\r\n");
+        assert_eq!(state.text.len(), 16_384);
+        assert!(state.text.ends_with("a\n\n"));
+        state.insert_text("\r\n");
+        assert_eq!(state.text.len(), 16_384);
+    }
+
+    #[test]
+    fn a_line_break_is_a_character_like_any_other() {
+        let mut state = edit("ab\ncd");
+        state.move_to(3, false);
+        assert!(state.backspace());
+        assert_eq!((state.text.as_str(), state.caret), ("abcd", 2));
+        state.undo();
+        assert_eq!((state.text.as_str(), state.caret), ("ab\ncd", 3));
+        state.move_to(2, false);
+        assert!(state.delete());
+        assert_eq!(state.text, "abcd");
+        state.undo();
+        assert_eq!(state.caret, 2);
+        state.step(true, false);
+        assert_eq!(state.caret, 3, "one step crosses the break");
+        state.step(false, false);
+        assert_eq!(state.caret, 2, "and one step back");
+        state.select_all();
+        assert_eq!(state.selected_text().as_deref(), Some("ab\ncd"));
+    }
+
+    #[test]
     fn backspace_removes_the_selection_or_the_character_before_the_caret() {
         let mut state = edit("héllo");
         assert!(state.backspace());
@@ -768,18 +945,245 @@ mod tests {
         assert_eq!(state.selected_text().as_deref(), Some("héllo"));
     }
 
+    // ---- lines ----------------------------------------------------------------------
+
+    /// The boundary of `line` whose distance from `x` is smallest, found by trying them all;
+    /// halfway between two boundaries the right one wins, as it does for a click.
+    fn nearest_column(line: &str, x: i32) -> usize {
+        (0..=line.chars().count())
+            .rev()
+            .min_by_key(|&columns| (columns_width(line, columns, 22) - x).abs())
+            .expect("a line has boundaries")
+    }
+
+    #[test]
+    fn up_and_down_keep_the_horizontal_position_from_line_to_line() {
+        // Offsets: "WWWWWW" 0..6, "ii" 7..9, "WWWWWW" 10..16.
+        let mut state = edit("WWWWWW\nii\nWWWWWW");
+        state.move_to(4, false);
+        let x = state.caret_offset().0;
+        // The narrow line has no column that far right: the caret lands at its end.
+        state.move_line(true, false);
+        assert_eq!(state.caret, 9);
+        // From there the wide line below is entered at the column nearest to "ii"'s width.
+        let narrow = crate::drawing::measure_text("ii", 22).0;
+        assert!(narrow < x);
+        state.move_line(true, false);
+        assert_eq!(state.caret, 10 + nearest_column("WWWWWW", narrow));
+        // Back up, line by line, each time to the column nearest where the caret was.
+        state.move_to(13, false);
+        let x = state.caret_offset().0;
+        state.move_line(false, false);
+        assert_eq!(state.caret, 7 + nearest_column("ii", x));
+        let x = state.caret_offset().0;
+        state.move_line(false, false);
+        assert_eq!(state.caret, nearest_column("WWWWWW", x));
+    }
+
+    #[test]
+    fn up_and_down_between_equal_lines_keep_the_column() {
+        let mut state = edit("abcd\nabcd\nabcd");
+        state.move_to(7, false);
+        state.move_line(true, false);
+        assert_eq!(state.caret, 12);
+        state.move_line(false, false);
+        state.move_line(false, false);
+        assert_eq!(state.caret, 2);
+        // Offsets: "ab" 0..2, "" 3, "cd" 4..6.
+        let mut empty = edit("ab\n\ncd");
+        empty.move_to(1, false);
+        empty.move_line(true, false);
+        assert_eq!(empty.caret, 3, "an empty line has one place for the caret");
+        empty.move_line(true, false);
+        assert_eq!(
+            empty.caret, 4,
+            "from column 0 the next line is entered at its start"
+        );
+    }
+
+    #[test]
+    fn up_stays_on_the_first_line_and_down_on_the_last() {
+        let mut state = edit("abc\ndef");
+        state.move_to(2, false);
+        state.move_line(false, false);
+        assert_eq!(state.caret, 2);
+        state.move_to(6, false);
+        state.move_line(true, false);
+        assert_eq!(state.caret, 6);
+        // A selection still collapses, or grows when extended.
+        state.anchor = Some(1);
+        state.move_line(true, false);
+        assert_eq!((state.caret, state.anchor), (6, None));
+        state.move_line(true, true);
+        assert_eq!((state.caret, state.anchor), (6, Some(6)));
+        assert_eq!(state.selection(), None);
+    }
+
+    #[test]
+    fn shift_up_and_down_extend_the_selection_across_lines() {
+        let mut state = edit("abcd\nabcd\nabcd");
+        state.move_to(7, false);
+        state.move_line(true, true);
+        assert_eq!((state.caret, state.anchor), (12, Some(7)));
+        state.move_line(false, true);
+        state.move_line(false, true);
+        assert_eq!((state.caret, state.anchor), (2, Some(7)));
+        assert_eq!(state.selection(), Some(2..7));
+        assert!(state.caret_visible);
+        // Without Shift the selection is dropped and the caret moves from where it was.
+        state.move_line(true, false);
+        assert_eq!((state.caret, state.anchor), (7, None));
+    }
+
+    #[test]
+    fn home_and_end_stay_on_the_line_of_the_caret() {
+        // Offsets: "one" 0..3, "two words" 4..13, "" 14, "four" 15..19.
+        let mut state = edit("one\ntwo words\n\nfour");
+        for (caret, home, end) in [(7, 4, 13), (4, 4, 13), (13, 4, 13), (3, 0, 3), (14, 14, 14)] {
+            state.move_to(caret, false);
+            state.move_line_edge(false, false);
+            assert_eq!(state.caret, home, "Home from {caret}");
+            state.move_to(caret, false);
+            state.move_line_edge(true, false);
+            assert_eq!(state.caret, end, "End from {caret}");
+        }
+        state.move_to(6, false);
+        state.move_line_edge(true, true);
+        assert_eq!((state.caret, state.anchor), (13, Some(6)));
+        state.move_line_edge(false, true);
+        assert_eq!((state.caret, state.anchor), (4, Some(6)));
+    }
+
+    #[test]
+    fn a_selection_inside_one_line_is_one_rectangle_on_that_line() {
+        let mut state = TextEditState::new(
+            (30, 40),
+            "hello\nworld".to_string(),
+            [0, 0, 0, 255],
+            22,
+            None,
+        );
+        assert_eq!(state.selection_lines().count(), 0, "nothing is selected");
+        let line = state.line_height();
+        // "orl" of "world", which starts at offset 6.
+        state.anchor = Some(7);
+        state.caret = 10;
+        let width = |text: &str| crate::drawing::measure_text(text, 22).0;
+        assert_eq!(
+            state
+                .selection_lines()
+                .map(|(rect, _)| rect)
+                .collect::<Vec<_>>(),
+            [Rect::new(
+                30 + width("w"),
+                40 + line,
+                30 + width("worl"),
+                40 + 2 * line
+            )]
+        );
+    }
+
+    #[test]
+    fn a_selection_over_several_lines_is_a_rectangle_per_line_widened_by_each_break() {
+        // Offsets: "hello" 0..5, "xy" 6..8, "abcdef" 9..15.
+        let mut state = TextEditState::new(
+            (30, 40),
+            "hello\nxy\nabcdef".to_string(),
+            [0, 0, 0, 255],
+            22,
+            None,
+        );
+        let line = state.line_height();
+        let width = |text: &str| crate::drawing::measure_text(text, 22).0;
+        let break_width = 22 / 4;
+        state.anchor = Some(2);
+        state.caret = 12;
+        assert_eq!(
+            state
+                .selection_lines()
+                .map(|(rect, _)| rect)
+                .collect::<Vec<_>>(),
+            [
+                Rect::new(
+                    30 + width("he"),
+                    40,
+                    30 + width("hello") + break_width,
+                    40 + line
+                ),
+                Rect::new(30, 40 + line, 30 + width("xy") + break_width, 40 + 2 * line),
+                Rect::new(30, 40 + 2 * line, 30 + width("abc"), 40 + 3 * line),
+            ]
+        );
+        // A selection made backwards covers the same lines.
+        state.anchor = Some(12);
+        state.caret = 2;
+        assert_eq!(state.selection_lines().count(), 3);
+    }
+
+    #[test]
+    fn selected_empty_lines_still_get_a_highlight() {
+        // Offsets: "a" 0..1, "" 2, "b" 3..4. Offsets 1 and 2 are the two line breaks.
+        let mut state = edit("a\n\nb");
+        state.anchor = Some(1);
+        state.caret = 3;
+        let line = state.line_height();
+        let rects = state
+            .selection_lines()
+            .map(|(rect, _)| rect)
+            .collect::<Vec<_>>();
+        let first = crate::drawing::measure_text("a", 22).0;
+        assert_eq!(
+            rects,
+            [
+                Rect::new(first, 0, first + 5, line),
+                Rect::new(0, line, 5, 2 * line)
+            ]
+        );
+    }
+
     // ---- geometry -------------------------------------------------------------------
 
     #[test]
-    fn the_caret_offset_is_the_width_of_the_text_before_it() {
+    fn the_caret_offset_is_the_width_of_the_text_before_it_on_its_line() {
         let mut state = edit("héllo");
         state.move_to(2, false);
         assert_eq!(
             state.caret_offset(),
-            crate::drawing::measure_text("hé", 22).0
+            (crate::drawing::measure_text("hé", 22).0, 0)
         );
         state.move_to(0, false);
-        assert_eq!(state.caret_offset(), 0);
+        assert_eq!(state.caret_offset(), (0, 0));
+    }
+
+    #[test]
+    fn the_caret_offset_drops_one_line_height_per_line() {
+        let mut state = edit("one\ntwo words\n\nfour");
+        let line = state.line_height();
+        // Offsets: "one" 0..3, "two words" 4..13, "" 14, "four" 15..19.
+        for (caret, row, text_before) in [
+            (0, 0, ""),
+            (3, 0, "one"),
+            (4, 1, ""),
+            (7, 1, "two"),
+            (13, 1, "two words"),
+            (14, 2, ""),
+            (15, 3, ""),
+            (19, 3, "four"),
+        ] {
+            state.move_to(caret, false);
+            let width = if text_before.is_empty() {
+                0
+            } else {
+                crate::drawing::measure_text(text_before, 22).0
+            };
+            assert_eq!(state.caret_offset(), (width, row * line), "caret {caret}");
+        }
+        state.caret = 1000;
+        assert_eq!(
+            state.caret_offset().1,
+            3 * line,
+            "a caret past the end sits on the last line"
+        );
     }
 
     #[test]
@@ -793,6 +1197,38 @@ mod tests {
         state.text.clear();
         let (_, empty_height) = crate::drawing::measure_text("", 22);
         assert_eq!(state.bounds(), Rect::new(30, 40, 52, 40 + empty_height));
+    }
+
+    #[test]
+    fn the_box_of_several_lines_is_as_wide_as_the_widest_and_as_tall_as_all() {
+        let content = "ab\na much wider line\nc\n";
+        let state = TextEditState::new((30, 40), content.to_string(), [0, 0, 0, 255], 22, None);
+        let (width, height) = crate::drawing::measure_text(content, 22);
+        assert_eq!(
+            width,
+            crate::drawing::measure_text("a much wider line", 22).0
+        );
+        assert_eq!(
+            height,
+            4 * state.line_height(),
+            "the trailing break opens a fourth line"
+        );
+        assert_eq!(state.bounds(), Rect::new(30, 40, 30 + width, 40 + height));
+    }
+
+    #[test]
+    fn the_background_box_grows_the_edit_box_on_every_side() {
+        let plain = TextEditState::new((30, 40), "hello".to_string(), [0, 0, 0, 255], 22, None);
+        assert!(!plain.background);
+        let boxed = plain.clone().with_background(true);
+        assert!(boxed.background);
+        let bounds = plain.bounds();
+        // A quarter of the 22 px font, rounded down.
+        assert_eq!(boxed.bounds(), bounds.inflate(5, 5));
+        // The pointer counts as inside up to the margin of the grown box.
+        assert!(boxed.contains((bounds.left - 5 - 4, bounds.top), 96));
+        assert!(!boxed.contains((bounds.left - 5 - 5, bounds.top), 96));
+        assert!(!plain.contains((bounds.left - 5, bounds.top), 96));
     }
 
     #[test]
@@ -810,9 +1246,40 @@ mod tests {
     fn a_click_picks_the_nearest_character_boundary() {
         let state = TextEditState::new((30, 40), "héllo".to_string(), [0, 0, 0, 255], 22, None);
         let boundary = 30 + crate::drawing::measure_text("hé", 22).0;
-        assert_eq!(state.caret_at(boundary), 2);
-        assert_eq!(state.caret_at(0), 0);
-        assert_eq!(state.caret_at(10_000), 5);
+        assert_eq!(state.caret_at((boundary, 45)), 2);
+        assert_eq!(state.caret_at((0, 45)), 0);
+        assert_eq!(state.caret_at((10_000, 45)), 5);
+    }
+
+    #[test]
+    fn a_click_picks_the_line_at_its_height_and_the_column_in_it() {
+        let state = TextEditState::new(
+            (30, 40),
+            "first\nsecond one\n\nlast".to_string(),
+            [0, 0, 0, 255],
+            22,
+            None,
+        );
+        let line = state.line_height();
+        let row_y = |row: i32| 40 + row * line + line / 2;
+        let at = |text: &str| 30 + crate::drawing::measure_text(text, 22).0;
+        // Offsets: "first" 0..5, "second one" 6..16, "" 17, "last" 18..22.
+        assert_eq!(state.caret_at((at("fir"), row_y(0))), 3);
+        assert_eq!(state.caret_at((at("second"), row_y(1))), 6 + 6);
+        assert_eq!(state.caret_at((0, row_y(1))), 6);
+        assert_eq!(state.caret_at((10_000, row_y(1))), 16);
+        assert_eq!(state.caret_at((at("la"), row_y(3))), 18 + 2);
+        assert_eq!(
+            state.caret_at((500, row_y(2))),
+            17,
+            "an empty line has one boundary"
+        );
+        // The last pixel row of a line still belongs to it, the next one to the next line.
+        assert_eq!(state.caret_at((0, 40 + line - 1)), 0);
+        assert_eq!(state.caret_at((0, 40 + line)), 6);
+        // Above the text is the first line, below it the last.
+        assert_eq!(state.caret_at((at("fi"), 0)), 2);
+        assert_eq!(state.caret_at((at("la"), 10_000)), 20);
     }
 
     // ---- characters from the keyboard -------------------------------------------------
@@ -861,8 +1328,38 @@ mod tests {
         assert_eq!(form.style, ime::CFS_POINT);
         assert_eq!(
             (form.current_pos.x, form.current_pos.y),
-            (120 + state.caret_offset(), 70)
+            (120 + state.caret_offset().0, 70)
         );
+    }
+
+    #[test]
+    fn the_ime_window_follows_the_caret_onto_later_lines() {
+        use crate::overlay::test_support::TestWindow;
+        let window = TestWindow::new();
+        let mut state = TextEditState::new(
+            (120, 70),
+            "first\nsecond".to_string(),
+            [0, 0, 0, 255],
+            22,
+            None,
+        );
+        state.move_to(9, false);
+        state.place_ime_window(window.0);
+        let mut form = ime::CompositionForm {
+            style: 0,
+            current_pos: POINT::default(),
+            area: RECT::default(),
+        };
+        unsafe {
+            let context = ime::ImmGetContext(window.0);
+            assert!(!context.is_null(), "the window has an input context");
+            assert_ne!(ime::ImmGetCompositionWindow(context, &mut form), 0);
+            ime::ImmReleaseContext(window.0, context);
+        }
+        let (x, y) = state.caret_offset();
+        let before_caret = crate::drawing::measure_text("sec", 22).0;
+        assert_eq!((x, y), (before_caret, state.line_height()));
+        assert_eq!((form.current_pos.x, form.current_pos.y), (120 + x, 70 + y));
     }
 
     #[test]

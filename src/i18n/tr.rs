@@ -783,6 +783,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("System", "Sistem"),
     ("Teal", "Camgöbeği"),
     ("Text", "Metin"),
+    ("Text background", "Metin arka planı"),
     (
         "The Cloudflare address changed. Connect this computer again before uploading.",
         "Cloudflare adresi değişti. Yüklemeden önce bu bilgisayarı yeniden bağlayın.",

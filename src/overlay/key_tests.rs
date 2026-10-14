@@ -356,6 +356,142 @@ fn ctrl_x_keeps_the_text_when_the_clipboard_is_unavailable() {
     assert_eq!(title, crate::i18n::t("Cut failed"));
 }
 
+fn text_of(state: &OverlayState, index: usize) -> (String, bool) {
+    match &state.objects[index].kind {
+        AnnotationKind::Text {
+            text, background, ..
+        } => (text.clone(), *background),
+        other => panic!("expected text, found {other:?}"),
+    }
+}
+
+fn state_with_selected_text() -> OverlayState {
+    let mut state = state_with_rectangle();
+    state.objects.push(AnnotationObject::new(
+        5,
+        AnnotationKind::Text {
+            pos: (100, 100),
+            text: "Hi".to_string(),
+            color: [0, 0, 0, 255],
+            font_size: 22,
+            background: false,
+        },
+    ));
+    state.active_tool = ToolKind::Select;
+    state.set_selected_id(Some(5));
+    state
+}
+
+#[test]
+fn shift_return_adds_a_line_while_plain_return_commits_every_line() {
+    let window = TestWindow::new();
+    let mut state = editing_state("ab");
+    state.text_edit.as_mut().unwrap().caret = 1;
+    press(&mut state, &window, RETURN, SHIFT);
+    assert_eq!(
+        (edit(&state).text.as_str(), edit(&state).caret),
+        ("a\nb", 2)
+    );
+    assert_eq!(state.object_count(), 1, "the text box is still open");
+    press(&mut state, &window, RETURN, 0);
+    assert!(state.text_edit().is_none());
+    assert_eq!(text_of(&state, 1), ("a\nb".to_string(), false));
+}
+
+#[test]
+fn up_down_home_and_end_move_between_and_within_lines() {
+    let window = TestWindow::new();
+    // Offsets: "abcd" 0..4, "ab" 5..7, "abcd" 8..12.
+    let mut state = editing_state("abcd\nab\nabcd");
+    state.text_edit.as_mut().unwrap().caret = 3;
+    press(&mut state, &window, DOWN, 0);
+    assert_eq!(edit(&state).caret, 7, "the short line ends before column 3");
+    press(&mut state, &window, DOWN, 0);
+    assert_eq!(edit(&state).caret, 10, "column 2 again on the long line");
+    press(&mut state, &window, HOME, 0);
+    assert_eq!(edit(&state).caret, 8);
+    press(&mut state, &window, END, 0);
+    assert_eq!(edit(&state).caret, 12);
+    press(&mut state, &window, UP, 0);
+    assert_eq!(edit(&state).caret, 7);
+    press(&mut state, &window, UP, 0);
+    assert_eq!(edit(&state).caret, 2);
+    press(&mut state, &window, DOWN, SHIFT);
+    assert_eq!((edit(&state).caret, edit(&state).anchor), (7, Some(2)));
+    assert!(edit(&state).caret_visible);
+}
+
+#[test]
+fn ctrl_v_keeps_the_line_breaks_of_the_clipboard_text() {
+    let window = TestWindow::new();
+    crate::clipboard::copy_text_to_clipboard(None, "one\r\ntwo\rthree\tx").expect("a clipboard");
+    let mut state = editing_state("");
+    press(&mut state, &window, key('v'), CTRL);
+    assert_eq!(edit(&state).text, "one\ntwo\nthree    x");
+}
+
+#[test]
+fn ctrl_x_puts_selected_lines_on_the_clipboard_with_windows_line_breaks() {
+    let window = TestWindow::new();
+    let mut state = editing_state("ab\ncd");
+    state.text_edit.as_mut().unwrap().anchor = Some(1);
+    state.text_edit.as_mut().unwrap().caret = 4;
+    press(&mut state, &window, key('x'), CTRL);
+    assert_eq!(edit(&state).text, "ad");
+    assert_eq!(clipboard_text().as_deref(), Some("b\r\nc"));
+}
+
+#[test]
+fn ctrl_b_toggles_the_box_of_the_text_being_typed_and_remembers_the_choice() {
+    let window = TestWindow::new();
+    let mut state = editing_state("abc");
+    press(&mut state, &window, key('b'), CTRL);
+    assert!(edit(&state).background);
+    assert_eq!(edit(&state).text, "abc");
+    assert!(state.settings.text_background);
+    assert!(state.preferences_dirty);
+    press(&mut state, &window, key('b'), CTRL);
+    assert!(!edit(&state).background);
+    assert!(!state.settings.text_background);
+    press(&mut state, &window, key('b'), CTRL);
+    press(&mut state, &window, RETURN, 0);
+    assert_eq!(text_of(&state, 1), ("abc".to_string(), true));
+}
+
+#[test]
+fn ctrl_b_toggles_a_selected_text_as_one_undo_step() {
+    let window = TestWindow::new();
+    let mut state = state_with_selected_text();
+    press(&mut state, &window, key('b'), CTRL);
+    assert_eq!(text_of(&state, 1), ("Hi".to_string(), true));
+    assert!(state.settings.text_background);
+    assert!(state.scene_dirty);
+    press(&mut state, &window, key('b'), CTRL);
+    assert!(!text_of(&state, 1).1);
+    press(&mut state, &window, key('b'), CTRL);
+    assert!(state.history.undo(&mut state.objects));
+    assert!(!text_of(&state, 1).1, "one undo reverts one toggle");
+    assert!(state.history.undo(&mut state.objects));
+    assert!(text_of(&state, 1).1);
+}
+
+#[test]
+fn ctrl_b_sets_the_choice_for_new_text_under_the_text_tool_only() {
+    let window = TestWindow::new();
+    let mut state = state_with_rectangle();
+    press(&mut state, &window, key('b'), CTRL);
+    assert!(
+        !state.settings.text_background,
+        "no text tool, no text selected"
+    );
+    assert!(!state.preferences_dirty);
+    state.active_tool = ToolKind::Text;
+    press(&mut state, &window, key('b'), CTRL);
+    assert!(state.settings.text_background);
+    assert!(state.preferences_dirty);
+    assert_eq!(state.object_count(), 1);
+}
+
 #[test]
 fn return_commits_the_text_box_without_copying() {
     let window = TestWindow::new();

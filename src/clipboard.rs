@@ -58,15 +58,7 @@ pub fn read_text(owner: HWND) -> Result<String> {
             crate::i18n::t("Clipboard text exceeded 32768 bytes and was truncated."),
         );
     }
-    Ok(single_line(&text))
-}
-
-/// Flattens pasted text for the single-line editor: one space per line break
-/// (CRLF counts once) and tabs as four spaces.
-fn single_line(text: &str) -> String {
-    text.replace("\r\n", " ")
-        .replace(['\r', '\n'], " ")
-        .replace('\t', "    ")
+    Ok(text)
 }
 
 pub(crate) struct ClipboardGuard;
@@ -293,24 +285,4 @@ pub fn copy_text_to_clipboard(hwnd: Option<HWND>, text: &str) -> Result<()> {
     }
     allocation.0 = HGLOBAL::default(); // Windows now owns the allocation.
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::single_line;
-
-    #[test]
-    fn line_breaks_become_one_space_each() {
-        assert_eq!(single_line("a\r\nb"), "a b");
-        assert_eq!(single_line("a\nb"), "a b");
-        assert_eq!(single_line("a\rb"), "a b");
-        assert_eq!(single_line("a\r\n\r\nb\n\rc"), "a  b  c");
-    }
-
-    #[test]
-    fn tabs_expand_and_plain_text_is_untouched() {
-        assert_eq!(single_line("a\tb"), "a    b");
-        assert_eq!(single_line("plain text"), "plain text");
-        assert_eq!(single_line(""), "");
-    }
 }

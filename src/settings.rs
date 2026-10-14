@@ -83,6 +83,8 @@ pub struct Settings {
     #[serde(default)]
     pub language: LanguagePreference,
     pub last_tool: ToolKind,
+    /// New text gets a filled box behind it; older files without the key mean off.
+    pub text_background: bool,
 }
 
 impl Default for Settings {
@@ -106,6 +108,7 @@ impl Default for Settings {
             theme_preference: ThemePreference::System,
             language: LanguagePreference::System,
             last_tool: ToolKind::default(),
+            text_background: false,
         }
     }
 }
@@ -302,6 +305,7 @@ impl Settings {
         latest.last_custom_color = self.last_custom_color;
         latest.default_thickness = self.default_thickness;
         latest.last_tool = self.last_tool;
+        latest.text_background = self.text_background;
         latest.save_to_path(&path)
     }
 
@@ -555,6 +559,7 @@ mod tests {
             theme_preference: ThemePreference::Light,
             language: LanguagePreference::Turkish,
             last_tool: ToolKind::Arrow,
+            text_background: true,
         }
     }
 
@@ -852,6 +857,7 @@ mod tests {
             last_custom_color: [6, 5, 4, 255],
             default_thickness: 12,
             last_tool: ToolKind::Rectangle,
+            text_background: true,
             ..Settings::default()
         }
     }
@@ -876,6 +882,7 @@ mod tests {
                 last_custom_color: session.last_custom_color,
                 default_thickness: session.default_thickness,
                 last_tool: session.last_tool,
+                text_background: session.text_background,
                 ..stored
             }
         );

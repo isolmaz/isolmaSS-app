@@ -746,7 +746,7 @@ pub(super) unsafe extern "system" fn overlay_wnd_proc(
                         // 4. Selecting text with the pointer
                         if state.text_dragging {
                             if let Some(edit) = &mut state.text_edit {
-                                let at = edit.caret_at(client_x);
+                                let at = edit.caret_at(pt);
                                 if at != edit.caret {
                                     edit.move_to(at, true);
                                     start_caret_timer(hwnd);
@@ -827,7 +827,7 @@ pub(super) unsafe extern "system" fn overlay_wnd_proc(
                             .is_some_and(|edit| edit.contains(pt, state.dpi))
                         {
                             if let Some(edit) = &mut state.text_edit {
-                                let at = edit.caret_at(client_x);
+                                let at = edit.caret_at(pt);
                                 edit.move_to(at, wparam.0 & MK_SHIFT != 0);
                             }
                             state.text_dragging = true;
@@ -1018,13 +1018,16 @@ pub(super) unsafe extern "system" fn overlay_wnd_proc(
                                         state.text_dragging = true;
                                         return LRESULT(0);
                                     }
-                                    state.text_edit = Some(TextEditState::new(
-                                        pt,
-                                        String::new(),
-                                        state.active_color,
-                                        DEFAULT_FONT_SIZE * state.dpi as i32 / 96,
-                                        None,
-                                    ));
+                                    state.text_edit = Some(
+                                        TextEditState::new(
+                                            pt,
+                                            String::new(),
+                                            state.active_color,
+                                            DEFAULT_FONT_SIZE * state.dpi as i32 / 96,
+                                            None,
+                                        )
+                                        .with_background(state.settings.text_background),
+                                    );
                                     start_caret_timer(hwnd);
                                     set_overlay_text_editing(true);
                                     state.redraw(hwnd);

@@ -442,6 +442,50 @@ fn measurements_are_cached_bounded_and_skip_large_text() {
 }
 
 #[test]
+fn multi_line_text_is_as_wide_as_its_widest_line_and_one_line_height_taller_per_line() {
+    on_thread(|| {
+        let (narrow, height) = measure_text("ii", 24);
+        let (wide, _) = measure_text("WWWWWW", 24);
+        assert!(wide > narrow);
+        assert_eq!(line_height(24), height);
+
+        for (text, lines) in [
+            ("ii\nWWWWWW\nii", 3),
+            ("WWWWWW\nii", 2),
+            ("ii\nWWWWWW\n", 3),
+            ("\n\n", 3),
+            ("WWWWWW", 1),
+        ] {
+            let (width, total) = measure_text(text, 24);
+            assert_eq!(total, lines * height, "{text:?}");
+            assert_eq!(width, if text.contains('W') { wide } else { 1 }, "{text:?}");
+        }
+        assert_eq!(
+            cached_measurements(),
+            7,
+            "each text is measured and kept once"
+        );
+        measure_text("ii\nWWWWWW\nii", 24);
+        assert_eq!(
+            cached_measurements(),
+            7,
+            "a repeated multi-line text is a cache hit"
+        );
+    });
+}
+
+#[test]
+fn multi_line_measurement_falls_back_to_one_font_size_per_line_without_gdi_handles() {
+    let quota = GdiQuota::exhaust();
+    assert_eq!(measure_text("a\nb\nc", 17), (17, 51));
+    drop(quota);
+    // Nothing was cached from the fallback: the real measurement stacks real line heights.
+    let (width, height) = measure_text("a\nb\nc", 17);
+    assert!(width > 1, "{width}");
+    assert_eq!(height, 3 * line_height(17));
+}
+
+#[test]
 fn measurement_falls_back_to_the_font_size_when_gdi_has_no_handles_left() {
     let quota = GdiQuota::exhaust();
     assert_eq!(measure_text("quota probe", 17), (17, 17));
@@ -473,6 +517,35 @@ fn text_draws_bold_from_its_origin_in_the_given_colour() {
     let repeat = Canvas::new(240, 100, WHITE);
     let bounds = drawn(&repeat, |hdc| text(hdc, (30, 20), "HH", 48, RED));
     assert_eq!(bounds, (left, top, right, bottom));
+}
+
+#[test]
+fn every_line_of_text_is_drawn_one_line_height_below_the_previous_one() {
+    let pitch = line_height(36);
+    // Lines drawn one by one at the pitch are the reference picture.
+    let lines_at = |lines: &[(usize, &str)]| {
+        let canvas = Canvas::new(200, 220, WHITE);
+        drawn(&canvas, |hdc| {
+            for (index, line) in lines {
+                text(hdc, (20, 10 + *index as i32 * pitch), line, 36, RED);
+            }
+        });
+        canvas.pixels()
+    };
+    let stacked = |content: &str| {
+        let canvas = Canvas::new(200, 220, WHITE);
+        drawn(&canvas, |hdc| text(hdc, (20, 10), content, 36, RED));
+        canvas.pixels()
+    };
+    assert_eq!(
+        stacked("HH\nI\nHH"),
+        lines_at(&[(0, "HH"), (1, "I"), (2, "HH")])
+    );
+    assert_eq!(
+        stacked("HH\n\nHH"),
+        lines_at(&[(0, "HH"), (2, "HH")]),
+        "an empty line still takes its height"
+    );
 }
 
 #[test]

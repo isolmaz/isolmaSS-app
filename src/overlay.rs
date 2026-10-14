@@ -1,6 +1,6 @@
 use crate::annotation::{
     AnnotationKind, AnnotationObject, AnnotationResizeHandle, EditCommand, HistoryManager,
-    MergeKey, ToolKind, bgra_to_colorref, render_pen_preview, snap_angle_45, snap_square,
+    MergeKey, ToolKind, render_pen_preview, snap_angle_45, snap_square,
 };
 use crate::capture::{CaptureBuffer, Rect, SelectionHitZone};
 use crate::clipboard::{copy_dib_to_clipboard, flatten_selection_to_dib};
@@ -96,7 +96,7 @@ pub fn is_editor_shortcut(vk: u32, modifiers: u32, editing: bool) -> bool {
         return false;
     }
     if modifiers & MOD_CONTROL.0 != 0 {
-        matches!(vk, 0x43 | 0x53 | 0x55 | 0x5a | 0x59 | 0xbc | 37..=40)
+        matches!(vk, 0x42 | 0x43 | 0x53 | 0x55 | 0x5a | 0x59 | 0xbc | 37..=40)
             || editing && matches!(vk, 0x41 | 0x56 | 0x58 | 8 | 46)
     } else {
         matches!(vk, 8 | 13 | 27 | 35..=40 | 46) || !editing && tool_for_key(vk).is_some()
@@ -830,6 +830,7 @@ impl OverlayState {
                     text,
                     color: edit.color,
                     font_size: edit.font_size,
+                    background: edit.background,
                 };
                 let obj = AnnotationObject::new(obj_id, new_kind.clone());
 
@@ -850,6 +851,7 @@ impl OverlayState {
                             text: edit.original_text.clone(),
                             color: edit.color,
                             font_size: edit.font_size,
+                            background: edit.background,
                         };
                         self.objects.push(obj);
                         self.history.record(EditCommand::Modify {
@@ -882,8 +884,9 @@ impl OverlayState {
         {
             set_overlay_text_editing(false);
         }
-        // Picking a color recolors the text being typed instead of ending it.
-        if item != ToolbarItem::Color {
+        // Picking a color or the background box restyles the text being typed instead of
+        // ending it.
+        if !matches!(item, ToolbarItem::Color | ToolbarItem::TextBackground) {
             self.commit_text(hwnd);
         }
 
@@ -969,6 +972,10 @@ impl OverlayState {
                     LPARAM(0),
                 );
             },
+            ToolbarItem::TextBackground => {
+                self.toggle_text_background();
+                self.redraw(hwnd);
+            }
             ToolbarItem::Thickness => {
                 let open = self.thickness_input.take().is_none();
                 if open {
@@ -997,28 +1004,35 @@ impl OverlayState {
     /// Opens the Text object under `pt` for editing. `place_caret` puts the caret where
     /// it was clicked instead of after the last character.
     fn begin_text_reedit(&mut self, hwnd: HWND, pt: (i32, i32), place_caret: bool) -> bool {
-        let Some((id, pos, text, color, font_size)) =
-            self.objects
-                .iter()
-                .rev()
-                .find_map(|object| match &object.kind {
-                    AnnotationKind::Text {
-                        pos,
-                        text,
-                        color,
-                        font_size,
-                    } if object.hit_test(pt) => {
-                        Some((object.id, *pos, text.clone(), *color, *font_size))
-                    }
-                    _ => None,
-                })
+        let Some((id, pos, text, color, font_size, background)) = self
+            .objects
+            .iter()
+            .rev()
+            .find_map(|object| match &object.kind {
+                AnnotationKind::Text {
+                    pos,
+                    text,
+                    color,
+                    font_size,
+                    background,
+                } if object.hit_test(pt) => Some((
+                    object.id,
+                    *pos,
+                    text.clone(),
+                    *color,
+                    *font_size,
+                    *background,
+                )),
+                _ => None,
+            })
         else {
             return false;
         };
         self.dragging_object = None;
-        let mut edit = TextEditState::new(pos, text, color, font_size, Some(id));
+        let mut edit =
+            TextEditState::new(pos, text, color, font_size, Some(id)).with_background(background);
         if place_caret {
-            let at = edit.caret_at(pt.0);
+            let at = edit.caret_at(pt);
             edit.move_to(at, false);
         }
         self.text_edit = Some(edit);
@@ -1131,9 +1145,10 @@ impl OverlayState {
         // 2. Text editing owns keys, except copy: commit first so the flattened
         // screenshot contains the final text and never includes editor affordances.
         if self.text_edit.is_some() {
+            let shift = mods as u32 & windows::Win32::UI::Input::KeyboardAndMouse::MOD_SHIFT.0 != 0;
             if ctrl_down && matches!(vk as u8, b'C' | b'S' | b'U') {
                 self.commit_text(hwnd);
-            } else if vk == VK_RETURN.0 as usize {
+            } else if vk == VK_RETURN.0 as usize && !shift {
                 self.commit_text(hwnd);
                 return LRESULT(0);
             } else {
@@ -1150,11 +1165,12 @@ impl OverlayState {
                             &error.to_string(),
                         ),
                     }
+                } else if ctrl_down && vk == 'B' as usize {
+                    self.toggle_text_background();
                 } else {
                     let edit = self.text_edit.as_mut().expect("a text box is open");
-                    let shift =
-                        mods as u32 & windows::Win32::UI::Input::KeyboardAndMouse::MOD_SHIFT.0 != 0;
                     match vk {
+                        13 => edit.insert_text("\n"),
                         8 if ctrl_down => {
                             edit.delete_word(false);
                         }
@@ -1171,14 +1187,16 @@ impl OverlayState {
                         37 => edit.step(false, shift),
                         39 if ctrl_down => edit.move_word(true, shift),
                         39 => edit.step(true, shift),
-                        36 => edit.move_to(0, shift),
-                        35 => edit.move_to(edit.text.chars().count(), shift),
+                        36 => edit.move_line_edge(false, shift),
+                        35 => edit.move_line_edge(true, shift),
+                        38 => edit.move_line(false, shift),
+                        40 => edit.move_line(true, shift),
                         0x41 if ctrl_down => edit.select_all(),
                         0x58 if ctrl_down => {
                             if let Some(selected) = edit.selected_text() {
                                 match crate::clipboard::copy_text_to_clipboard(
                                     Some(hwnd),
-                                    &selected,
+                                    &selected.replace('\n', "\r\n"),
                                 ) {
                                     Ok(()) => {
                                         edit.delete_selected();
@@ -1201,6 +1219,12 @@ impl OverlayState {
                 self.redraw(hwnd);
                 return LRESULT(0);
             }
+        }
+
+        // Ctrl+B: the filled box behind text, with the Text tool or a text object selected.
+        if ctrl_down && vk == 'B' as usize && self.toggle_text_background() {
+            self.redraw(hwnd);
+            return LRESULT(0);
         }
 
         // 3. Save shortcut: Ctrl+S
@@ -1789,6 +1813,39 @@ impl OverlayState {
         self.persist_editor_preferences();
     }
 
+    /// Flips the filled box behind text: on the text box being edited, else on the selected
+    /// text object (one undo step), else on the choice kept for new text while the Text tool
+    /// is active. Whatever was chosen is remembered for new text. `false` when there is no
+    /// text to restyle.
+    fn toggle_text_background(&mut self) -> bool {
+        let on = if let Some(edit) = &mut self.text_edit {
+            edit.background = !edit.background;
+            edit.caret_visible = true;
+            edit.background
+        } else if let Some(object) = self.selected_id.and_then(|id| {
+            self.objects
+                .iter_mut()
+                .find(|object| object.id == id && object.text_background().is_some())
+        }) {
+            let before = object.kind.clone();
+            let on = object.text_background() != Some(true);
+            object.set_text_background(on);
+            self.history.record(EditCommand::Modify {
+                id: object.id,
+                old_kind: before,
+                new_kind: object.kind.clone(),
+            });
+            on
+        } else if self.active_tool == ToolKind::Text {
+            !self.settings.text_background
+        } else {
+            return false;
+        };
+        self.settings.text_background = on;
+        self.persist_editor_preferences();
+        true
+    }
+
     fn change_thickness(&mut self, value: i32, record: bool) {
         self.active_thickness = value.clamp(1, 64);
         if let Some(object) = self
@@ -2076,6 +2133,7 @@ mod tests {
             true,
             false,
             96,
+            None,
         );
         toolbar.pressed_item = Some(ToolbarItem::Action(ToolbarAction::Cancel));
         state.toolbar = Some(toolbar);
