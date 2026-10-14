@@ -5,6 +5,28 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
+/// Locks `mutex`, taking over a lock that a failed test left poisoned so one failure
+/// does not fail every test after it.
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// Poisons `mutex` the way a panic in a thread that holds it would. The thread unwinds
+/// without the panic hook, so the test output stays clean.
+pub(crate) fn poison<T: Send>(mutex: &Mutex<T>) {
+    std::thread::scope(|scope| {
+        let _ = scope
+            .spawn(|| {
+                let _held = mutex.lock();
+                std::panic::resume_unwind(Box::new("poisoning the lock"));
+            })
+            .join();
+    });
+}
+
 /// A uniquely named folder below the system temp folder, removed on drop.
 pub(crate) struct TempDir(PathBuf);
 
@@ -61,12 +83,8 @@ pub(crate) struct Sandbox {
 
 impl Sandbox {
     pub(crate) fn new(label: &str) -> Self {
-        let environment = ENVIRONMENT
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let language = crate::i18n::TEST_LANGUAGE_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let environment = lock(&ENVIRONMENT);
+        let language = lock(&crate::i18n::TEST_LANGUAGE_LOCK);
         crate::i18n::set_preference(crate::i18n::LanguagePreference::English);
         let folder = TempDir::new(label);
         let previous = REDIRECTED.map(std::env::var_os);
@@ -108,5 +126,30 @@ impl Drop for Sandbox {
             set_variable(name, value.as_deref());
         }
         crate::i18n::set_preference(crate::i18n::LanguagePreference::System);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_lock_poisoned_by_a_panic_is_taken_over() {
+        let numbers = Mutex::new(vec![1u64]);
+        poison(&numbers);
+        assert!(numbers.lock().is_err(), "the panic poisoned the lock");
+        lock(&numbers).push(2);
+        assert_eq!(
+            *lock(&numbers),
+            [1, 2],
+            "the data is still there and usable"
+        );
+
+        let unit = Mutex::new(());
+        assert!(unit.lock().is_ok());
+        drop(lock(&unit));
+        poison(&unit);
+        assert!(unit.lock().is_err());
+        drop(lock(&unit));
     }
 }

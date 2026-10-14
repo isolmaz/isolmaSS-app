@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::sync::mpsc::SyncSender;
+use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -139,7 +139,7 @@ pub fn is_windows_snipping_tool_disabled() -> bool {
     use windows::Win32::System::Registry::*;
     let mut value = 1u32;
     let mut size = 4u32;
-    unsafe {
+    let read = unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
             windows::core::w!("Control Panel\\Keyboard"),
@@ -149,9 +149,9 @@ pub fn is_windows_snipping_tool_disabled() -> bool {
             Some((&mut value as *mut u32).cast()),
             Some(&mut size),
         )
-        .is_ok()
-            && value == 0
     }
+    .is_ok();
+    read && value == 0
 }
 
 // -----------------------------------------------------------------------------
@@ -170,6 +170,15 @@ struct HookState {
 }
 
 static HOOK_STATE: Mutex<Option<HookState>> = Mutex::new(None);
+
+/// The listener's delivery state. A thread that panicked while holding it must not
+/// silence the shortcut for the rest of the session, so a poisoned lock is taken over.
+fn hook_state() -> MutexGuard<'static, Option<HookState>> {
+    match HOOK_STATE.lock() {
+        Ok(state) => state,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
 static TARGET_VK: AtomicU32 = AtomicU32::new(0);
 static TARGET_MODS: AtomicU32 = AtomicU32::new(0);
 static SNAPSHOT_HANDLED: AtomicBool = AtomicBool::new(false);
@@ -383,11 +392,7 @@ pub unsafe fn process_keyboard_hook(
                 };
             } else if !was_down {
                 // First keydown: dispatch capture event to listener channel
-                let event_tx = HOOK_STATE
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner())
-                    .as_ref()
-                    .map(|state| state.event_tx.clone());
+                let event_tx = hook_state().as_ref().map(|state| state.event_tx.clone());
                 if let Some(tx) = event_tx
                     && !is_overlay_active()
                     && !overlay_input_suspended()
@@ -438,7 +443,7 @@ pub fn create_test_kbdllhookstruct(vk: u32) -> KBDLLHOOKSTRUCT {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::test_env::Sandbox;
+    use crate::settings::test_env::{Sandbox, lock, poison};
     use std::sync::MutexGuard;
     use std::sync::mpsc::sync_channel;
     use std::time::Duration;
@@ -453,9 +458,7 @@ mod tests {
 
     #[test]
     fn test_overlay_keyboard_routing_in_hook() {
-        let _serial = HOOK_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _serial = lock(&HOOK_TEST_LOCK);
         let kb_esc = create_test_kbdllhookstruct(VK_ESCAPE.0 as u32);
         let lparam_esc = LPARAM(&kb_esc as *const _ as isize);
         let wparam_down = WPARAM(WM_KEYDOWN as usize);
@@ -547,9 +550,7 @@ mod tests {
     }
     #[test]
     fn running_shortcut_is_handed_to_the_recording_window() {
-        let _serial = HOOK_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _serial = lock(&HOOK_TEST_LOCK);
         let window = unsafe {
             CreateWindowExW(
                 Default::default(),
@@ -651,9 +652,7 @@ mod tests {
 
     impl HookTest {
         fn start() -> Self {
-            let serial = HOOK_TEST_LOCK
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
+            let serial = lock(&HOOK_TEST_LOCK);
             let test = Self { _serial: serial };
             test.reset();
             test
@@ -668,18 +667,15 @@ mod tests {
             TARGET_MODS.store(0, Ordering::SeqCst);
             SNAPSHOT_HANDLED.store(false, Ordering::SeqCst);
             RECORDING_WINDOW.store(0, Ordering::SeqCst);
-            *HOOK_STATE
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner()) = None;
+            HOOK_STATE.clear_poison();
+            *hook_state() = None;
             crate::tray::capture_finished();
         }
 
         /// The hook state of a running listener: its capture events go to the receiver.
         fn listen(&self) -> std::sync::mpsc::Receiver<Instant> {
             let (events, received) = sync_channel(1);
-            *HOOK_STATE
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner()) = Some(HookState {
+            *hook_state() = Some(HookState {
                 event_tx: events,
                 _config: HotkeyConfig::fallback(),
             });
@@ -1003,9 +999,7 @@ mod tests {
         drop(suspension);
 
         // Without a listener (no state) the key is still claimed but nothing is sent.
-        *HOOK_STATE
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = None;
+        *hook_state() = None;
         assert_eq!(hook.send(F9, WM_KEYDOWN, mods), LRESULT(1));
         assert!(received.try_recv().is_err());
     }
@@ -1029,10 +1023,28 @@ mod tests {
         };
         assert_eq!(result, LRESULT(1));
         let pressed = received.try_recv().expect("a capture was started");
+        let age = pressed.elapsed();
         assert!(
-            pressed.elapsed() >= Duration::from_millis(300),
-            "the press happened {:?} ago",
-            pressed.elapsed()
+            age >= Duration::from_millis(300),
+            "the press happened {age:?} ago"
+        );
+    }
+
+    #[test]
+    fn a_poisoned_delivery_state_does_not_silence_the_shortcut() {
+        let hook = HookTest::start();
+        let received = hook.listen();
+        let mods = MOD_CONTROL.0 | MOD_ALT.0;
+        TARGET_VK.store(F9, Ordering::SeqCst);
+        TARGET_MODS.store(mods | MOD_NOREPEAT.0, Ordering::SeqCst);
+        // Some other thread panics while it holds the state.
+        poison(&HOOK_STATE);
+        assert!(HOOK_STATE.lock().is_err());
+
+        assert_eq!(hook.send(F9, WM_KEYDOWN, mods), LRESULT(1));
+        assert!(
+            received.try_recv().is_ok(),
+            "the capture still starts after the panic"
         );
     }
 
@@ -1211,8 +1223,9 @@ mod tests {
         assert_eq!(settings_path(), None);
     }
 
-    /// The Snipping Tool value as `reg.exe` reports it, read separately from the code under test.
-    fn snipping_value_in_registry() -> Option<String> {
+    /// Whether `reg.exe` reports the Snipping Tool value as 0, read separately from the
+    /// code under test.
+    fn reg_exe_reports_snipping_tool_disabled() -> bool {
         let output = std::process::Command::new("reg")
             .args([
                 "query",
@@ -1222,19 +1235,15 @@ mod tests {
             ])
             .output()
             .expect("run reg.exe");
-        let text = String::from_utf8_lossy(&output.stdout).into_owned();
-        let line = text
-            .lines()
-            .find(|line| line.contains("PrintScreenKeyForSnippingEnabled"))?;
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        (fields.get(1) == Some(&"REG_DWORD")).then(|| fields[2].to_string())
+        let text = String::from_utf8_lossy(&output.stdout);
+        text.contains("REG_DWORD") && text.contains("0x0")
     }
 
     #[test]
     fn the_snipping_tool_state_is_read_from_the_user_registry() {
         assert_eq!(
             is_windows_snipping_tool_disabled(),
-            snipping_value_in_registry().as_deref() == Some("0x0")
+            reg_exe_reports_snipping_tool_disabled()
         );
     }
 }

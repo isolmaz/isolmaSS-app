@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Mutex,
+    Mutex, MutexGuard,
     atomic::{AtomicBool, Ordering},
 };
 use std::thread::JoinHandle;
@@ -22,17 +22,24 @@ static CACHE: Mutex<Cache> = Mutex::new(Cache {
 });
 static WORKER: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 static LAST_FOLDER: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Locks `mutex`. A thread that panicked while holding it must not stop the list of
+/// recent captures for the rest of the session, so a poisoned lock is taken over.
+fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 pub fn last_folder() -> Option<PathBuf> {
-    LAST_FOLDER
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .clone()
+    locked(&LAST_FOLDER).clone()
 }
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static CANCELLED: AtomicBool = AtomicBool::new(false);
 
 pub fn refresh(directory: &Path) {
-    let mut cache = CACHE.lock().unwrap_or_else(|error| error.into_inner());
+    let mut cache = locked(&CACHE);
     if cache.directory != directory {
         cache.directory = directory.to_owned();
         cache.paths.clear();
@@ -48,10 +55,7 @@ pub fn refresh(directory: &Path) {
     }
     let generation = cache.generation;
     drop(cache);
-    if let Some(previous) = WORKER
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .take()
+    if let Some(previous) = locked(&WORKER).take()
         && previous.join().is_err()
     {
         crate::diagnostics::record(
@@ -85,7 +89,7 @@ pub fn refresh(directory: &Path) {
 /// it started. `generation` is the save counter when the scan started: captures saved
 /// afterwards may be missing from `result`, so they are kept in front of it.
 fn finish_scan(directory: &Path, generation: u64, result: std::io::Result<Vec<PathBuf>>) {
-    let mut cache = CACHE.lock().unwrap_or_else(|error| error.into_inner());
+    let mut cache = locked(&CACHE);
     if CANCELLED.load(Ordering::Acquire) || cache.directory != directory {
         return;
     }
@@ -122,7 +126,7 @@ fn saved_since(cache: &Cache, generation: u64) -> Vec<PathBuf> {
 fn adopt_worker(spawned: std::io::Result<JoinHandle<()>>) {
     match spawned {
         Ok(handle) => {
-            *WORKER.lock().unwrap_or_else(|error| error.into_inner()) = Some(handle);
+            *locked(&WORKER) = Some(handle);
         }
         Err(error) => {
             RUNNING.store(false, Ordering::Release);
@@ -135,18 +139,12 @@ fn adopt_worker(spawned: std::io::Result<JoinHandle<()>>) {
 }
 
 pub fn list() -> Vec<PathBuf> {
-    CACHE
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .paths
-        .clone()
+    locked(&CACHE).paths.clone()
 }
 
 pub fn saved(path: &Path) {
-    *LAST_FOLDER
-        .lock()
-        .unwrap_or_else(|error| error.into_inner()) = path.parent().map(Path::to_owned);
-    let mut cache = CACHE.lock().unwrap_or_else(|error| error.into_inner());
+    *locked(&LAST_FOLDER) = path.parent().map(Path::to_owned);
+    let mut cache = locked(&CACHE);
     if path.parent() == Some(cache.directory.as_path()) {
         cache.generation += 1;
         let generation = cache.generation;
@@ -165,11 +163,7 @@ pub fn cancelled() -> bool {
 
 pub fn shutdown() {
     CANCELLED.store(true, Ordering::Release);
-    if let Some(worker) = WORKER
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .take()
-    {
+    if let Some(worker) = locked(&WORKER).take() {
         // Stop a pending filesystem operation on a slow network folder.
         use std::os::windows::io::AsRawHandle;
         unsafe {
@@ -187,17 +181,18 @@ pub fn shutdown() {
 }
 
 /// Holds the module's process-wide state for one test and starts and ends it clean:
-/// no worker, empty cache, no remembered folder, not cancelled.
+/// no worker, empty cache, no remembered folder, not cancelled, no poisoned lock.
 #[cfg(test)]
 pub(super) struct Isolated {
-    _serial: std::sync::MutexGuard<'static, ()>,
+    _serial: MutexGuard<'static, ()>,
 }
 
 #[cfg(test)]
 pub(super) fn isolated() -> Isolated {
     static STATE: Mutex<()> = Mutex::new(());
-    let guard = STATE.lock().unwrap_or_else(|error| error.into_inner());
-    let isolated = Isolated { _serial: guard };
+    let isolated = Isolated {
+        _serial: crate::settings::test_env::lock(&STATE),
+    };
     isolated.reset();
     isolated
 }
@@ -205,17 +200,18 @@ pub(super) fn isolated() -> Isolated {
 #[cfg(test)]
 impl Isolated {
     fn reset(&self) {
+        CACHE.clear_poison();
+        WORKER.clear_poison();
+        LAST_FOLDER.clear_poison();
         shutdown();
-        *CACHE.lock().unwrap_or_else(|error| error.into_inner()) = Cache {
+        *locked(&CACHE) = Cache {
             directory: PathBuf::new(),
             paths: Vec::new(),
             refreshed: None,
             generation: 0,
             saved: Vec::new(),
         };
-        *LAST_FOLDER
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = None;
+        *locked(&LAST_FOLDER) = None;
         RUNNING.store(false, Ordering::Release);
         CANCELLED.store(false, Ordering::Release);
     }
@@ -231,7 +227,7 @@ impl Drop for Isolated {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::test_env::TempDir;
+    use crate::settings::test_env::{TempDir, poison};
     use std::io::ErrorKind;
     use std::time::UNIX_EPOCH;
 
@@ -258,11 +254,7 @@ mod tests {
 
     /// Waits for the scan that `refresh` started.
     fn wait_for_scan() {
-        let worker = WORKER
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take()
-            .expect("refresh started a scan");
+        let worker = locked(&WORKER).take().expect("refresh started a scan");
         worker.join().expect("the scan finished normally");
         assert!(
             !RUNNING.load(Ordering::Acquire),
@@ -271,13 +263,11 @@ mod tests {
     }
 
     fn has_worker() -> bool {
-        WORKER
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .is_some()
+        locked(&WORKER).is_some()
     }
 
-    fn newest_first(paths: &[PathBuf], indexes: &[usize]) -> Vec<PathBuf> {
+    /// The paths at the 1-based `indexes`, in that order.
+    fn pick(paths: &[PathBuf], indexes: &[usize]) -> Vec<PathBuf> {
         indexes
             .iter()
             .map(|index| paths[index - 1].clone())
@@ -285,10 +275,11 @@ mod tests {
     }
 
     fn generation() -> u64 {
-        CACHE
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .generation
+        locked(&CACHE).generation
+    }
+
+    fn refreshed() -> Option<Instant> {
+        locked(&CACHE).refreshed
     }
 
     #[test]
@@ -300,22 +291,19 @@ mod tests {
 
         refresh(dir.path());
         wait_for_scan();
-        assert_eq!(list(), newest_first(&files, &[7, 6, 5, 4, 3]));
+        assert_eq!(list(), pick(&files, &[7, 6, 5, 4, 3]));
 
         // Within 30 seconds the cache is served; the folder is not scanned again.
         let newer = touch(dir.path(), "p8.png", 8);
         refresh(dir.path());
         assert!(!has_worker(), "no new scan starts while the cache is fresh");
-        assert_eq!(list(), newest_first(&files, &[7, 6, 5, 4, 3]));
+        assert_eq!(list(), pick(&files, &[7, 6, 5, 4, 3]));
 
         // After 30 seconds it is.
-        CACHE
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .refreshed = Instant::now().checked_sub(Duration::from_secs(31));
+        locked(&CACHE).refreshed = Instant::now().checked_sub(Duration::from_secs(31));
         refresh(dir.path());
         wait_for_scan();
-        let mut expected = newest_first(&files, &[7, 6, 5, 4]);
+        let mut expected = pick(&files, &[7, 6, 5, 4]);
         expected.insert(0, newer);
         assert_eq!(list(), expected);
     }
@@ -335,14 +323,9 @@ mod tests {
 
         refresh(second.path());
         wait_for_scan();
-        assert_eq!(
-            list(),
-            newest_first(&others, &[2, 1]),
-            "only the new folder"
-        );
-        let cache = CACHE.lock().unwrap_or_else(|error| error.into_inner());
+        assert_eq!(list(), pick(&others, &[2, 1]), "only the new folder");
         assert!(
-            cache.saved.is_empty(),
+            locked(&CACHE).saved.is_empty(),
             "saves of the old folder are forgotten"
         );
     }
@@ -356,13 +339,7 @@ mod tests {
         refresh(dir.path());
         assert!(!has_worker());
         assert!(list().is_empty());
-        assert!(
-            CACHE
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .refreshed
-                .is_none()
-        );
+        assert!(refreshed().is_none());
     }
 
     #[test]
@@ -376,7 +353,7 @@ mod tests {
         })));
         refresh(dir.path());
         wait_for_scan();
-        assert_eq!(list(), newest_first(&files, &[2, 1]));
+        assert_eq!(list(), pick(&files, &[2, 1]));
     }
 
     #[test]
@@ -392,17 +369,16 @@ mod tests {
         let fresh = dir.path().join("fresh.png");
         saved(&fresh);
         assert_eq!(generation(), started + 1);
-        let scanned = || {
-            vec![
-                files[2].clone(),
-                fresh.clone(),
-                files[1].clone(),
-                files[0].clone(),
-                dir.path().join("older1.png"),
-                dir.path().join("older2.png"),
-            ]
-        };
-        finish_scan(dir.path(), started, Ok(scanned()));
+        let older = [dir.path().join("older1.png"), dir.path().join("older2.png")];
+        let scanned = vec![
+            files[2].clone(),
+            fresh.clone(),
+            files[1].clone(),
+            files[0].clone(),
+            older[0].clone(),
+            older[1].clone(),
+        ];
+        finish_scan(dir.path(), started, Ok(scanned));
         assert_eq!(
             list(),
             [
@@ -410,7 +386,7 @@ mod tests {
                 files[2].clone(),
                 files[1].clone(),
                 files[0].clone(),
-                dir.path().join("older1.png"),
+                older[0].clone(),
             ],
             "the fresh capture leads, appears once, and the list stops at five"
         );
@@ -430,10 +406,17 @@ mod tests {
         let fresh = dir.path().join("fresh.png");
         saved(&fresh);
 
-        let gone = || Err(std::io::Error::from(ErrorKind::NotFound));
-        finish_scan(dir.path(), started, gone());
+        finish_scan(
+            dir.path(),
+            started,
+            Err(std::io::Error::from(ErrorKind::NotFound)),
+        );
         assert_eq!(list(), [fresh]);
-        finish_scan(dir.path(), generation(), gone());
+        finish_scan(
+            dir.path(),
+            generation(),
+            Err(std::io::Error::from(ErrorKind::NotFound)),
+        );
         assert!(list().is_empty());
     }
 
@@ -445,10 +428,8 @@ mod tests {
         refresh(dir.path());
         wait_for_scan();
         let before = list();
-        CACHE
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .refreshed = None;
+        assert_eq!(before, pick(&files, &[2, 1]));
+        locked(&CACHE).refreshed = None;
 
         finish_scan(
             dir.path(),
@@ -456,13 +437,8 @@ mod tests {
             Err(std::io::Error::from(ErrorKind::PermissionDenied)),
         );
         assert_eq!(list(), before);
-        assert_eq!(before, newest_first(&files, &[2, 1]));
         assert!(
-            CACHE
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .refreshed
-                .is_some(),
+            refreshed().is_some(),
             "the next refresh waits instead of retrying at once"
         );
     }
@@ -476,7 +452,7 @@ mod tests {
         refresh(dir.path());
         wait_for_scan();
         let kept = list();
-        assert_eq!(kept, newest_first(&files, &[2, 1]));
+        assert_eq!(kept, pick(&files, &[2, 1]));
 
         finish_scan(
             other.path(),
@@ -505,17 +481,17 @@ mod tests {
         }
         assert_eq!(
             list(),
-            newest_first(&paths, &[7, 6, 5, 4, 3]),
+            pick(&paths, &[7, 6, 5, 4, 3]),
             "newest first, five at most"
         );
         saved(&paths[3]);
         assert_eq!(
             list(),
-            newest_first(&paths, &[4, 7, 6, 5, 3]),
+            pick(&paths, &[4, 7, 6, 5, 3]),
             "saving a path again moves it to the front"
         );
         {
-            let cache = CACHE.lock().unwrap_or_else(|error| error.into_inner());
+            let cache = locked(&CACHE);
             assert_eq!(cache.saved.len(), 5);
             assert_eq!(cache.generation, 8);
         }
@@ -534,7 +510,7 @@ mod tests {
         saved(&elsewhere.path().join("away.png"));
         assert_eq!(
             list(),
-            newest_first(&files, &[2, 1]),
+            pick(&files, &[2, 1]),
             "the watched list is unchanged"
         );
         assert_eq!(generation(), 0);
@@ -577,5 +553,26 @@ mod tests {
         adopt_worker(Ok(std::thread::spawn(|| {})));
         assert!(has_worker(), "a started thread is kept for shutdown");
         wait_for_scan();
+    }
+
+    #[test]
+    fn a_panic_while_a_lock_is_held_does_not_stop_the_list() {
+        let _state = isolated();
+        let dir = TempDir::new("recent_poisoned");
+        let files = captures(dir.path(), 3);
+        poison(&CACHE);
+        poison(&WORKER);
+        poison(&LAST_FOLDER);
+        assert!(CACHE.lock().is_err() && WORKER.lock().is_err() && LAST_FOLDER.lock().is_err());
+
+        refresh(dir.path());
+        wait_for_scan();
+        assert_eq!(list(), pick(&files, &[3, 2, 1]));
+        let fresh = dir.path().join("fresh.png");
+        saved(&fresh);
+        assert_eq!(list()[0], fresh);
+        assert_eq!(last_folder(), Some(dir.path().to_owned()));
+        shutdown();
+        assert!(cancelled());
     }
 }

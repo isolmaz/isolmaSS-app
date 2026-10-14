@@ -105,13 +105,7 @@ pub static TEST_LANGUAGE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Serializes tests that change the language; a failed test must not poison the others.
-    fn language_lock() -> std::sync::MutexGuard<'static, ()> {
-        TEST_LANGUAGE_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-    }
+    use crate::settings::test_env::lock;
 
     /// The string literal starting at `from` (just after its opening quote), unescaped.
     fn literal(text: &str, from: usize) -> String {
@@ -196,7 +190,7 @@ mod tests {
 
     #[test]
     fn placeholders_fill_in_order() {
-        let _lock = language_lock();
+        let _lock = lock(&TEST_LANGUAGE_LOCK);
         set_preference(LanguagePreference::English);
         assert_eq!(tf("{} of {}", &[&1, &"two"]), "1 of two");
         set_preference(LanguagePreference::System);
@@ -237,7 +231,7 @@ mod tests {
 
     #[test]
     fn preference_decides_between_windows_language_and_a_fixed_language() {
-        let _lock = language_lock();
+        let _lock = lock(&TEST_LANGUAGE_LOCK);
         let windows_language =
             language_of(unsafe { windows::Win32::Globalization::GetUserDefaultUILanguage() });
         set_preference(LanguagePreference::System);
@@ -253,7 +247,7 @@ mod tests {
 
     #[test]
     fn turkish_translates_known_strings_and_keeps_unknown_ones() {
-        let _lock = language_lock();
+        let _lock = lock(&TEST_LANGUAGE_LOCK);
         let (english, turkish) = tr::TABLE[0];
         assert_ne!(english, turkish, "the table must translate its first entry");
         set_preference(LanguagePreference::Turkish);
