@@ -762,10 +762,6 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Setup did not finish. Choose Continue with Cloudflare again.",
         "Kurulum tamamlanamadı. Yeniden Cloudflare ile devam edin.",
     ),
-    (
-        "Setup is finishing in the app. You can close this tab.",
-        "Kurulum uygulamada tamamlanıyor. Bu sekmeyi kapatabilirsiniz.",
-    ),
     ("Sharing", "Paylaşım"),
     ("Shortcut", "Kısayol"),
     ("Shortcut conflict", "Kısayol çakışması"),
@@ -1313,5 +1309,9 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     (
         "Cloudflare is temporarily unavailable. Try again in a minute.",
         "Cloudflare geçici olarak kullanılamıyor. Bir dakika sonra yeniden deneyin.",
+    ),
+    (
+        "You can close this tab and return to isolmaSS.",
+        "Bu sekmeyi kapatıp isolmaSS'e dönebilirsiniz.",
     ),
 ];

@@ -1,0 +1,16 @@
+{
+  "name": "isolmass-share-worker",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@9.15.9",
+  "description": "Cloudflare Worker that hosts isolmaSS share links, with its test suite.",
+  "scripts": {
+    "test": "vitest run",
+    "coverage": "vitest run --coverage"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.4.1",
+    "@vitest/coverage-istanbul": "5.0.3",
+    "vitest": "5.0.3"
+  }
+}
