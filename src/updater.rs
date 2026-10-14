@@ -85,17 +85,29 @@ struct InternetHandle(*mut c_void);
 
 impl InternetHandle {
     /// Takes ownership of a handle returned by WinHTTP. A null handle means the call failed;
-    /// the reason is the thread's last error.
+    /// the reason is the thread's last error, filled in after the `context` arguments of the
+    /// translated `template`.
     fn adopt(
         raw: *mut c_void,
-        failure: impl FnOnce(windows::core::Error) -> String,
+        template: &'static str,
+        context: &[&dyn std::fmt::Display],
     ) -> Result<Self, String> {
         if raw.is_null() {
-            Err(failure(windows::core::Error::from_win32()))
+            let error = windows::core::Error::from_win32();
+            let mut arguments = context.to_vec();
+            arguments.push(&error);
+            Err(crate::i18n::tf(template, &arguments))
         } else {
             Ok(Self(raw))
         }
     }
+}
+
+/// Words a failed call: fills the error into the translated `template`. Callers translate the
+/// literal with `crate::i18n::t` so that the interface strings stay visible to the
+/// translation check.
+fn failed<E: std::fmt::Display>(template: &'static str) -> impl FnOnce(E) -> String {
+    move |error| crate::i18n::tf(template, &[&error])
 }
 
 impl Drop for InternetHandle {
@@ -167,50 +179,45 @@ fn http_get_inner(
     deadline: Instant,
     redirects: u8,
 ) -> Result<Vec<u8>, String> {
-    use crate::i18n::tf;
+    use crate::i18n::t;
     use windows::Win32::Networking::WinHttp::*;
     check_cancelled(deadline)?;
     if redirects > 5 {
-        return Err(crate::i18n::t("Too many update redirects.").to_string());
+        return Err(t("Too many update redirects.").to_string());
     }
     parse_https_url(&format!("https://{host}{path}"))?;
     let agent = wide(&format!("isolmaSS/{}", env!("CARGO_PKG_VERSION")));
-    let session = InternetHandle::adopt(
-        unsafe {
-            WinHttpOpen(
-                PCWSTR(agent.as_ptr()),
-                WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-                PCWSTR::null(),
-                PCWSTR::null(),
-                0,
-            )
-        },
-        |error| tf("WinHTTP could not start: {}", &[&error]),
-    )?;
+    let session = unsafe {
+        WinHttpOpen(
+            PCWSTR(agent.as_ptr()),
+            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+            PCWSTR::null(),
+            PCWSTR::null(),
+            0,
+        )
+    };
+    let session = InternetHandle::adopt(session, t("WinHTTP could not start: {}"), &[])?;
 
     unsafe { WinHttpSetTimeouts(session.0, 5_000, 5_000, 5_000, 5_000) }
-        .map_err(|error| tf("Could not set update timeouts: {}", &[&error]))?;
+        .map_err(failed(t("Could not set update timeouts: {}")))?;
     let host_wide = wide(route.host.unwrap_or(host));
-    let connection = InternetHandle::adopt(
-        unsafe { WinHttpConnect(session.0, PCWSTR(host_wide.as_ptr()), route.port, 0) },
-        |error| tf("Could not connect to {}: {}", &[&host, &error]),
-    )?;
+    let connection =
+        unsafe { WinHttpConnect(session.0, PCWSTR(host_wide.as_ptr()), route.port, 0) };
+    let connection = InternetHandle::adopt(connection, t("Could not connect to {}: {}"), &[&host])?;
 
     let path_wide = wide(path);
-    let request = InternetHandle::adopt(
-        unsafe {
-            WinHttpOpenRequest(
-                connection.0,
-                w!("GET"),
-                PCWSTR(path_wide.as_ptr()),
-                PCWSTR::null(),
-                PCWSTR::null(),
-                std::ptr::null(),
-                route.flags,
-            )
-        },
-        |error| tf("Could not create the HTTPS request: {}", &[&error]),
-    )?;
+    let request = unsafe {
+        WinHttpOpenRequest(
+            connection.0,
+            w!("GET"),
+            PCWSTR(path_wide.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            std::ptr::null(),
+            route.flags,
+        )
+    };
+    let request = InternetHandle::adopt(request, t("Could not create the HTTPS request: {}"), &[])?;
 
     unsafe {
         WinHttpSetOption(
@@ -219,7 +226,7 @@ fn http_get_inner(
             Some(&WINHTTP_OPTION_REDIRECT_POLICY_NEVER.to_ne_bytes()),
         )
     }
-    .map_err(|error| tf("Could not enforce the HTTPS redirect policy: {}", &[&error]))?;
+    .map_err(failed(t("Could not enforce the HTTPS redirect policy: {}")))?;
     let headers: Vec<u16> = concat!(
         "Accept: application/vnd.github+json\r\n",
         "User-Agent: isolmaSS\r\n",
@@ -231,7 +238,7 @@ fn http_get_inner(
         WinHttpSendRequest(request.0, Some(&headers), None, 0, 0, 0)
             .and_then(|_| WinHttpReceiveResponse(request.0, std::ptr::null_mut()))
     }
-    .map_err(|error| crate::i18n::tf("The update request failed: {}", &[&error]))?;
+    .map_err(failed(t("The update request failed: {}")))?;
 
     let mut status = 0u32;
     let mut status_size = std::mem::size_of::<u32>() as u32;
@@ -246,7 +253,7 @@ fn http_get_inner(
             &mut index,
         )
     }
-    .map_err(|error| crate::i18n::tf("Could not read the update response status: {}", &[&error]))?;
+    .map_err(failed(t("Could not read the update response status: {}")))?;
     check_cancelled(deadline)?;
     if matches!(status, 301 | 302 | 303 | 307 | 308) {
         let mut location = [0u16; 4096];
@@ -261,13 +268,13 @@ fn http_get_inner(
                 std::ptr::null_mut(),
             )
         }
-        .map_err(|error| crate::i18n::tf("The update redirect is invalid: {}", &[&error]))?;
+        .map_err(failed(t("The update redirect is invalid: {}")))?;
         let length = location
             .iter()
             .position(|unit| *unit == 0)
             .unwrap_or(location.len());
         let location = String::from_utf16(&location[..length])
-            .map_err(|_| crate::i18n::t("Invalid redirect encoding"))?;
+            .map_err(failed(t("Invalid redirect encoding")))?;
         let (host, path) = parse_https_url(&location)?;
         return http_get_inner(route, host, &path, maximum_size, deadline, redirects + 1);
     }
@@ -283,14 +290,12 @@ fn http_get_inner(
         check_cancelled(deadline)?;
         let mut available = 0u32;
         unsafe { WinHttpQueryDataAvailable(request.0, &mut available) }
-            .map_err(|error| crate::i18n::tf("Could not read update data: {}", &[&error]))?;
+            .map_err(failed(t("Could not read update data: {}")))?;
         if available == 0 {
             break;
         }
-        let new_length = response
-            .len()
-            .checked_add(available as usize)
-            .ok_or_else(|| crate::i18n::t("The update response is too large.").to_string())?;
+        // Saturating: an overflowing length is over the limit all the same.
+        let new_length = response.len().saturating_add(available as usize);
         if new_length > maximum_size {
             return Err(crate::i18n::tf(
                 "The update response exceeded {} bytes.",
@@ -308,7 +313,7 @@ fn http_get_inner(
                 &mut read,
             )
         }
-        .map_err(|error| crate::i18n::tf("Could not receive update data: {}", &[&error]))?;
+        .map_err(failed(t("Could not receive update data: {}")))?;
         response.truncate(offset + read as usize);
     }
     Ok(response)
@@ -513,9 +518,9 @@ fn download_from(
         ".download-{}-{}-{}.tmp",
         std::process::id(),
         update.version,
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|error| DownloadError::storage(error.to_string()))?
+        std::time::UNIX_EPOCH
+            .elapsed()
+            .unwrap_or_default()
             .as_nanos()
     ));
     let signature_temporary = temporary.with_extension("sig.tmp");
@@ -542,7 +547,12 @@ fn download_from(
 }
 
 fn update_directory() -> Result<PathBuf, String> {
-    std::env::var_os("LOCALAPPDATA")
+    update_directory_in(std::env::var_os("LOCALAPPDATA"))
+}
+
+/// The folder staged installers live in, below the user's local application data folder.
+fn update_directory_in(local_app_data: Option<std::ffi::OsString>) -> Result<PathBuf, String> {
+    local_app_data
         .map(PathBuf::from)
         .ok_or_else(|| "%LOCALAPPDATA% is unavailable.".to_string())
         .map(|root| root.join("isolmaSS").join("updates"))
@@ -681,10 +691,12 @@ fn write_staged_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .write(true)
         .create_new(true)
         .open(path)
-        .map_err(|error| crate::i18n::tf("Could not stage the update: {}", &[&error]))?;
+        .map_err(failed(crate::i18n::t("Could not stage the update: {}")))?;
     file.write_all(bytes)
         .and_then(|_| file.sync_all())
-        .map_err(|error| crate::i18n::tf("Could not write the staged update: {}", &[&error]))
+        .map_err(failed(crate::i18n::t(
+            "Could not write the staged update: {}",
+        )))
 }
 
 fn replace_staged_file(source: &Path, target: &Path) -> Result<(), String> {
@@ -773,7 +785,9 @@ pub fn file_version(path: &Path) -> Result<String, String> {
     // u32 alignment is sufficient for VS_FIXEDFILEINFO and the Win32 version block.
     let mut data = vec![0u32; (size as usize).div_ceil(4)];
     unsafe { GetFileVersionInfoW(PCWSTR(path.as_ptr()), 0, size, data.as_mut_ptr().cast()) }
-        .map_err(|error| error.to_string())?;
+        .map_err(failed(crate::i18n::t(
+            "The executable has no valid version resource.",
+        )))?;
     let mut pointer = std::ptr::null_mut();
     let mut length = 0;
     if !unsafe {
@@ -874,7 +888,7 @@ fn sha256_digest(input: &[u8]) -> Result<[u8; 32], String> {
     let mut digest = [0u8; 32];
     unsafe { BCryptHash(BCRYPT_SHA256_ALG_HANDLE, None, input, &mut digest) }
         .ok()
-        .map_err(|error| crate::i18n::tf("Windows SHA-256 failed: {}", &[&error]))?;
+        .map_err(failed(crate::i18n::t("Windows SHA-256 failed: {}")))?;
     Ok(digest)
 }
 

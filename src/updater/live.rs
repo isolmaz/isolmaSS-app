@@ -85,23 +85,35 @@ fn open_release_page(url: &str) -> Result<(), String> {
 }
 
 pub fn run_manual_update_check() -> bool {
-    start(false, true, || Event::Checked(check_for_update(), true))
+    start(
+        false,
+        true,
+        Box::new(|| Event::Checked(check_for_update(), true)),
+    )
 }
 
 fn run_automatic_update_check() {
-    let _ = start(true, true, || Event::Checked(check_for_update(), false));
+    let _ = start(
+        true,
+        true,
+        Box::new(|| Event::Checked(check_for_update(), false)),
+    );
 }
 
 /// Once per launch: sweeps leftovers of earlier updates, then runs the automatic check when
 /// enabled. Without a check the worker is not flagged as checking, so the menu stays usable.
 pub fn run_startup_work(check_for_updates: bool) {
-    let _ = start(true, check_for_updates, move || {
-        startup_event(
-            check_for_updates,
-            remove_stale_update_files,
-            check_for_update,
-        )
-    });
+    let _ = start(
+        true,
+        check_for_updates,
+        Box::new(move || {
+            startup_event(
+                check_for_updates,
+                remove_stale_update_files,
+                check_for_update,
+            )
+        }),
+    );
 }
 
 /// The portable build never runs the installer: the offer leads to the release page instead.
@@ -185,9 +197,11 @@ pub fn poll(owner: HWND, allow_install: bool) {
                             ),
                         );
                     }
-                    let _ = start(!manual, false, move || {
-                        Event::Downloaded(download_update(&update), !manual)
-                    });
+                    let _ = start(
+                        !manual,
+                        false,
+                        Box::new(move || Event::Downloaded(download_update(&update), !manual)),
+                    );
                 }
                 Ok(crate::ui::UpdateChoice::SkipVersion) => {
                     if let Err(error) =

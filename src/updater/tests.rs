@@ -488,7 +488,7 @@ fn get(server: &Server, host: &str, path: &str, maximum: usize) -> Result<Vec<u8
 
 #[test]
 fn a_get_returns_the_body_and_announces_a_github_api_client() {
-    let _state = job::exclusive();
+    let _state = job::tests::exclusive();
     let server = Server::start(|_| Reply::ok("hello"));
     assert_eq!(
         get(&server, "api.github.com", "/repos/a/b", 1024),
@@ -506,7 +506,7 @@ fn a_get_returns_the_body_and_announces_a_github_api_client() {
 
 #[test]
 fn http_get_applies_its_own_deadline_and_the_routes_target() {
-    let _state = job::exclusive();
+    let _state = job::tests::exclusive();
     let server = Server::start(|_| Reply::ok("ok"));
     assert_eq!(
         http_get(
@@ -527,7 +527,7 @@ fn http_get_applies_its_own_deadline_and_the_routes_target() {
 
 #[test]
 fn every_redirect_status_is_followed_to_an_allowed_host() {
-    let _state = job::exclusive();
+    let _state = job::tests::exclusive();
     let server = Server::start(|path| match path.trim_start_matches('/').parse::<u16>() {
         Ok(status) => Reply::redirect(status, "https://github.com/done/here"),
         Err(_) => Reply::ok("arrived"),
@@ -545,7 +545,7 @@ fn every_redirect_status_is_followed_to_an_allowed_host() {
 
 #[test]
 fn redirects_to_other_hosts_or_plain_http_are_refused_without_following() {
-    let _state = job::exclusive();
+    let _state = job::tests::exclusive();
     for (location, message) in [
         (
             "https://evil.test/x",
@@ -569,7 +569,7 @@ fn redirects_to_other_hosts_or_plain_http_are_refused_without_following() {
 
 #[test]
 fn redirect_loops_stop_after_five_hops() {
-    let _state = job::exclusive();
+    let _state = job::tests::exclusive();
     let server = Server::start(|_| Reply::redirect(302, "https://github.com/again"));
     assert_eq!(
         get(&server, "api.github.com", "/start", 64),
@@ -581,7 +581,7 @@ fn redirect_loops_stop_after_five_hops() {
 
 #[test]
 fn a_redirect_without_a_location_is_an_error() {
-    let _state = job::exclusive();
+    let _state = job::tests::exclusive();
     let server = Server::start(|_| Reply::status(302));
     let error = get(&server, "api.github.com", "/start", 64).expect_err("no Location header");
     assert!(
@@ -592,7 +592,7 @@ fn a_redirect_without_a_location_is_an_error() {
 
 #[test]
 fn only_success_statuses_deliver_a_body() {
-    let _state = job::exclusive();
+    let _state = job::tests::exclusive();
     for status in [404u32, 500] {
         let server = Server::start(move |_| Reply::status(status as u16));
         assert_eq!(
@@ -607,7 +607,7 @@ fn only_success_statuses_deliver_a_body() {
 
 #[test]
 fn responses_over_the_size_limit_are_rejected_at_the_boundary() {
-    let _state = job::exclusive();
+    let _state = job::tests::exclusive();
     let server = Server::start(|_| Reply::ok(vec![b'x'; 100]));
     assert_eq!(
         get(&server, "api.github.com", "/x", 100),
@@ -621,7 +621,7 @@ fn responses_over_the_size_limit_are_rejected_at_the_boundary() {
 
 #[test]
 fn a_large_body_arrives_complete_over_several_reads() {
-    let _state = job::exclusive();
+    let _state = job::tests::exclusive();
     let body: Vec<u8> = (0..400_000u32).map(|index| (index % 251) as u8).collect();
     let served = body.clone();
     let server = Server::start(move |_| Reply::ok(served.clone()));
@@ -630,7 +630,7 @@ fn a_large_body_arrives_complete_over_several_reads() {
 
 #[test]
 fn an_unreachable_server_is_reported_as_a_failed_request() {
-    let _state = job::exclusive();
+    let _state = job::tests::exclusive();
     let port = TcpListener::bind("127.0.0.1:0")
         .expect("bind")
         .local_addr()
@@ -651,7 +651,7 @@ fn an_unreachable_server_is_reported_as_a_failed_request() {
 
 #[test]
 fn urls_are_validated_before_any_connection_is_made() {
-    let _state = job::exclusive();
+    let _state = job::tests::exclusive();
     let server = Server::start(|_| Reply::ok("never"));
     assert_eq!(
         get(&server, "evil.test", "/x", 10),
@@ -666,7 +666,7 @@ fn urls_are_validated_before_any_connection_is_made() {
 
 #[test]
 fn cancellation_and_the_deadline_stop_a_request_before_it_is_sent() {
-    let _state = job::exclusive();
+    let _state = job::tests::exclusive();
     let server = Server::start(|_| Reply::ok("never"));
     let future = far();
     assert_eq!(check_cancelled(future), Ok(()));
@@ -694,14 +694,14 @@ fn cancellation_and_the_deadline_stop_a_request_before_it_is_sent() {
 #[test]
 fn a_failed_winhttp_call_reports_the_threads_last_error_and_a_good_handle_is_kept() {
     unsafe { SetLastError(ERROR_ACCESS_DENIED) };
-    let failure = InternetHandle::adopt(std::ptr::null_mut(), |error| {
-        format!("{:#x}", error.code().0 as u32)
-    });
-    assert_eq!(failure.err(), Some("0x80070005".to_string()));
+    let expected = format!("host: {}", windows::core::Error::from_win32());
+    unsafe { SetLastError(ERROR_ACCESS_DENIED) };
+    let failure = InternetHandle::adopt(std::ptr::null_mut(), "{}: {}", &[&"host"]);
+    assert_eq!(failure.err(), Some(expected));
 
     let mut value = 0u8;
     let raw = (&raw mut value).cast::<c_void>();
-    let adopted = InternetHandle::adopt(raw, |_| String::new()).expect("a non-null handle");
+    let adopted = InternetHandle::adopt(raw, "{}", &[]).expect("a non-null handle");
     assert_eq!(adopted.0, raw);
     // The test handle is not a real WinHTTP handle: do not let drop close it.
     std::mem::forget(adopted);
@@ -745,7 +745,7 @@ fn fetch_json(value: Value, current: &str) -> Result<Option<UpdateInfo>, String>
 
 #[test]
 fn a_newer_complete_release_becomes_an_update_offer() {
-    let _state = job::exclusive();
+    let _state = job::tests::exclusive();
     let body = release(
         "v99.0.0",
         vec![
@@ -775,7 +775,7 @@ fn a_newer_complete_release_becomes_an_update_offer() {
 
 #[test]
 fn only_releases_newer_than_the_running_version_are_offered() {
-    let _state = job::exclusive();
+    let _state = job::tests::exclusive();
     for (tag, offered) in [
         ("v0.6.4", true),
         ("v0.10.0", true),
@@ -791,7 +791,7 @@ fn only_releases_newer_than_the_running_version_are_offered() {
 
 #[test]
 fn drafts_and_prereleases_are_never_offered() {
-    let _state = job::exclusive();
+    let _state = job::tests::exclusive();
     for flag in ["draft", "prerelease"] {
         let mut value = complete_release("v99.0.0");
         value[flag] = json!(true);
@@ -801,7 +801,7 @@ fn drafts_and_prereleases_are_never_offered() {
 
 #[test]
 fn incomplete_or_suspicious_releases_are_rejected_with_their_reason() {
-    let _state = job::exclusive();
+    let _state = job::tests::exclusive();
     let digest_of = |digest: Option<&str>| {
         release(
             "v99.0.0",
@@ -920,7 +920,7 @@ fn incomplete_or_suspicious_releases_are_rejected_with_their_reason() {
 
 #[test]
 fn a_running_version_that_is_not_semantic_is_an_error() {
-    let _state = job::exclusive();
+    let _state = job::tests::exclusive();
     assert_eq!(
         fetch_json(complete_release("v99.0.0"), "dev"),
         Err(t("The installed application version is invalid.").to_string())
@@ -929,7 +929,7 @@ fn a_running_version_that_is_not_semantic_is_an_error() {
 
 #[test]
 fn unreadable_release_metadata_and_server_errors_are_reported() {
-    let _state = job::exclusive();
+    let _state = job::tests::exclusive();
     for body in ["{", "[]", r#"{"tag_name":"v1.0.0"}"#] {
         let error = fetch(body, "0.6.3").expect_err("invalid metadata");
         assert!(
@@ -978,7 +978,7 @@ fn failure(result: Result<PathBuf, DownloadError>) -> (DownloadFailure, String) 
 
 #[test]
 fn a_verified_download_is_staged_beside_its_signature() {
-    let _state = job::exclusive();
+    let _state = job::tests::exclusive();
     let scratch = Scratch::new("download-ok");
     let root = scratch.join("updates");
     let installer = executable_with_version([7, 8, 9]);
@@ -1018,7 +1018,7 @@ fn a_verified_download_is_staged_beside_its_signature() {
 
 #[test]
 fn malformed_update_metadata_is_rejected_before_any_request() {
-    let _state = job::exclusive();
+    let _state = job::tests::exclusive();
     let server = Server::start(|_| Reply::ok("never"));
     let (good, _) = publication(b"installer", "1.2.3");
     for (case, update) in [
@@ -1058,7 +1058,7 @@ fn malformed_update_metadata_is_rejected_before_any_request() {
 
 #[test]
 fn urls_outside_the_allowed_hosts_are_integrity_failures() {
-    let _state = job::exclusive();
+    let _state = job::tests::exclusive();
     let installer = executable_with_version([7, 8, 9]);
     let (good, signature) = publication(&installer, "7.8.9");
     let server = serving(vec![(SIGNATURE_PATH, 200, signature)]);
@@ -1090,7 +1090,7 @@ fn urls_outside_the_allowed_hosts_are_integrity_failures() {
 
 #[test]
 fn missing_assets_are_network_failures() {
-    let _state = job::exclusive();
+    let _state = job::tests::exclusive();
     let installer = executable_with_version([7, 8, 9]);
     let (update, signature) = publication(&installer, "7.8.9");
     let not_found = tf("The update server returned HTTP {}.", &[&404]);
@@ -1108,7 +1108,7 @@ fn missing_assets_are_network_failures() {
 
 #[test]
 fn a_signature_for_another_version_stops_the_download_before_the_installer() {
-    let _state = job::exclusive();
+    let _state = job::tests::exclusive();
     let installer = executable_with_version([7, 8, 9]);
     let (update, _) = publication(&installer, "7.8.9");
     let wrong = sign("7.8.8", &update.sha256);
@@ -1128,7 +1128,7 @@ fn a_signature_for_another_version_stops_the_download_before_the_installer() {
 
 #[test]
 fn an_installer_that_differs_from_its_signed_digest_is_never_staged() {
-    let _state = job::exclusive();
+    let _state = job::tests::exclusive();
     let scratch = Scratch::new("download-tampered");
     let root = scratch.join("updates");
     let installer = executable_with_version([7, 8, 9]);
@@ -1151,7 +1151,7 @@ fn an_installer_that_differs_from_its_signed_digest_is_never_staged() {
 
 #[test]
 fn an_unusable_staging_folder_is_a_storage_failure() {
-    let _state = job::exclusive();
+    let _state = job::tests::exclusive();
     let scratch = Scratch::new("download-storage");
     let installer = executable_with_version([7, 8, 9]);
     let (update, signature) = publication(&installer, "7.8.9");
@@ -1176,7 +1176,7 @@ fn an_unusable_staging_folder_is_a_storage_failure() {
 
 #[test]
 fn an_installer_whose_embedded_version_differs_from_the_signed_one_is_discarded() {
-    let _state = job::exclusive();
+    let _state = job::tests::exclusive();
     let scratch = Scratch::new("download-version");
     let root = scratch.join("updates");
     let installer = executable_with_version([7, 8, 9]);
@@ -1201,7 +1201,7 @@ fn an_installer_whose_embedded_version_differs_from_the_signed_one_is_discarded(
 
 #[test]
 fn a_signed_file_without_a_version_resource_is_an_integrity_failure() {
-    let _state = job::exclusive();
+    let _state = job::tests::exclusive();
     let scratch = Scratch::new("download-no-version");
     let root = scratch.join("updates");
     let installer = b"not an executable".to_vec();
@@ -1262,6 +1262,23 @@ fn the_update_folder_lives_under_local_app_data() {
         update_directory(),
         Ok(local.join("isolmaSS").join("updates"))
     );
+    assert_eq!(
+        update_directory_in(Some(r"D:\Profiles\me\Local".into())),
+        Ok(PathBuf::from(r"D:\Profiles\me\Local\isolmaSS\updates"))
+    );
+    assert_eq!(
+        update_directory_in(None),
+        Err("%LOCALAPPDATA% is unavailable.".to_string())
+    );
+}
+
+#[test]
+fn a_failed_call_is_worded_with_its_error_in_the_placeholder() {
+    assert_eq!(
+        failed("Could not do it: {}")("access denied"),
+        "Could not do it: access denied"
+    );
+    assert_eq!(failed("Nothing to fill in")(5), "Nothing to fill in");
 }
 
 #[test]
@@ -1584,6 +1601,16 @@ fn an_artifact_that_is_missing_oversized_or_unsigned_is_rejected() {
     assert_eq!(
         verify_artifact(key, &huge),
         Err(t("The staged installer exceeds the allowed size.").to_string())
+    );
+
+    // A folder has metadata but cannot be read as an installer.
+    let folder = scratch.join("folder.exe");
+    std::fs::create_dir(&folder).expect("create folder");
+    assert_eq!(
+        verify_artifact(key, &folder),
+        Err(std::fs::read(&folder)
+            .expect_err("a folder cannot be read")
+            .to_string())
     );
 
     let unsigned = scratch.join("unsigned.exe");
