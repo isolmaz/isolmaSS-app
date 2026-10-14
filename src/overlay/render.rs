@@ -1120,12 +1120,15 @@ mod tests {
             rgb_at(&state, bounds.left + 2, 125),
             [PLUM[0], PLUM[1], PLUM[2]]
         );
+        // The text area inside the padding: the box's rounded corners leave the black
+        // backdrop showing in the corners of `bounds`, which is not text.
+        let text_area = bounds.inflate(-5, -5);
         assert!(
-            count_color(&state, bounds, [255, 255, 255, 255]) > 20,
+            count_color(&state, text_area, [255, 255, 255, 255]) > 20,
             "white text"
         );
         assert_eq!(
-            count_color(&state, bounds, [0, 0, 0, 255]),
+            count_color(&state, text_area, [0, 0, 0, 255]),
             0,
             "no black text"
         );
