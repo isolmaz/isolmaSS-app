@@ -933,7 +933,7 @@ pub fn classify_worker_failure(
 pub fn worker_failure_message(failure: WorkerFailure, reset: impl FnOnce() -> String) -> String {
     match failure {
         WorkerFailure::Reconnect => crate::i18n::t(
-            "This computer's access key no longer matches your Worker. Reconnect in Settings › Sharing.",
+            "This computer's upload key no longer matches your Worker. Reconnect in Settings › Sharing.",
         )
         .to_string(),
         WorkerFailure::TooLarge(bytes) => {
