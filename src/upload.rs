@@ -9,6 +9,9 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+mod glue;
+pub use glue::{open_link, send};
+
 pub const WM_UPLOAD_DONE: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 41;
 /// Posted to the toast while the file is written: WPARAM is the share of the
 /// body already sent in per-mille, LPARAM the number of the attempt.
@@ -60,7 +63,7 @@ pub fn prepare(
         settings.save_format.extension()
     ));
     let file = Arc::new(TemporaryScreenshot(output.clone()));
-    save_buffer_to_image(
+    let bytes = save_buffer_to_image(
         pixels,
         width,
         height,
@@ -69,14 +72,9 @@ pub fn prepare(
         settings.save_format,
         settings.jpeg_quality,
     )
-    .map_err(|error| {
-        crate::i18n::tf("Could not prepare the screenshot for upload: {}", &[&error])
-    })?;
-    let bytes = std::fs::metadata(&output)
-        .map_err(|error| {
-            crate::i18n::tf("Could not prepare the screenshot for upload: {}", &[&error])
-        })?
-        .len();
+    .and_then(|_| std::fs::metadata(&output).map_err(|error| error.to_string()))
+    .map_err(|error| crate::i18n::tf("Could not prepare the screenshot for upload: {}", &[&error]))?
+    .len();
     Ok(Prepared {
         file,
         bytes,
@@ -85,15 +83,31 @@ pub fn prepare(
     })
 }
 
-/// Sends the prepared screenshot (blocking) and returns its share link.
-/// `progress` receives `(bytes sent, total bytes)` while the file is written.
-pub fn send(prepared: &Prepared, progress: UploadProgress<'_>) -> Result<String, String> {
+/// Sends the prepared screenshot through `request`, the HTTPS call to the Worker
+/// ([`send`] passes [`cloudflare_setup::api_request`]), and returns its share link.
+fn send_with<R>(
+    prepared: &Prepared,
+    progress: UploadProgress<'_>,
+    request: R,
+) -> Result<String, String>
+where
+    R: FnOnce(
+        &str,
+        &str,
+        &str,
+        &str,
+        Option<&str>,
+        Option<&str>,
+        RequestBody<'_>,
+        UploadProgress<'_>,
+    ) -> Result<(u32, Vec<u8>), String>,
+{
     let type_name = match prepared.format {
         SaveFormat::Png => "image/png",
         SaveFormat::Jpeg => "image/jpeg",
     };
     let origin = prepared.credentials.origin.as_str();
-    let (status, body) = cloudflare_setup::api_request(
+    let (status, body) = request(
         origin,
         "/api/upload",
         "POST",
@@ -137,50 +151,371 @@ pub fn is_share_link(origin: &str, url: &str) -> bool {
             })
 }
 
-/// Opens a validated share link in the default browser.
-pub fn open_link(url: &str) -> Result<(), String> {
-    use windows::Win32::UI::Shell::ShellExecuteW;
-    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-    use windows::core::{PCWSTR, w};
+/// The NUL-terminated UTF-16 form of `url` for the shell, only for `https://` links:
+/// the shell would run any other scheme (`file:`, `ms-settings:`) just as readily.
+fn browser_target(url: &str) -> Result<Vec<u16>, String> {
     if !url.starts_with("https://") {
         return Err(crate::i18n::t("Invalid link.").to_string());
     }
-    let wide: Vec<u16> = url.encode_utf16().chain(Some(0)).collect();
-    let result = unsafe {
-        ShellExecuteW(
-            windows::Win32::Foundation::HWND::default(),
-            w!("open"),
-            PCWSTR(wide.as_ptr()),
-            PCWSTR::null(),
-            PCWSTR::null(),
-            SW_SHOWNORMAL,
-        )
-    };
-    if result.0 as isize <= 32 {
-        Err(crate::i18n::t("The link could not be opened in the browser.").to_string())
-    } else {
-        Ok(())
-    }
+    Ok(url.encode_utf16().chain(Some(0)).collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::test_env::{Sandbox, TempDir};
+    use std::sync::Mutex;
+
+    const ORIGIN: &str = "https://isolmass-share-abc.example.workers.dev";
+    const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+
+    fn credentials(password: Option<&str>) -> CloudCredentials {
+        CloudCredentials {
+            origin: ORIGIN.to_string(),
+            upload_token: cloudflare_setup::generate_token().expect("token"),
+            admin_token: cloudflare_setup::generate_token().expect("token"),
+            share_password: password.map(str::to_string),
+            account_id: None,
+            worker_name: None,
+        }
+    }
+
+    fn connected(format: SaveFormat) -> Settings {
+        Settings {
+            cloud_url: Some(ORIGIN.to_string()),
+            save_format: format,
+            jpeg_quality: 70,
+            ..Settings::default()
+        }
+    }
+
+    /// BGRA pixels of a screen capture.
+    fn pixels(width: i32, height: i32) -> Vec<u8> {
+        (0..width * height * 4)
+            .map(|index| (index * 5) as u8)
+            .collect()
+    }
 
     #[test]
     fn share_links_are_limited_to_the_installation() {
-        let origin = "https://isolmass-share-abc.example.workers.dev";
         let id = "A".repeat(32);
-        assert!(is_share_link(origin, &format!("{origin}/i/{id}")));
-        assert!(!is_share_link(origin, &format!("{origin}/i/{id}x")));
+        assert!(is_share_link(ORIGIN, &format!("{ORIGIN}/i/{id}")));
+        assert!(!is_share_link(ORIGIN, &format!("{ORIGIN}/i/{id}x")));
         assert!(!is_share_link(
-            origin,
+            ORIGIN,
             &format!("https://evil.example/i/{id}")
         ));
-        assert!(!is_share_link(origin, &format!("{origin}/x/{id}")));
+        assert!(!is_share_link(ORIGIN, &format!("{ORIGIN}/x/{id}")));
         assert!(!is_share_link(
-            origin,
-            &format!("{origin}/i/{}", "A/".repeat(16))
+            ORIGIN,
+            &format!("{ORIGIN}/i/{}", "A/".repeat(16))
         ));
+        assert!(!is_share_link(
+            "http://isolmass-share-abc.example.workers.dev",
+            &format!("http://isolmass-share-abc.example.workers.dev/i/{id}")
+        ));
+    }
+
+    #[test]
+    fn only_https_links_reach_the_shell() {
+        let wide = browser_target("https://example.com/i/ü").expect("https link");
+        assert_eq!(wide.last(), Some(&0), "NUL-terminated for the shell");
+        assert_eq!(
+            String::from_utf16(&wide[..wide.len() - 1]).unwrap(),
+            "https://example.com/i/ü"
+        );
+        for url in [
+            "http://example.com",
+            "HTTPS://example.com",
+            "file:///C:/Windows/System32/cmd.exe",
+            "ms-settings:",
+            "",
+        ] {
+            assert_eq!(
+                browser_target(url).unwrap_err(),
+                crate::i18n::t("Invalid link."),
+                "{url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn prepare_encodes_the_selection_into_a_file_owned_by_the_prepared_upload() {
+        let _sandbox = Sandbox::new("upload_prepare");
+        cloudflare_setup::save_credentials(&credentials(None)).expect("store the keys");
+        let prepared = prepare(
+            &pixels(8, 6),
+            8,
+            6,
+            &Rect::new(1, 1, 5, 4),
+            &connected(SaveFormat::Png),
+        )
+        .expect("prepare");
+
+        let path = prepared.file.0.clone();
+        assert_eq!(path.parent(), Some(std::env::temp_dir().as_path()));
+        let name = path.file_name().unwrap().to_str().unwrap();
+        assert!(
+            name.starts_with("isolmass-upload-") && name.ends_with(".png"),
+            "{name}"
+        );
+        let bytes = std::fs::read(&path).expect("encoded file");
+        assert_eq!(&bytes[..8], PNG_SIGNATURE);
+        assert_eq!(prepared.bytes, bytes.len() as u64);
+        assert_eq!(prepared.format, SaveFormat::Png);
+        assert_eq!(prepared.credentials.origin, ORIGIN);
+
+        // The toast and an in-flight attempt share the file; the last one deletes it.
+        let attempt = prepared.clone();
+        drop(prepared);
+        assert!(path.exists(), "still owned by the running attempt");
+        drop(attempt);
+        assert!(!path.exists(), "removed with the last owner");
+    }
+
+    #[test]
+    fn prepare_follows_the_configured_save_format() {
+        let _sandbox = Sandbox::new("upload_prepare_jpeg");
+        cloudflare_setup::save_credentials(&credentials(None)).expect("store the keys");
+        let prepared = prepare(
+            &pixels(8, 6),
+            8,
+            6,
+            &Rect::new(0, 0, 8, 6),
+            &connected(SaveFormat::Jpeg),
+        )
+        .expect("prepare");
+        let path = prepared.file.0.clone();
+        assert!(path.extension().is_some_and(|extension| extension == "jpg"));
+        assert_eq!(&std::fs::read(&path).unwrap()[..2], [0xFF, 0xD8]);
+        assert_eq!(prepared.format, SaveFormat::Jpeg);
+    }
+
+    #[test]
+    fn prepare_needs_a_matching_cloudflare_connection() {
+        let _sandbox = Sandbox::new("upload_prepare_missing");
+        let selection = Rect::new(0, 0, 8, 6);
+        let mut settings = connected(SaveFormat::Png);
+
+        settings.cloud_url = None;
+        assert_eq!(
+            prepare(&pixels(8, 6), 8, 6, &selection, &settings).err(),
+            Some(
+                crate::i18n::t("Connect Cloudflare in Settings > Sharing before uploading.")
+                    .to_string()
+            )
+        );
+
+        settings.cloud_url = Some(ORIGIN.to_string());
+        let error = prepare(&pixels(8, 6), 8, 6, &selection, &settings)
+            .err()
+            .expect("no keys stored yet");
+        assert!(
+            error.starts_with("Cloudflare setup is not complete: "),
+            "{error}"
+        );
+
+        cloudflare_setup::save_credentials(&credentials(None)).expect("store the keys");
+        settings.cloud_url = Some("https://other.example.workers.dev".to_string());
+        assert_eq!(
+            prepare(&pixels(8, 6), 8, 6, &selection, &settings).err(),
+            Some(
+                crate::i18n::t(
+                    "The Cloudflare address changed. Connect this computer again before uploading."
+                )
+                .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn prepare_reports_an_unusable_selection() {
+        let _sandbox = Sandbox::new("upload_prepare_invalid");
+        cloudflare_setup::save_credentials(&credentials(None)).expect("store the keys");
+        let error = prepare(
+            &pixels(8, 6),
+            8,
+            6,
+            &Rect::new(2, 2, 2, 2),
+            &connected(SaveFormat::Png),
+        )
+        .err()
+        .expect("empty selection");
+        assert_eq!(
+            error,
+            crate::i18n::tf(
+                "Could not prepare the screenshot for upload: {}",
+                &[&crate::i18n::t(
+                    "The screenshot selection is empty or invalid."
+                )]
+            )
+        );
+    }
+
+    #[test]
+    fn the_temporary_screenshot_is_deleted_quietly() {
+        let dir = TempDir::new("upload_cleanup");
+        let file = dir.path().join("shot.png");
+        std::fs::write(&file, b"image").unwrap();
+        drop(TemporaryScreenshot(file.clone()));
+        assert!(!file.exists());
+        // Already gone: nothing to report.
+        drop(TemporaryScreenshot(file));
+        // Not deletable (a folder): the failure is recorded, the folder stays.
+        let folder = dir.path().join("folder.png");
+        std::fs::create_dir(&folder).unwrap();
+        drop(TemporaryScreenshot(folder.clone()));
+        assert!(folder.is_dir());
+    }
+
+    /// A prepared upload of `content` as a file below `dir`.
+    fn prepared(
+        dir: &TempDir,
+        format: SaveFormat,
+        password: Option<&str>,
+        content: &[u8],
+    ) -> Prepared {
+        let path = dir.path().join("upload.bin");
+        std::fs::write(&path, content).unwrap();
+        Prepared {
+            file: Arc::new(TemporaryScreenshot(path)),
+            bytes: content.len() as u64,
+            format,
+            credentials: credentials(password),
+        }
+    }
+
+    fn receipt(origin: &str, id: &str, url_id: &str) -> Vec<u8> {
+        format!(r#"{{"id":"{id}","url":"{origin}/i/{url_id}"}}"#).into_bytes()
+    }
+
+    #[test]
+    fn send_posts_the_file_with_the_upload_key_and_returns_the_share_link() {
+        let dir = TempDir::new("upload_send");
+        let id = "A1".repeat(16);
+        for (format, expected_type) in [
+            (SaveFormat::Png, "image/png"),
+            (SaveFormat::Jpeg, "image/jpeg"),
+        ] {
+            let upload = prepared(
+                &dir,
+                format,
+                Some("correct horse battery"),
+                b"encoded image",
+            );
+            let reported = Mutex::new(Vec::new());
+            let progress = |sent: u64, total: u64| {
+                reported
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .push((sent, total))
+            };
+            let mut seen = None;
+            let link = send_with(
+                &upload,
+                Some(&progress),
+                |origin, path, method, bearer, content_type, password, body, progress| {
+                    let RequestBody::File(file) = body else {
+                        panic!("the screenshot is sent from its file");
+                    };
+                    seen = Some((
+                        (origin.to_string(), path.to_string(), method.to_string()),
+                        (bearer.to_string(), content_type.map(str::to_string)),
+                        password.map(str::to_string),
+                        std::fs::read(file).unwrap(),
+                    ));
+                    progress.expect("the progress callback is passed on")(13, 26);
+                    Ok((201, receipt(ORIGIN, &id, &id)))
+                },
+            )
+            .expect("share link");
+
+            assert_eq!(link, format!("{ORIGIN}/i/{id}"));
+            let (target, authorization, password, body) = seen.expect("the request was made");
+            assert_eq!(
+                target,
+                (
+                    ORIGIN.to_string(),
+                    "/api/upload".to_string(),
+                    "POST".to_string()
+                )
+            );
+            assert_eq!(
+                authorization,
+                (
+                    upload.credentials.upload_token.clone(),
+                    Some(expected_type.to_string())
+                )
+            );
+            assert_eq!(password.as_deref(), Some("correct horse battery"));
+            assert_eq!(body, b"encoded image");
+            assert_eq!(
+                *reported.lock().unwrap_or_else(|poison| poison.into_inner()),
+                [(13, 26)]
+            );
+        }
+    }
+
+    #[test]
+    fn send_reports_network_failures_unchanged() {
+        let dir = TempDir::new("upload_offline");
+        let upload = prepared(&dir, SaveFormat::Png, None, b"image");
+        let error = send_with(&upload, None, |_, _, _, _, _, password, _, progress| {
+            assert_eq!(password, None, "no image password configured");
+            assert!(progress.is_none());
+            Err("offline".to_string())
+        })
+        .unwrap_err();
+        assert_eq!(error, "offline");
+    }
+
+    #[test]
+    fn send_explains_rejections() {
+        let _sandbox = Sandbox::new("upload_rejected");
+        let dir = TempDir::new("upload_rejected_file");
+        let upload = prepared(&dir, SaveFormat::Png, None, &vec![0; 1_500_000]);
+        let rejected = |status: u32, body: &[u8]| {
+            send_with(&upload, None, |_, _, _, _, _, _, _, _| {
+                Ok((status, body.to_vec()))
+            })
+            .unwrap_err()
+        };
+        assert!(rejected(401, b"{}").contains("no longer matches your Worker"));
+        assert!(
+            rejected(413, b"").contains("(1.5 MB)"),
+            "the size of the capture is reported: {}",
+            rejected(413, b"")
+        );
+        assert!(rejected(500, b"").contains("temporarily unavailable"));
+        assert_eq!(
+            rejected(403, br#"{"error":"Forbidden here"}"#),
+            "Forbidden here"
+        );
+    }
+
+    #[test]
+    fn send_accepts_only_this_installations_links() {
+        let dir = TempDir::new("upload_receipt");
+        let upload = prepared(&dir, SaveFormat::Png, None, b"image");
+        let answer = |body: Vec<u8>| {
+            send_with(&upload, None, |_, _, _, _, _, _, _, _| Ok((201, body))).unwrap_err()
+        };
+        let id = "B2".repeat(16);
+        assert_eq!(
+            answer(b"not json".to_vec()),
+            crate::i18n::t("Cloudflare returned an invalid upload response.")
+        );
+        let foreign =
+            crate::i18n::t("Cloudflare returned a link that does not belong to this installation.");
+        assert_eq!(
+            answer(receipt("https://evil.example.com", &id, &id)),
+            foreign,
+            "another origin"
+        );
+        assert_eq!(
+            answer(receipt(ORIGIN, &id, &"C3".repeat(16))),
+            foreign,
+            "the link must name the id of the receipt"
+        );
     }
 }

@@ -56,14 +56,19 @@ pub fn code() -> &'static str {
 
 /// Turkish when the Windows display language is Turkish, otherwise English.
 static SYSTEM: LazyLock<Language> = LazyLock::new(|| {
+    language_of(unsafe { windows::Win32::Globalization::GetUserDefaultUILanguage() })
+});
+
+/// The interface language for a Windows language identifier (LANGID): the primary
+/// language is in the low ten bits, the sublanguage (region) above them.
+fn language_of(id: u16) -> Language {
     const LANG_TURKISH: u16 = 0x1f;
-    let id = unsafe { windows::Win32::Globalization::GetUserDefaultUILanguage() };
     if id & 0x3ff == LANG_TURKISH {
         Language::Turkish
     } else {
         Language::English
     }
-});
+}
 
 static TURKISH: LazyLock<HashMap<&'static str, &'static str>> =
     LazyLock::new(|| tr::TABLE.iter().copied().collect());
@@ -100,6 +105,13 @@ pub static TEST_LANGUAGE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serializes tests that change the language; a failed test must not poison the others.
+    fn language_lock() -> std::sync::MutexGuard<'static, ()> {
+        TEST_LANGUAGE_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
 
     /// The string literal starting at `from` (just after its opening quote), unescaped.
     fn literal(text: &str, from: usize) -> String {
@@ -184,9 +196,71 @@ mod tests {
 
     #[test]
     fn placeholders_fill_in_order() {
-        let _lock = TEST_LANGUAGE_LOCK.lock().unwrap();
+        let _lock = language_lock();
         set_preference(LanguagePreference::English);
         assert_eq!(tf("{} of {}", &[&1, &"two"]), "1 of two");
+        set_preference(LanguagePreference::System);
+    }
+
+    #[test]
+    fn literal_unescapes_up_to_the_closing_quote() {
+        assert_eq!(
+            literal(r#"a\"b\\c\nd\re" tail"#, 0),
+            "a\"b\\c\nd\re",
+            "escaped quote and backslash stay in the text, the bare quote ends it"
+        );
+        assert_eq!(
+            literal("xyz\"", 1),
+            "yz",
+            "reading starts at the given offset"
+        );
+        assert_eq!(
+            literal("open\\", 0),
+            "open",
+            "a backslash at the very end has nothing to escape"
+        );
+    }
+
+    #[test]
+    fn windows_language_ids_select_turkish_only_for_turkish() {
+        assert_eq!(language_of(0x041f), Language::Turkish, "tr-TR");
+        assert_eq!(language_of(0x001f), Language::Turkish, "neutral Turkish");
+        assert_eq!(language_of(0x0409), Language::English, "en-US");
+        assert_eq!(language_of(0x0407), Language::English, "de-DE");
+        assert_eq!(
+            language_of(0x041e),
+            Language::English,
+            "th-TH differs in one bit"
+        );
+        assert_eq!(language_of(0), Language::English);
+    }
+
+    #[test]
+    fn preference_decides_between_windows_language_and_a_fixed_language() {
+        let _lock = language_lock();
+        let windows_language =
+            language_of(unsafe { windows::Win32::Globalization::GetUserDefaultUILanguage() });
+        set_preference(LanguagePreference::System);
+        assert_eq!(current(), windows_language);
+        set_preference(LanguagePreference::English);
+        assert_eq!(current(), Language::English);
+        assert_eq!(code(), "en");
+        set_preference(LanguagePreference::Turkish);
+        assert_eq!(current(), Language::Turkish);
+        assert_eq!(code(), "tr");
+        set_preference(LanguagePreference::System);
+    }
+
+    #[test]
+    fn turkish_translates_known_strings_and_keeps_unknown_ones() {
+        let _lock = language_lock();
+        let (english, turkish) = tr::TABLE[0];
+        assert_ne!(english, turkish, "the table must translate its first entry");
+        set_preference(LanguagePreference::Turkish);
+        assert_eq!(t(english), turkish);
+        assert_eq!(t("Not an interface string"), "Not an interface string");
+        set_preference(LanguagePreference::English);
+        assert_eq!(t(english), english);
         set_preference(LanguagePreference::System);
     }
 }
