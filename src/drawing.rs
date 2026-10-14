@@ -104,13 +104,7 @@ fn with_object<T>(
             }
         }
     }
-    // Never hand an invalid handle (failed creation or failed stock fallback)
-    // to SelectObject: skip the selection and leave the DC untouched instead.
-    let previous = if object.is_invalid() {
-        HGDIOBJ::default()
-    } else {
-        unsafe { SelectObject(hdc, object) }
-    };
+    let previous = select_if_valid(hdc, object);
     let _selection = Selection {
         hdc,
         previous,
@@ -118,6 +112,16 @@ fn with_object<T>(
         owned,
     };
     action()
+}
+
+/// Selects `object` into `hdc` and returns the previous selection. Never hands an
+/// invalid handle (failed creation or failed stock fallback) to SelectObject:
+/// the selection is skipped, the DC stays untouched and the result is invalid.
+fn select_if_valid(hdc: HDC, object: HGDIOBJ) -> HGDIOBJ {
+    if object.is_invalid() {
+        return HGDIOBJ::default();
+    }
+    unsafe { SelectObject(hdc, object) }
 }
 
 /// Windows 11 ships Segoe Fluent Icons; Windows 10 ships Segoe MDL2 Assets with the
@@ -128,11 +132,7 @@ fn icon_face() -> &'static str {
     static FACE: LazyLock<&'static str> = LazyLock::new(|| {
         const FLUENT: &str = "Segoe Fluent Icons";
         const MDL2: &str = "Segoe MDL2 Assets";
-        if crate::theme::face_installed(FLUENT) {
-            FLUENT
-        } else {
-            MDL2
-        }
+        crate::theme::pick_face(FLUENT, MDL2, crate::theme::face_installed)
     });
     *FACE
 }
@@ -341,12 +341,9 @@ fn elevation_layers(
 /// (one graphics, brush and path for all of them) and cost about four small fills.
 pub(crate) fn elevation(hdc: HDC, rect: crate::capture::Rect, radius_px: i32, dpi: u32) {
     use windows::Win32::Graphics::GdiPlus::*;
-    if !gdiplus_ready() {
-        return;
-    }
     unsafe {
         let mut graphics = std::ptr::null_mut();
-        if GdipCreateFromHDC(hdc, &mut graphics) != Ok {
+        if !gdiplus_ready() || GdipCreateFromHDC(hdc, &mut graphics) != Ok {
             return;
         }
         // The layers are faint and soft, so the cheaper anti-aliasing mode is enough.
@@ -404,22 +401,26 @@ unsafe fn add_rounded_outline(
     }
 }
 
+/// Starts GDI+ for the process; `false` (recorded in the diagnostic log) when GDI+
+/// refuses `version`.
+fn start_gdiplus(version: u32) -> bool {
+    use windows::Win32::Graphics::GdiPlus::{GdiplusStartup, GdiplusStartupInput, Ok};
+    let input = GdiplusStartupInput {
+        GdiplusVersion: version,
+        ..Default::default()
+    };
+    let mut token = 0usize;
+    // The token lives for the whole process; GDI+ is torn down with it.
+    let status = unsafe { GdiplusStartup(&mut token, &input, std::ptr::null_mut()) };
+    if status != Ok {
+        crate::diagnostics::record("drawing", &format!("GDI+ unavailable: {}", status.0));
+    }
+    status == Ok
+}
+
 pub(crate) fn gdiplus_ready() -> bool {
     use std::sync::LazyLock;
-    use windows::Win32::Graphics::GdiPlus::{GdiplusStartup, GdiplusStartupInput, Ok};
-    static READY: LazyLock<bool> = LazyLock::new(|| {
-        let input = GdiplusStartupInput {
-            GdiplusVersion: 1,
-            ..Default::default()
-        };
-        let mut token = 0usize;
-        // The token lives for the whole process; GDI+ is torn down with it.
-        let status = unsafe { GdiplusStartup(&mut token, &input, std::ptr::null_mut()) };
-        if status != Ok {
-            crate::diagnostics::record("drawing", &format!("GDI+ unavailable: {}", status.0));
-        }
-        status == Ok
-    });
+    static READY: LazyLock<bool> = LazyLock::new(|| start_gdiplus(1));
     *READY
 }
 
@@ -972,62 +973,6 @@ pub fn fluent_toggle(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn icon_face_is_an_installed_icon_font() {
-        assert!(crate::theme::face_installed(icon_face()));
-    }
-
-    #[test]
-    fn corner_diameter_is_twice_the_scaled_radius() {
-        assert_eq!(corner_diameter(4, 96), 8);
-        assert_eq!(corner_diameter(8, 96), 16);
-        assert_eq!(corner_diameter(4, 144), 12);
-        assert_eq!(corner_diameter(8, 192), 32);
-    }
-
-    #[test]
-    fn elevation_layers_widen_sink_and_fade_and_scale_with_dpi() {
-        use crate::capture::Rect;
-        let panel = Rect::new(100, 200, 400, 300);
-        let layers = elevation_layers(panel, 8, 96);
-        for (layer, diameter, _) in layers {
-            assert!(layer.left < panel.left && layer.right > panel.right);
-            assert!(layer.bottom > panel.bottom);
-            assert!(diameter > 16);
-        }
-        for pair in layers.windows(2) {
-            assert!(pair[1].0.bottom > pair[0].0.bottom, "{pair:?}");
-            assert!(pair[1].0.left < pair[0].0.left, "{pair:?}");
-            assert!(pair[1].2 < pair[0].2, "{pair:?}");
-        }
-        let doubled = elevation_layers(panel, 16, 192);
-        for (single, double) in layers.iter().zip(doubled) {
-            assert_eq!(
-                double.0.bottom - panel.bottom,
-                (single.0.bottom - panel.bottom) * 2
-            );
-            assert_eq!(panel.left - double.0.left, (panel.left - single.0.left) * 2);
-            assert_eq!(double.1, single.1 * 2);
-        }
-    }
-
-    #[test]
-    fn focus_strokes_scale_with_dpi_and_never_vanish() {
-        assert_eq!(focus_widths(96), (1, 2));
-        assert_eq!(focus_widths(192), (2, 4));
-        assert_eq!(focus_extent(96), 3);
-        assert_eq!(focus_extent(192), 6);
-        assert_eq!(focus_widths(48), (1, 1));
-    }
-
-    #[test]
-    fn ui_text_measurement_grows_with_the_text() {
-        let (narrow, height) = measure_ui_text("W");
-        let (wide, _) = measure_ui_text("WWWWWWWW");
-        assert!(height > 0);
-        assert!(wide > narrow * 4);
-    }
-}
+pub(crate) mod canvas;
+#[cfg(test)]
+mod tests;

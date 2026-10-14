@@ -58,40 +58,40 @@ struct UxTheme {
     refresh_immersive_color_policy_state: Option<RefreshImmersiveColorPolicyState>,
 }
 
-fn uxtheme() -> &'static UxTheme {
-    use std::sync::LazyLock;
+/// Resolves the uxtheme ordinals from `library`; every entry point is `None` when
+/// the library cannot be loaded.
+fn load_uxtheme(library: windows::core::PCWSTR) -> UxTheme {
     use windows::Win32::System::LibraryLoader::{
         GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
     };
-    static API: LazyLock<UxTheme> = LazyLock::new(|| {
-        let Ok(module) = (unsafe {
-            LoadLibraryExW(
-                windows::core::w!("uxtheme.dll"),
-                None,
-                LOAD_LIBRARY_SEARCH_SYSTEM32,
-            )
-        }) else {
-            crate::diagnostics::record("theme", "uxtheme.dll could not be loaded");
-            return UxTheme {
-                set_preferred_app_mode: None,
-                allow_dark_mode_for_window: None,
-                flush_menu_themes: None,
-                refresh_immersive_color_policy_state: None,
-            };
+    let Ok(module) = (unsafe { LoadLibraryExW(library, None, LOAD_LIBRARY_SEARCH_SYSTEM32) })
+    else {
+        crate::diagnostics::record("theme", "uxtheme.dll could not be loaded");
+        return UxTheme {
+            set_preferred_app_mode: None,
+            allow_dark_mode_for_window: None,
+            flush_menu_themes: None,
+            refresh_immersive_color_policy_state: None,
         };
-        let ordinal = |number: usize| unsafe {
-            GetProcAddress(module, windows::core::PCSTR(number as *const u8))
-        };
-        // SAFETY: the ordinals' signatures are fixed by the shipped uxtheme ABI.
-        unsafe {
-            UxTheme {
-                set_preferred_app_mode: ordinal(135).map(|f| std::mem::transmute(f)),
-                allow_dark_mode_for_window: ordinal(133).map(|f| std::mem::transmute(f)),
-                flush_menu_themes: ordinal(136).map(|f| std::mem::transmute(f)),
-                refresh_immersive_color_policy_state: ordinal(104).map(|f| std::mem::transmute(f)),
-            }
+    };
+    let ordinal = |number: usize| unsafe {
+        GetProcAddress(module, windows::core::PCSTR(number as *const u8))
+    };
+    // SAFETY: the ordinals' signatures are fixed by the shipped uxtheme ABI.
+    unsafe {
+        UxTheme {
+            set_preferred_app_mode: ordinal(135).map(|f| std::mem::transmute(f)),
+            allow_dark_mode_for_window: ordinal(133).map(|f| std::mem::transmute(f)),
+            flush_menu_themes: ordinal(136).map(|f| std::mem::transmute(f)),
+            refresh_immersive_color_policy_state: ordinal(104).map(|f| std::mem::transmute(f)),
         }
-    });
+    }
+}
+
+fn uxtheme() -> &'static UxTheme {
+    use std::sync::LazyLock;
+    static API: LazyLock<UxTheme> =
+        LazyLock::new(|| load_uxtheme(windows::core::w!("uxtheme.dll")));
     &API
 }
 
@@ -259,6 +259,22 @@ fn read_dword(subkey: &str, value: &str) -> Option<u32> {
     (status.0 == 0).then_some(data)
 }
 
+/// Where Windows keeps the apps light/dark switch, under `HKEY_CURRENT_USER`.
+const PERSONALIZE_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
+
+/// Reads `AppsUseLightTheme` under `subkey`; the light theme when it is missing.
+fn apps_use_light_theme(subkey: &str) -> bool {
+    read_dword(subkey, "AppsUseLightTheme")
+        .map(|value| value != 0)
+        .unwrap_or_else(|| {
+            log_once(
+                &REGISTRY_FALLBACK_LOGGED,
+                "AppsUseLightTheme is unavailable; using the light theme",
+            );
+            true
+        })
+}
+
 /// Returns the cached system theme, reading `AppsUseLightTheme` on first use.
 pub fn theme() -> Theme {
     match PREFERENCE.load(Ordering::Acquire) {
@@ -270,18 +286,7 @@ pub fn theme() -> Theme {
         1 => Theme::Light,
         2 => Theme::Dark,
         _ => {
-            let light = read_dword(
-                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
-                "AppsUseLightTheme",
-            )
-            .map(|value| value != 0)
-            .unwrap_or_else(|| {
-                log_once(
-                    &REGISTRY_FALLBACK_LOGGED,
-                    "AppsUseLightTheme is unavailable; using the light theme",
-                );
-                true
-            });
+            let light = apps_use_light_theme(PERSONALIZE_KEY);
             let known = if light { 1 } else { 2 };
             THEME.store(known, Ordering::Release);
             if light { Theme::Light } else { Theme::Dark }
@@ -360,13 +365,22 @@ pub fn ui_face() -> &'static str {
     static FACE: LazyLock<&'static str> = LazyLock::new(|| {
         const MODERN: &str = "Segoe UI Variable Text";
         const CLASSIC: &str = "Segoe UI";
-        if face_installed(MODERN) {
-            MODERN
-        } else {
-            CLASSIC
-        }
+        pick_face(MODERN, CLASSIC, face_installed)
     });
     *FACE
+}
+
+/// `preferred` when `installed` reports it, otherwise `fallback`.
+pub(crate) fn pick_face(
+    preferred: &'static str,
+    fallback: &'static str,
+    installed: impl Fn(&str) -> bool,
+) -> &'static str {
+    if installed(preferred) {
+        preferred
+    } else {
+        fallback
+    }
 }
 
 /// Creates a DPI-aware Segoe UI Variable font for native dialogs. The owner
@@ -439,11 +453,11 @@ pub fn face_installed(face: &str) -> bool {
         }
         let _ = DeleteObject(HGDIOBJ(font.0));
         let _ = DeleteDC(dc);
-        if length <= 1 {
-            return false;
-        }
-        let selected = String::from_utf16_lossy(&buffer[..(length as usize - 1).min(buffer.len())]);
-        selected.eq_ignore_ascii_case(face)
+        // GetTextFaceW counts the terminator and returns 0 on failure: no name at
+        // all can never be an installed face.
+        let selected =
+            String::from_utf16_lossy(&buffer[..(length.max(1) as usize - 1).min(buffer.len())]);
+        !selected.is_empty() && selected.eq_ignore_ascii_case(face)
     }
 }
 
@@ -491,6 +505,11 @@ fn log_once(flag: &AtomicBool, message: &str) {
 /// True when the OS understands [`DWMWA_SYSTEMBACKDROP_TYPE`] (Windows 11
 /// 22H2+, build 22621). A registry read failure assumes "not supported".
 pub fn backdrop_supported() -> bool {
+    backdrop_supported_for(read_build_number())
+}
+
+/// The Windows build number from the registry, if it can be read.
+fn read_build_number() -> Option<u32> {
     use std::ffi::c_void;
     use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
 
@@ -512,14 +531,18 @@ pub fn backdrop_supported() -> bool {
             Some(&mut size),
         )
     };
-    let build = (status.0 == 0)
+    (status.0 == 0)
         .then(|| {
             let end = data.iter().position(|&c| c == 0).unwrap_or(data.len());
             String::from_utf16(&data[..end])
                 .ok()
                 .and_then(|text| text.trim().parse::<u32>().ok())
         })
-        .flatten();
+        .flatten()
+}
+
+/// The backdrop attribute needs build 22621; an unknown build assumes no support.
+fn backdrop_supported_for(build: Option<u32>) -> bool {
     match build {
         Some(build) => build >= 22621,
         None => {
@@ -611,27 +634,4 @@ unsafe extern "system" fn theme_child(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn color_setting_change_matches_only_the_immersive_color_area() {
-        let wide = |text: &str| -> Vec<u16> { text.encode_utf16().chain(Some(0)).collect() };
-        let area = wide("ImmersiveColorSet");
-        assert!(is_color_setting_change(LPARAM(area.as_ptr() as isize)));
-        for other in [
-            "",
-            "ImmersiveColor",
-            "ImmersiveColorSets",
-            "intl",
-            "WindowMetrics",
-        ] {
-            let text = wide(other);
-            assert!(
-                !is_color_setting_change(LPARAM(text.as_ptr() as isize)),
-                "{other:?}"
-            );
-        }
-        assert!(!is_color_setting_change(LPARAM(0)));
-    }
-}
+pub(crate) mod tests;
