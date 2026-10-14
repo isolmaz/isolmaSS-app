@@ -30,6 +30,8 @@ pub fn record(category: &str, message: &str) {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |time| time.as_secs());
+        // Dialog titles double as categories; the log stays English in every language.
+        let category = crate::i18n::english_of(category);
         let message: String = message
             .chars()
             .take(2048)
