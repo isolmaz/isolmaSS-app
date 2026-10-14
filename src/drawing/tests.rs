@@ -50,8 +50,13 @@ fn stock(object: GET_STOCK_OBJECT_FLAGS) -> HGDIOBJ {
     unsafe { GetStockObject(object) }
 }
 
+/// Whether the handle is still a GDI object. GDI batches deletions per thread, so the
+/// batch is flushed first.
 fn alive(object: HGDIOBJ) -> bool {
-    unsafe { GetObjectType(object) != 0 }
+    unsafe {
+        let _ = GdiFlush();
+        GetObjectType(object) != 0
+    }
 }
 
 fn get_object<T: Default>(object: HGDIOBJ) -> T {

@@ -208,8 +208,15 @@ fn the_wheel_cannot_open_without_a_thickness_button() {
 #[test]
 fn a_work_area_too_small_for_the_panels_shrinks_the_grid_cells_until_all_fit() {
     let viewport = Rect::new(0, 0, 100, 100);
-    let toolbar = toolbar_for(Rect::new(40, 40, 60, 60), viewport, false, true, 96);
+    let toolbar = toolbar_for(Rect::new(40, 40, 60, 60), viewport, false, false, 96);
     assert_eq!(toolbar.tool_bounds, toolbar.action_bounds);
+    // An open wheel is the one element that sits on top of the grid, inside the work area.
+    let with_wheel = toolbar_for(Rect::new(40, 40, 60, 60), viewport, false, true, 96);
+    let wheel = with_wheel.wheel_bounds.expect("the wheel is open");
+    assert!(within(
+        (wheel.left, wheel.top, wheel.right, wheel.bottom),
+        viewport
+    ));
     let count = toolbar.buttons.len();
     for (index, button) in toolbar.buttons.iter().enumerate() {
         assert!(within(
@@ -303,14 +310,15 @@ fn hover_follows_the_pointer_and_reports_only_changes() {
 fn tooltips_open_away_from_a_selection_the_bar_sits_above() {
     let viewport = Rect::new(0, 0, 1100, 700);
     // Room above the bar: the tooltip opens above it, away from the selection.
-    let roomy = toolbar_for(Rect::new(100, 160, 500, 400), viewport, false, false, 96);
+    // (A selection reaching the bottom edge leaves no room below, so the bar goes above.)
+    let roomy = toolbar_for(Rect::new(100, 160, 500, 660), viewport, false, false, 96);
     assert!(roomy.action_bounds.bottom <= roomy.tool_bounds.top + 1);
     let save = rect_of(&roomy, ToolbarItem::Action(ToolbarAction::Save));
     let tip = roomy.tooltip_bounds(save, 150, 30);
     assert!(tip.bottom <= save.top, "{tip:?} vs {save:?}");
 
     // No room above: the second choice, below the bar, is used.
-    let tight = toolbar_for(Rect::new(100, 60, 500, 300), viewport, false, false, 96);
+    let tight = toolbar_for(Rect::new(100, 60, 500, 660), viewport, false, false, 96);
     assert!(tight.action_bounds.bottom <= tight.tool_bounds.top + 1);
     let save = rect_of(&tight, ToolbarItem::Action(ToolbarAction::Save));
     let tip = tight.tooltip_bounds(save, 150, 30);
