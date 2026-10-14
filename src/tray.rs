@@ -26,6 +26,8 @@ const NIN_KEYSELECT_EVENT: u32 = NIN_SELECT + 1;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrayCommand {
     Capture(Instant),
+    /// A capture that opens the editor on the region of the last export.
+    CaptureLastRegion(Instant),
     CancelCapture,
     Settings,
     CheckUpdates,
@@ -239,6 +241,15 @@ pub fn capture_is_stale(triggered: Instant) -> bool {
 }
 
 pub fn queue_capture(triggered: Instant) {
+    queue_capture_command(triggered, TrayCommand::Capture(triggered));
+}
+
+/// Queues a capture that opens the editor on the region of the last export.
+pub fn queue_last_region_capture(triggered: Instant) {
+    queue_capture_command(triggered, TrayCommand::CaptureLastRegion(triggered));
+}
+
+fn queue_capture_command(triggered: Instant, command: TrayCommand) {
     if capture_is_stale(triggered) {
         return;
     }
@@ -248,7 +259,7 @@ pub fn queue_capture(triggered: Instant) {
     {
         return;
     }
-    if !push_pending(TrayCommand::Capture(triggered)) {
+    if !push_pending(command) {
         capture_finished();
     }
     notify_tray_wakeup();
@@ -419,6 +430,7 @@ fn show_context_menu(hwnd: HWND, anchor: Option<POINT>) {
         .unwrap_or(preferences.hotkey.description);
     match menu::show(hwnd, point, crate::save::recent::list(), &active_hotkey) {
         Ok(Some(TrayCommand::Capture(triggered))) => queue_capture(triggered),
+        Ok(Some(TrayCommand::CaptureLastRegion(triggered))) => queue_last_region_capture(triggered),
         Ok(Some(TrayCommand::Settings)) => request_settings(),
         Ok(Some(command)) => queue_command(command),
         Ok(None) => {}
@@ -593,6 +605,19 @@ mod tests {
         }
         assert_eq!(tray_event_action(NIN_SELECT, TRAY_ICON_ID + 1), None);
         assert_eq!(tray_event_action(WM_CLOSE, TRAY_ICON_ID), None);
+    }
+
+    #[test]
+    fn last_region_captures_queue_their_own_command() {
+        take_commands();
+        capture_finished();
+        let triggered = Instant::now();
+        queue_last_region_capture(triggered);
+        assert_eq!(take_commands(), [TrayCommand::CaptureLastRegion(triggered)]);
+        assert!(capture_pending());
+        queue_last_region_capture(Instant::now());
+        assert!(take_commands().is_empty(), "one capture waits at a time");
+        capture_finished();
     }
 
     #[test]

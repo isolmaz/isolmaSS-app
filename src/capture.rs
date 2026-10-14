@@ -1,14 +1,15 @@
 use std::ffi::c_void;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleDC, CreateDIBSection,
-    DIB_RGB_COLORS, DeleteDC, DeleteObject, GdiFlush, GetDC, HBITMAP, HDC, HGDIOBJ, RGBQUAD,
-    ReleaseDC, SRCCOPY, SelectObject,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, EnumDisplayMonitors, GdiFlush, GetDC, GetMonitorInfoW,
+    HBITMAP, HDC, HGDIOBJ, HMONITOR, MONITORINFO, RGBQUAD, ReleaseDC, SRCCOPY, SelectObject,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    GetSystemMetrics, MONITORINFOF_PRIMARY, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
 };
 use windows::core::{Error, Result};
 
@@ -127,6 +128,16 @@ impl Rect {
         x >= self.left && x < self.right && y >= self.top && y < self.bottom
     }
 
+    /// Whether the two rectangles share at least one pixel.
+    pub fn intersects(&self, other: &Self) -> bool {
+        !self.is_empty()
+            && !other.is_empty()
+            && self.left < other.right
+            && other.left < self.right
+            && self.top < other.bottom
+            && other.top < self.bottom
+    }
+
     /// Thickness of the accent frame around a selection at `dpi`.
     pub fn selection_frame_thickness(dpi: u32) -> i32 {
         (2 * dpi / 96).max(2) as i32
@@ -227,6 +238,105 @@ impl Rect {
 
         SelectionHitZone::None
     }
+}
+
+/// One display, in virtual-screen coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Monitor {
+    pub bounds: Rect,
+    pub primary: bool,
+}
+
+/// Smallest width and height, in pixels, of a region the editor accepts as a selection.
+pub const MIN_SELECTION: i32 = 8;
+
+/// The region of the latest export, in screen coordinates. Kept for the life of the
+/// process only: "Capture last region" reopens the editor on it.
+static LAST_REGION: Mutex<Option<Rect>> = Mutex::new(None);
+
+pub fn remember_last_region(region: Rect) {
+    *LAST_REGION.lock().unwrap_or_else(PoisonError::into_inner) = Some(region);
+}
+
+pub fn last_region() -> Option<Rect> {
+    *LAST_REGION.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+pub fn forget_last_region() {
+    *LAST_REGION.lock().unwrap_or_else(PoisonError::into_inner) = None;
+}
+
+/// The monitor Ctrl+A selects: the one under `cursor`, else the one holding `anchor`, else
+/// the primary one (the first when none is flagged). `None` without any monitor.
+fn select_all_monitor(
+    monitors: &[Monitor],
+    cursor: (i32, i32),
+    anchor: Option<(i32, i32)>,
+) -> Option<Rect> {
+    let holding = move |point: (i32, i32)| {
+        monitors
+            .iter()
+            .find(|monitor| monitor.bounds.contains(point.0, point.1))
+    };
+    holding(cursor)
+        .or_else(|| anchor.and_then(holding))
+        .or_else(|| monitors.iter().find(|monitor| monitor.primary))
+        .or_else(|| monitors.first())
+        .map(|monitor| monitor.bounds)
+}
+
+/// `monitors`, or the whole virtual screen as the only monitor when Windows listed none.
+fn monitors_or_whole(monitors: Vec<Monitor>, virtual_screen: Rect) -> Vec<Monitor> {
+    if monitors.is_empty() {
+        vec![Monitor {
+            bounds: virtual_screen,
+            primary: true,
+        }]
+    } else {
+        monitors
+    }
+}
+
+/// `EnumDisplayMonitors` callback: appends each monitor to the `Vec<Monitor>` behind `data`.
+unsafe extern "system" fn collect_monitor(
+    monitor: HMONITOR,
+    _dc: HDC,
+    _bounds: *mut RECT,
+    data: LPARAM,
+) -> BOOL {
+    // SAFETY: `data` is the exclusive `Vec<Monitor>` that `display_monitors` passed in.
+    let found = unsafe { &mut *(data.0 as *mut Vec<Monitor>) };
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+        found.push(Monitor {
+            bounds: Rect::new(
+                info.rcMonitor.left,
+                info.rcMonitor.top,
+                info.rcMonitor.right,
+                info.rcMonitor.bottom,
+            ),
+            primary: info.dwFlags & MONITORINFOF_PRIMARY != 0,
+        });
+    }
+    BOOL(1)
+}
+
+/// Every attached display, in virtual-screen coordinates.
+fn display_monitors(virtual_screen: Rect) -> Vec<Monitor> {
+    let mut monitors: Vec<Monitor> = Vec::new();
+    unsafe {
+        let _ = EnumDisplayMonitors(
+            HDC::default(),
+            None,
+            Some(collect_monitor),
+            LPARAM(std::ptr::from_mut(&mut monitors) as isize),
+        );
+    }
+    monitors_or_whole(monitors, virtual_screen)
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -455,6 +565,8 @@ pub struct CaptureBuffer {
     /// Pre-rendered dimmed 32-bit BGRA pixel data.
     pub dimmed: Vec<u8>,
     pub timings: CaptureTimings,
+    /// The attached displays, in virtual-screen coordinates.
+    pub monitors: Vec<Monitor>,
 }
 
 static BUFFER_POOL: LazyLock<Mutex<Option<Vec<u8>>>> = LazyLock::new(|| Mutex::new(None));
@@ -497,6 +609,28 @@ impl CaptureBuffer {
             original: PixelBuffer(PixelStorage::Owned(vec![0u8; len])),
             dimmed: vec![0u8; len],
             timings: CaptureTimings::default(),
+            monitors: vec![Monitor {
+                bounds: Rect::new(0, 0, width, height),
+                primary: true,
+            }],
+        }
+    }
+
+    /// A capture over `original` BGRA pixels with the dimmed layer left black.
+    #[cfg(test)]
+    pub fn from_original(width: i32, height: i32, original: Vec<u8>) -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            width,
+            height,
+            dimmed: vec![0u8; original.len()],
+            original: PixelBuffer(PixelStorage::Owned(original)),
+            timings: CaptureTimings::default(),
+            monitors: vec![Monitor {
+                bounds: Rect::new(0, 0, width, height),
+                primary: true,
+            }],
         }
     }
 
@@ -508,6 +642,7 @@ impl CaptureBuffer {
         let y = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
         let width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
         let height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
+        let monitors = display_monitors(Rect::new(x, y, x + width, y + height));
 
         // Desktop window DC
         let screen_dc = valid_dc(unsafe { GetDC(HWND::default()) })?;
@@ -515,7 +650,7 @@ impl CaptureBuffer {
             hwnd: HWND::default(),
             hdc: screen_dc,
         };
-        Self::capture_from(total_start, screen_dc, x, y, width, height)
+        Self::capture_from(total_start, screen_dc, x, y, width, height, monitors)
     }
 
     /// Copies the `width` x `height` area of `source` at `(x, y)` into a new capture
@@ -527,6 +662,7 @@ impl CaptureBuffer {
         y: i32,
         width: i32,
         height: i32,
+        monitors: Vec<Monitor>,
     ) -> Result<Self> {
         let section = DibSection::new(source, width, height)?;
         let setup = total_start.elapsed();
@@ -554,7 +690,80 @@ impl CaptureBuffer {
                 dim,
                 total: total_start.elapsed(),
             },
+            monitors,
         })
+    }
+
+    /// `selection`, a rectangle of this capture, in screen coordinates.
+    pub fn screen_rect(&self, selection: Rect) -> Rect {
+        Rect::new(
+            selection.left + self.x,
+            selection.top + self.y,
+            selection.right + self.x,
+            selection.bottom + self.y,
+        )
+    }
+
+    /// `region`, in screen coordinates, as a selection of this capture: clamped to the
+    /// virtual screen. `None` when the region no longer touches a monitor, or when what is
+    /// left of it is smaller than the editor accepts as a selection.
+    pub fn selection_from_screen(&self, region: Rect) -> Option<Rect> {
+        if !self
+            .monitors
+            .iter()
+            .any(|monitor| monitor.bounds.intersects(&region))
+        {
+            return None;
+        }
+        let selection = Rect::new(
+            region.left - self.x,
+            region.top - self.y,
+            region.right - self.x,
+            region.bottom - self.y,
+        )
+        .clamp(self.width, self.height);
+        (selection.width() >= MIN_SELECTION && selection.height() >= MIN_SELECTION)
+            .then_some(selection)
+    }
+
+    /// The selection "Capture last region" opens the editor with, if there is one.
+    pub fn last_region_selection(&self) -> Option<Rect> {
+        last_region().and_then(|region| self.selection_from_screen(region))
+    }
+
+    /// What Ctrl+A selects, in capture coordinates: the monitor under the screen point
+    /// `cursor`, else the one holding the middle of `current`, else the primary one. The
+    /// whole capture when no monitor is known.
+    pub fn monitor_selection(&self, cursor: (i32, i32), current: Option<Rect>) -> Rect {
+        let anchor = current.map(|selection| {
+            let screen = self.screen_rect(selection);
+            (
+                (screen.left + screen.right) / 2,
+                (screen.top + screen.bottom) / 2,
+            )
+        });
+        select_all_monitor(&self.monitors, cursor, anchor).map_or(
+            Rect::new(0, 0, self.width, self.height),
+            |bounds| {
+                Rect::new(
+                    bounds.left - self.x,
+                    bounds.top - self.y,
+                    bounds.right - self.x,
+                    bounds.bottom - self.y,
+                )
+                .clamp(self.width, self.height)
+            },
+        )
+    }
+
+    /// The colour of the original capture at (`x`, `y`) as `#RRGGBB`; `None` outside it.
+    pub fn color_hex_at(&self, x: i32, y: i32) -> Option<String> {
+        if !(0..self.width).contains(&x) || !(0..self.height).contains(&y) {
+            return None;
+        }
+        let offset = (y as usize * self.width as usize + x as usize) * 4;
+        let pixel = self.original.get(offset..offset + 4)?;
+        Some(format!("#{:02X}{:02X}{:02X}", pixel[2], pixel[1], pixel[0]))
     }
 
     /// Pre-renders a dimmed version of the original BGRA pixel buffer.
@@ -1100,6 +1309,7 @@ mod tests {
             original: PixelBuffer(PixelStorage::Owned(vec![200u8; 4 * 3 * 4])),
             dimmed: vec![50u8; 4 * 3 * 4],
             timings: CaptureTimings::default(),
+            monitors: Vec::new(),
         };
         let rect = Rect::new(1, 0, 3, 2);
         let mut target = vec![0u8; 4 * 3 * 4];
@@ -1362,10 +1572,23 @@ mod tests {
         let source = DibSection::new(compatible.0, 8, 6).unwrap();
         paint(&source, |x, y| [x as u8 * 10, y as u8 * 10, 100, 255]);
 
-        let capture =
-            CaptureBuffer::capture_from(Instant::now(), source.memory_dc.0, 2, 1, 4, 3).unwrap();
+        let monitors = vec![Monitor {
+            bounds: Rect::new(2, 1, 6, 4),
+            primary: true,
+        }];
+        let capture = CaptureBuffer::capture_from(
+            Instant::now(),
+            source.memory_dc.0,
+            2,
+            1,
+            4,
+            3,
+            monitors.clone(),
+        )
+        .unwrap();
         assert_eq!((capture.x, capture.y), (2, 1));
         assert_eq!((capture.width, capture.height), (4, 3));
+        assert_eq!(capture.monitors, monitors);
         assert_eq!(capture.original.len(), 4 * 3 * 4);
         assert_eq!(capture.dimmed.len(), 4 * 3 * 4);
         for row in 0..3usize {
@@ -1394,9 +1617,13 @@ mod tests {
         let compatible = compatible_dc();
         let source = DibSection::new(compatible.0, 8, 6).unwrap();
         assert!(
-            CaptureBuffer::capture_from(Instant::now(), source.memory_dc.0, 0, 0, 0, 6).is_err()
+            CaptureBuffer::capture_from(Instant::now(), source.memory_dc.0, 0, 0, 0, 6, Vec::new())
+                .is_err()
         );
-        assert!(CaptureBuffer::capture_from(Instant::now(), bogus_dc(), 0, 0, 4, 3).is_err());
+        assert!(
+            CaptureBuffer::capture_from(Instant::now(), bogus_dc(), 0, 0, 4, 3, Vec::new())
+                .is_err()
+        );
     }
 
     #[test]
@@ -1427,5 +1654,251 @@ mod tests {
                 assert_eq!(dimmed[channel] as u32, source[channel] as u32 * 115 / 255);
             }
         }
+    }
+
+    #[test]
+    fn the_capture_knows_the_attached_monitors_and_exactly_one_is_primary() {
+        let capture = CaptureBuffer::capture_virtual_screen().unwrap();
+        let screen = Rect::new(
+            capture.x,
+            capture.y,
+            capture.x + capture.width,
+            capture.y + capture.height,
+        );
+        assert!(!capture.monitors.is_empty());
+        for monitor in &capture.monitors {
+            assert!(!monitor.bounds.is_empty(), "{monitor:?}");
+            assert_eq!(monitor.bounds.union(&screen), screen, "{monitor:?}");
+        }
+        assert_eq!(
+            capture.monitors.iter().filter(|m| m.primary).count(),
+            1,
+            "{:?}",
+            capture.monitors
+        );
+    }
+
+    #[test]
+    fn without_a_monitor_list_the_whole_virtual_screen_is_the_only_monitor() {
+        let screen = Rect::new(-10, 0, 90, 50);
+        assert_eq!(
+            monitors_or_whole(Vec::new(), screen),
+            [Monitor {
+                bounds: screen,
+                primary: true
+            }]
+        );
+        let listed = vec![Monitor {
+            bounds: Rect::new(0, 0, 10, 10),
+            primary: false,
+        }];
+        assert_eq!(monitors_or_whole(listed.clone(), screen), listed);
+    }
+
+    #[test]
+    fn rectangles_intersect_only_when_they_share_a_pixel() {
+        let a = Rect::new(0, 0, 10, 10);
+        assert!(a.intersects(&Rect::new(9, 9, 20, 20)));
+        assert!(a.intersects(&Rect::new(2, 2, 4, 4)));
+        assert!(!a.intersects(&Rect::new(10, 0, 20, 10)), "touching edges");
+        assert!(!a.intersects(&Rect::new(0, 10, 10, 20)), "touching edges");
+        assert!(!a.intersects(&Rect::new(-5, -5, 0, 0)));
+        assert!(!a.intersects(&Rect::new(5, 5, 5, 8)), "an empty rectangle");
+        assert!(!Rect::default().intersects(&a));
+    }
+
+    /// Two monitors side by side with the left one shorter: the strip below it is inside
+    /// the virtual screen but on no monitor.
+    fn two_monitor_capture() -> CaptureBuffer {
+        let mut capture = CaptureBuffer::dummy(2920, 1080);
+        capture.x = -1000;
+        capture.monitors = vec![
+            Monitor {
+                bounds: Rect::new(-1000, 0, 0, 800),
+                primary: false,
+            },
+            Monitor {
+                bounds: Rect::new(0, 0, 1920, 1080),
+                primary: true,
+            },
+        ];
+        capture
+    }
+
+    #[test]
+    fn select_all_takes_the_monitor_under_the_cursor() {
+        let monitors = two_monitor_capture().monitors.clone();
+        let left = Rect::new(-1000, 0, 0, 800);
+        let primary = Rect::new(0, 0, 1920, 1080);
+        assert_eq!(
+            select_all_monitor(&monitors, (-1, 799), Some((100, 100))),
+            Some(left)
+        );
+        assert_eq!(
+            select_all_monitor(&monitors, (0, 0), Some((-500, 100))),
+            Some(primary)
+        );
+        assert_eq!(
+            select_all_monitor(&monitors, (1919, 1079), None),
+            Some(primary)
+        );
+    }
+
+    #[test]
+    fn select_all_outside_every_monitor_follows_the_selection_then_the_primary() {
+        let monitors = two_monitor_capture().monitors.clone();
+        let left = Rect::new(-1000, 0, 0, 800);
+        let primary = Rect::new(0, 0, 1920, 1080);
+        let gap = (-500, 900);
+        assert_eq!(
+            select_all_monitor(&monitors, gap, Some((-400, 300))),
+            Some(left)
+        );
+        assert_eq!(
+            select_all_monitor(&monitors, gap, Some((300, 300))),
+            Some(primary)
+        );
+        assert_eq!(select_all_monitor(&monitors, gap, None), Some(primary));
+        assert_eq!(
+            select_all_monitor(&monitors, gap, Some((-500, 900))),
+            Some(primary),
+            "a selection centred in the gap does not decide either"
+        );
+        assert_eq!(
+            select_all_monitor(&monitors[..1], (5000, 5000), None),
+            Some(left),
+            "no primary flag: the first monitor"
+        );
+        assert_eq!(select_all_monitor(&[], gap, None), None);
+    }
+
+    #[test]
+    fn the_monitor_selection_is_in_capture_coordinates_and_follows_the_pointer() {
+        let capture = two_monitor_capture();
+        assert_eq!(
+            capture.monitor_selection((-300, 100), None),
+            Rect::new(0, 0, 1000, 800)
+        );
+        assert_eq!(
+            capture.monitor_selection((300, 100), None),
+            Rect::new(1000, 0, 2920, 1080)
+        );
+        // Off every monitor, the middle of the current selection decides: capture
+        // (100, 100)-(300, 300) lies on the left monitor.
+        assert_eq!(
+            capture.monitor_selection((-500, 900), Some(Rect::new(100, 100, 300, 300))),
+            Rect::new(0, 0, 1000, 800)
+        );
+        assert_eq!(
+            capture.monitor_selection((-500, 900), None),
+            Rect::new(1000, 0, 2920, 1080)
+        );
+    }
+
+    #[test]
+    fn the_monitor_selection_without_monitors_is_the_whole_capture() {
+        let mut capture = CaptureBuffer::dummy(640, 480);
+        capture.monitors.clear();
+        assert_eq!(
+            capture.monitor_selection((10, 10), None),
+            Rect::new(0, 0, 640, 480)
+        );
+    }
+
+    #[test]
+    fn selections_and_screen_rectangles_convert_through_the_capture_origin() {
+        let capture = two_monitor_capture();
+        assert_eq!(
+            capture.screen_rect(Rect::new(1000, 50, 1100, 150)),
+            Rect::new(0, 50, 100, 150)
+        );
+        assert_eq!(
+            capture.selection_from_screen(Rect::new(-200, 100, 300, 400)),
+            Some(Rect::new(800, 100, 1300, 400))
+        );
+    }
+
+    #[test]
+    fn a_remembered_region_is_clamped_to_the_virtual_screen() {
+        let capture = two_monitor_capture();
+        // Hangs off the right edge of the virtual screen and above it.
+        assert_eq!(
+            capture.selection_from_screen(Rect::new(1800, -50, 2400, 200)),
+            Some(Rect::new(2800, 0, 2920, 200))
+        );
+        // Spans both monitors and the strip under the left one.
+        assert_eq!(
+            capture.selection_from_screen(Rect::new(-600, 500, 600, 1000)),
+            Some(Rect::new(400, 500, 1600, 1000))
+        );
+    }
+
+    #[test]
+    fn a_remembered_region_that_left_every_monitor_is_dropped() {
+        let capture = two_monitor_capture();
+        for region in [
+            Rect::new(3000, 100, 3300, 400),
+            Rect::new(-900, 850, -600, 1000),
+            Rect::new(-2000, -2000, -1500, -1500),
+        ] {
+            assert_eq!(capture.selection_from_screen(region), None, "{region:?}");
+        }
+        // What is left on the screen must still be big enough for the editor to hold.
+        assert_eq!(
+            capture.selection_from_screen(Rect::new(1913, 100, 2000, 400)),
+            None
+        );
+        assert_eq!(
+            capture.selection_from_screen(Rect::new(1912, 100, 2000, 400)),
+            Some(Rect::new(2912, 100, 2920, 400))
+        );
+    }
+
+    #[test]
+    fn the_last_region_is_kept_in_memory_and_replaced_by_the_next_export() {
+        forget_last_region();
+        assert_eq!(last_region(), None);
+        let capture = two_monitor_capture();
+        assert_eq!(capture.last_region_selection(), None);
+        remember_last_region(Rect::new(10, 20, 110, 220));
+        assert_eq!(last_region(), Some(Rect::new(10, 20, 110, 220)));
+        assert_eq!(
+            capture.last_region_selection(),
+            Some(Rect::new(1010, 20, 1110, 220))
+        );
+        remember_last_region(Rect::new(0, 0, 50, 50));
+        assert_eq!(last_region(), Some(Rect::new(0, 0, 50, 50)));
+        remember_last_region(Rect::new(5000, 0, 5100, 100));
+        assert_eq!(
+            capture.last_region_selection(),
+            None,
+            "a region that left every monitor opens without a selection"
+        );
+        forget_last_region();
+        assert_eq!(last_region(), None);
+    }
+
+    #[test]
+    fn a_pixel_colour_is_read_from_the_original_as_uppercase_rrggbb() {
+        let mut pixels = vec![0u8; 3 * 2 * 4];
+        // Pixel (1, 1) in BGRA order; alpha is not part of the colour.
+        pixels[16..20].copy_from_slice(&[0x10, 0xab, 0xfe, 0x7f]);
+        let capture = CaptureBuffer::from_original(3, 2, pixels);
+        assert_eq!(capture.color_hex_at(1, 1).as_deref(), Some("#FEAB10"));
+        assert_eq!(capture.color_hex_at(0, 0).as_deref(), Some("#000000"));
+        assert_eq!(capture.color_hex_at(2, 1).as_deref(), Some("#000000"));
+    }
+
+    #[test]
+    fn no_colour_is_read_outside_the_capture_or_past_its_pixels() {
+        let capture = CaptureBuffer::from_original(3, 2, vec![255; 3 * 2 * 4]);
+        assert_eq!(capture.color_hex_at(2, 1).as_deref(), Some("#FFFFFF"));
+        for (x, y) in [(-1, 0), (0, -1), (3, 0), (0, 2)] {
+            assert_eq!(capture.color_hex_at(x, y), None, "({x}, {y})");
+        }
+        // A buffer shorter than the size it claims has no pixel there either.
+        let short = CaptureBuffer::from_original(4, 4, vec![255; 8]);
+        assert_eq!(short.color_hex_at(1, 0).as_deref(), Some("#FFFFFF"));
+        assert_eq!(short.color_hex_at(3, 3), None);
     }
 }

@@ -62,6 +62,9 @@ const DEFAULT_FONT_SIZE: i32 = 22;
 const DEFAULT_BLUR_BLOCK: i32 = 12;
 const CARET_TIMER: usize = 1;
 const FADE_TIMER: usize = 2;
+const NOTICE_TIMER: usize = 3;
+/// How long a transient notice stays on screen.
+const NOTICE_MS: u32 = 1500;
 /// Length of the dimming fade-in when the overlay opens.
 const FADE_IN_MS: u32 = 120;
 /// Fade timer period, about one display frame.
@@ -88,7 +91,18 @@ pub fn tool_for_key(vk: u32) -> Option<ToolKind> {
         0x4e => Some(ToolKind::Step),
         0x42 => Some(ToolKind::Blur),
         0x4d => Some(ToolKind::Redact),
+        0x49 => Some(ToolKind::ColorPicker),
         _ => None,
+    }
+}
+
+/// The tool a new editor starts with. The colour picker is a detour the editor never
+/// saves, so a settings file that names it falls back to the default tool.
+fn initial_tool(saved: ToolKind) -> ToolKind {
+    if saved == ToolKind::ColorPicker {
+        ToolKind::default()
+    } else {
+        saved
     }
 }
 
@@ -98,8 +112,8 @@ pub fn is_editor_shortcut(vk: u32, modifiers: u32, editing: bool) -> bool {
         return false;
     }
     if modifiers & MOD_CONTROL.0 != 0 {
-        matches!(vk, 0x43 | 0x53 | 0x55 | 0x5a | 0x59 | 0xbc | 37..=40)
-            || editing && matches!(vk, 0x41 | 0x56 | 0x58 | 8 | 46)
+        matches!(vk, 0x41 | 0x43 | 0x53 | 0x55 | 0x5a | 0x59 | 0xbc | 37..=40)
+            || editing && matches!(vk, 0x56 | 0x58 | 8 | 46)
     } else {
         matches!(vk, 8 | 13 | 27 | 35..=40 | 46) || !editing && tool_for_key(vk).is_some()
     }
@@ -199,6 +213,50 @@ fn place_capture_hud(selection: Rect, viewport: Rect, dpi: u32, obstacles: &[Rec
                 .any(|blocked| rects_intersect(rect, blocked))
         })
         .unwrap_or(inside)
+}
+
+/// Places the transient notice of `size` beside the action bar `bar`, `gap` away from it:
+/// on the side away from `selection` first, centred on the bar, then flush with either end.
+/// The first spot that fits `viewport` and clears every obstacle (the tool rail, the width
+/// wheel, the size readout) wins; otherwise the preferred spot is pushed into the viewport.
+fn place_notice(
+    size: (i32, i32),
+    bar: Rect,
+    selection: Rect,
+    viewport: Rect,
+    obstacles: &[Rect],
+    gap: i32,
+) -> Rect {
+    let (width, height) = size;
+    let max_x = (viewport.right - width).max(viewport.left);
+    let max_y = (viewport.bottom - height).max(viewport.top);
+    let at = |x: i32, y: i32| {
+        let x = x.clamp(viewport.left, max_x);
+        Rect::new(x, y, x + width, y + height)
+    };
+    let below = bar.bottom + gap;
+    let above = bar.top - gap - height;
+    let (first, second) = if bar.top + bar.bottom >= selection.top + selection.bottom {
+        (below, above)
+    } else {
+        (above, below)
+    };
+    let columns = [
+        (bar.left + bar.right - width) / 2,
+        bar.left,
+        bar.right - width,
+    ];
+    [first, second]
+        .into_iter()
+        .flat_map(|y| columns.into_iter().map(move |x| at(x, y)))
+        .find(|spot| {
+            spot.top >= viewport.top
+                && spot.bottom <= viewport.bottom
+                && !obstacles
+                    .iter()
+                    .any(|blocked| rects_intersect(spot, blocked))
+        })
+        .unwrap_or_else(|| at(columns[0], first.clamp(viewport.top, max_y)))
 }
 
 /// Pointer travel, in pixels, that turns a click into a drag (`SM_CXDRAG`/`SM_CYDRAG`).
@@ -588,6 +646,12 @@ pub struct OverlayState {
     /// Size readout placed after the toolbar layout of the latest frame.
     hud_rect: Option<Rect>,
     tools_expanded: bool,
+    /// The tool the colour picker interrupted; `Some` exactly while the picker is active.
+    tool_before_pick: Option<ToolKind>,
+    /// Transient confirmation near the toolbar; `NOTICE_TIMER` clears it.
+    notice: Option<String>,
+    /// Where the latest frame placed the notice.
+    notice_rect: Option<Rect>,
 
     mem_dc: HDC,
     dib: HBITMAP,
@@ -670,12 +734,117 @@ impl OverlayState {
         if self.reselecting {
             cancelled |= self.restore_discarded_session();
         }
+        cancelled |= self.leave_color_picker();
         if cancelled {
             unsafe {
                 let _ = ReleaseCapture();
             }
         }
         cancelled
+    }
+
+    /// Makes `tool` the active tool. The colour picker remembers the tool it interrupted;
+    /// choosing any other tool forgets that. The picker only starts over an active
+    /// selection, so that Esc without a region still closes the editor.
+    fn select_tool(&mut self, tool: ToolKind) {
+        if tool != ToolKind::ColorPicker {
+            self.tool_before_pick = None;
+        } else if self.mode != OverlayMode::SelectionActive {
+            return;
+        } else if self.tool_before_pick.is_none() {
+            self.tool_before_pick = Some(self.active_tool);
+        }
+        self.active_tool = tool;
+        self.selected_id = None;
+        self.persist_editor_preferences();
+    }
+
+    /// Puts back the tool the colour picker interrupted; false when it is not active.
+    fn leave_color_picker(&mut self) -> bool {
+        let Some(tool) = self.tool_before_pick.take() else {
+            return false;
+        };
+        self.active_tool = tool;
+        true
+    }
+
+    /// Copies the colour of the original capture under `pt` as `#RRGGBB`, confirms it in
+    /// a notice and goes back to the tool the picker interrupted. The selection and the
+    /// annotations stay as they are.
+    fn pick_color(&mut self, hwnd: HWND, pt: (i32, i32)) {
+        let Some(hex) = self.capture.color_hex_at(pt.0, pt.1) else {
+            return;
+        };
+        match crate::clipboard::copy_text_to_clipboard(Some(hwnd), &hex) {
+            Ok(()) => {
+                self.leave_color_picker();
+                self.show_notice(hwnd, crate::i18n::tf("Copied {}", &[&hex]));
+            }
+            Err(error) => {
+                Self::show_action_error(hwnd, crate::i18n::t("Copy failed"), &error.to_string())
+            }
+        }
+    }
+
+    /// Shows `text` near the toolbar for `NOTICE_MS`; a newer notice restarts the clock.
+    fn show_notice(&mut self, hwnd: HWND, text: String) {
+        self.notice = Some(text);
+        unsafe {
+            let _ = SetTimer(hwnd, NOTICE_TIMER, NOTICE_MS, None);
+        }
+        self.redraw_chrome(hwnd);
+    }
+
+    fn clear_notice(&mut self, hwnd: HWND) {
+        unsafe {
+            let _ = KillTimer(hwnd, NOTICE_TIMER);
+        }
+        if self.notice.take().is_some() {
+            self.redraw_chrome(hwnd);
+        }
+    }
+
+    /// An export succeeded: the result counts as committed, and its region is what
+    /// "Capture last region" reopens.
+    fn mark_exported(&mut self) {
+        self.committed_result = true;
+        if let Some(selection) = self.committed_selection {
+            crate::capture::remember_last_region(self.capture.screen_rect(selection));
+        }
+    }
+
+    /// Opens with `region` already selected; the first paint draws it.
+    fn preselect(&mut self, region: Rect) {
+        self.mode = OverlayMode::SelectionActive;
+        self.committed_selection = Some(region);
+        self.scene_dirty = true;
+    }
+
+    /// Ctrl+A: selects the whole monitor under `cursor`, a screen point. A region that
+    /// was already selected changes like it does when resized: undoable, and the
+    /// annotations stay where they are.
+    fn select_whole_monitor(&mut self, hwnd: HWND, cursor: (i32, i32)) {
+        if self.mode == OverlayMode::DraggingSelection
+            || self.has_active_gesture()
+            || self.pending_reselect.is_some()
+        {
+            return;
+        }
+        let before = self
+            .committed_selection
+            .filter(|_| self.mode == OverlayMode::SelectionActive);
+        let target = self.capture.monitor_selection(cursor, before);
+        self.commit_selection(hwnd, target);
+        if let Some(before) = before
+            && let Some(after) = self.committed_selection
+            && before != after
+        {
+            self.history.record(EditCommand::Selection {
+                before,
+                after,
+                shift: (0, 0),
+            });
+        }
     }
 
     /// Drops the selection and every annotation. An active selection is kept as one
@@ -690,6 +859,7 @@ impl OverlayState {
                 history: std::mem::take(&mut self.history),
             });
         }
+        self.leave_color_picker();
         self.mode = OverlayMode::Hovering;
         self.drag_start = None;
         self.hover_snap_rect = None;
@@ -787,6 +957,9 @@ impl OverlayState {
             toolbar: None,
             hud_rect: None,
             tools_expanded: false,
+            tool_before_pick: None,
+            notice: None,
+            notice_rect: None,
             mem_dc: HDC::default(),
             dib: HBITMAP::default(),
             old_bmp: HGDIOBJ::default(),
@@ -956,9 +1129,7 @@ impl OverlayState {
 
         match item {
             ToolbarItem::Tool(k) => {
-                self.active_tool = k;
-                self.persist_editor_preferences();
-                self.selected_id = None;
+                self.select_tool(k);
                 self.redraw(hwnd);
             }
             ToolbarItem::MoreTools => {
@@ -1270,6 +1441,16 @@ impl OverlayState {
             }
         }
 
+        // Select the whole monitor under the pointer: Ctrl+A. While a text box is open the
+        // key selects its text instead (handled above).
+        if ctrl_down && vk == 'A' as usize {
+            let mut point = windows::Win32::Foundation::POINT::default();
+            let cursor = unsafe { GetCursorPos(&mut point) }
+                .map_or((i32::MIN, i32::MIN), |()| (point.x, point.y));
+            self.select_whole_monitor(hwnd, cursor);
+            return LRESULT(0);
+        }
+
         // 3. Save shortcut: Ctrl+S
         if self.mode == OverlayMode::SelectionActive && ctrl_down && vk == 'S' as usize {
             if mods as u32 & windows::Win32::UI::Input::KeyboardAndMouse::MOD_SHIFT.0 != 0 {
@@ -1369,9 +1550,7 @@ impl OverlayState {
         }
 
         if !ctrl_down && let Some(tool) = tool_for_key(vk as u32) {
-            self.active_tool = tool;
-            self.selected_id = None;
-            self.persist_editor_preferences();
+            self.select_tool(tool);
             self.redraw(hwnd);
         }
         if (37..=40).contains(&vk) && self.mode == OverlayMode::SelectionActive {
@@ -1509,9 +1688,7 @@ impl OverlayState {
     ) {
         match choice {
             Ok(Some(ToolbarItem::Tool(tool))) => {
-                self.active_tool = tool;
-                self.selected_id = None;
-                self.persist_editor_preferences();
+                self.select_tool(tool);
                 self.redraw(hwnd);
             }
             Ok(Some(item)) => {
@@ -1642,7 +1819,7 @@ impl OverlayState {
             self.composite_scene();
         }
         if result.is_ok() {
-            self.committed_result = true;
+            self.mark_exported();
         }
         result
     }
@@ -1672,7 +1849,7 @@ impl OverlayState {
             self.composite_scene();
         }
         if result.is_ok() {
-            self.committed_result = true;
+            self.mark_exported();
         }
         result
     }
@@ -1734,7 +1911,7 @@ impl OverlayState {
 
     /// The upload continues in its toast: the editor counts as committed and closes.
     fn finish_upload(&mut self, hwnd: HWND) -> std::result::Result<(), String> {
-        self.committed_result = true;
+        self.mark_exported();
         unsafe {
             windows::Win32::UI::WindowsAndMessaging::PostMessageW(
                 hwnd,
@@ -1750,6 +1927,9 @@ impl OverlayState {
     fn editor_cursor(&self, pt: (i32, i32)) -> PCWSTR {
         if self.mode != OverlayMode::SelectionActive {
             return IDC_CROSS;
+        }
+        if self.active_tool == ToolKind::ColorPicker {
+            return IDC_ARROW;
         }
         if self.text_edit.is_some() {
             return IDC_IBEAM;
@@ -1874,7 +2054,8 @@ impl OverlayState {
     fn persist_editor_preferences(&mut self) {
         self.settings.default_color = self.active_color;
         self.settings.default_thickness = self.active_thickness;
-        self.settings.last_tool = self.active_tool;
+        // The picker is a detour: the tool it interrupted is what the next editor opens with.
+        self.settings.last_tool = self.tool_before_pick.unwrap_or(self.active_tool);
         self.preferences_dirty = true;
     }
 }
@@ -2264,5 +2445,68 @@ mod tests {
         assert!(steps.windows(2).all(|pair| pair[0] <= pair[1]));
         // Ease-out: more than half of the opacity is reached by the midpoint.
         assert!(fade_alpha(FADE_IN_MS / 2) > 128);
+    }
+
+    #[test]
+    fn the_notice_goes_on_the_side_of_the_bar_away_from_the_selection() {
+        let selection = Rect::new(400, 300, 1000, 700);
+        let below_selection = Rect::new(348, 710, 632, 752);
+        assert_eq!(
+            place_notice((140, 30), below_selection, selection, VIEWPORT, &[], 8),
+            Rect::new(420, 760, 560, 790)
+        );
+        let above_selection = Rect::new(348, 100, 632, 142);
+        assert_eq!(
+            place_notice((140, 30), above_selection, selection, VIEWPORT, &[], 8),
+            Rect::new(420, 62, 560, 92)
+        );
+    }
+
+    #[test]
+    fn the_notice_slides_along_or_flips_to_clear_the_obstacles() {
+        let selection = Rect::new(400, 300, 1000, 700);
+        let bar = Rect::new(348, 710, 632, 752);
+        // Blocked below at every column: it goes above the bar.
+        let wide = Rect::new(340, 755, 640, 800);
+        assert_eq!(
+            place_notice((140, 30), bar, selection, VIEWPORT, &[wide], 8),
+            Rect::new(420, 672, 560, 702)
+        );
+        // Blocked only in the middle: flush with the left end of the bar.
+        let middle = Rect::new(500, 755, 560, 800);
+        assert_eq!(
+            place_notice((140, 30), bar, selection, VIEWPORT, &[middle], 8),
+            Rect::new(348, 760, 488, 790)
+        );
+    }
+
+    #[test]
+    fn the_notice_stays_inside_the_work_area() {
+        let selection = Rect::new(0, 0, 1920, 1040);
+        // No room below the bar: above it, left of the tool rail.
+        let bar = Rect::new(1500, 978, 1780, 1020);
+        let rail = Rect::new(1700, 900, 1780, 978);
+        assert_eq!(
+            place_notice((140, 30), bar, selection, VIEWPORT, &[rail], 8),
+            Rect::new(1500, 940, 1640, 970)
+        );
+        // Centred on a bar at the right edge, it is pushed back into the viewport.
+        let edge_bar = Rect::new(1850, 710, 1910, 752);
+        assert_eq!(
+            place_notice(
+                (140, 30),
+                edge_bar,
+                Rect::new(400, 300, 1000, 700),
+                VIEWPORT,
+                &[],
+                8
+            ),
+            Rect::new(1780, 760, 1920, 790)
+        );
+        // Nowhere is free: the preferred spot is squeezed into the viewport.
+        assert_eq!(
+            place_notice((140, 30), bar, selection, VIEWPORT, &[VIEWPORT], 8),
+            Rect::new(1570, 1010, 1710, 1040)
+        );
     }
 }
