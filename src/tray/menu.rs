@@ -2,9 +2,7 @@
 use super::TrayCommand;
 use std::path::PathBuf;
 use std::time::Instant;
-use windows::Win32::Foundation::{
-    GetLastError, HWND, LPARAM, POINT, SetLastError, WIN32_ERROR, WPARAM,
-};
+use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, HMENU, MENU_ITEM_FLAGS, MF_GRAYED, MF_SEPARATOR,
     MF_STRING, PostMessageW, SetForegroundWindow, SetMenuDefaultItem, TPM_BOTTOMALIGN,
@@ -95,8 +93,10 @@ pub(super) fn show(
 
     unsafe {
         let _ = SetForegroundWindow(owner);
-        SetLastError(WIN32_ERROR(0));
     }
+    // 0 means the menu was dismissed. The last-error value is not a failure signal here: the
+    // modal menu loop runs system code that can leave an unrelated code behind (for example
+    // ERROR_MOD_NOT_FOUND), which used to surface as a false "Could not open the tray menu".
     let selected = unsafe {
         TrackPopupMenuEx(
             menu.0,
@@ -108,16 +108,8 @@ pub(super) fn show(
         )
     }
     .0 as usize;
-    let popup_error = if selected == 0 && unsafe { GetLastError() }.0 != 0 {
-        Some(windows::core::Error::from_win32())
-    } else {
-        None
-    };
     // The Win32 tray-menu contract needs one message after dismissing the popup.
     unsafe { PostMessageW(owner, WM_NULL, WPARAM(0), LPARAM(0))? };
-    if let Some(error) = popup_error {
-        return Err(error);
-    }
     Ok(match selected {
         CAPTURE => Some(TrayCommand::Capture(Instant::now())),
         SETTINGS => Some(TrayCommand::Settings),

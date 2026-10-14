@@ -922,6 +922,75 @@ fn api_error(status: u32, bytes: &[u8]) -> String {
     }
 }
 
+/// The `<subdomain>` of a `https://<worker>.<subdomain>.workers.dev` origin.
+fn workers_dev_subdomain(origin: &str) -> Option<&str> {
+    let host = origin
+        .strip_prefix("https://")?
+        .strip_suffix(".workers.dev")?;
+    let (_, subdomain) = host.split_once('.')?;
+    (!subdomain.is_empty() && !subdomain.contains('.')).then_some(subdomain)
+}
+
+/// The authorized account that holds this computer's Worker. A workers.dev address names its
+/// account through the subdomain, which also works when the token may not read scripts; any
+/// other address is matched by the script name.
+fn find_worker_account(
+    token: &str,
+    accounts: &[Account],
+    worker: &str,
+    origin: &str,
+    cancel: &AtomicBool,
+) -> Result<Account, String> {
+    let expected = workers_dev_subdomain(origin);
+    let mut failure = None;
+    for account in accounts {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(crate::i18n::t("The Worker update was cancelled.").into());
+        }
+        let suffix = match expected {
+            Some(_) => "subdomain".to_string(),
+            None => format!("scripts/{worker}"),
+        };
+        let (status, bytes) = cloudflare_setup::control_request(
+            "api.cloudflare.com",
+            &account_path(account, &suffix),
+            "GET",
+            Some(token),
+            None,
+            RequestBody::Bytes(&[]),
+        )?;
+        let holds = status == 200
+            && match expected {
+                Some(expected) => serde_json::from_slice::<Value>(&bytes)
+                    .is_ok_and(|value| value["result"]["subdomain"] == expected),
+                None => true,
+            };
+        if holds {
+            return Ok(account.clone());
+        }
+        if !matches!(status, 200 | 401 | 403 | 404) {
+            failure = Some(api_error(status, &bytes));
+        }
+    }
+    if let Some(error) = failure {
+        return Err(crate::i18n::tf(
+            "Could not look up this computer's Worker on Cloudflare ({}).",
+            &[&error],
+        ));
+    }
+    let names: Vec<&str> = accounts
+        .iter()
+        .map(|account| account.name.as_str())
+        .collect();
+    Err(crate::i18n::tf(
+        "This computer's Worker ({}) is not in the accounts allowed on the Cloudflare page ({}). Press “Update Worker” again and allow the account that owns it.",
+        &[
+            &origin.strip_prefix("https://").unwrap_or(origin),
+            &names.join(", "),
+        ],
+    ))
+}
+
 /// Replaces the code of this computer's existing Worker with the bundled
 /// version, keeping its name, address, keys, images and settings. The account
 /// is the stored one, or the authorized account that holds a script of that name.
@@ -949,29 +1018,7 @@ pub fn update_worker(
         .and_then(|id| accounts.iter().find(|account| account.id == id));
     let account = match stored {
         Some(account) => account.clone(),
-        None => {
-            let mut found = None;
-            for account in accounts {
-                if cancel.load(Ordering::Relaxed) {
-                    return Err(crate::i18n::t("The Worker update was cancelled.").into());
-                }
-                let (status, _) = cloudflare_setup::control_request(
-                    "api.cloudflare.com",
-                    &account_path(account, &format!("scripts/{worker}")),
-                    "GET",
-                    Some(token),
-                    None,
-                    RequestBody::Bytes(&[]),
-                )?;
-                if status == 200 {
-                    found = Some(account.clone());
-                    break;
-                }
-            }
-            found.ok_or(
-                crate::i18n::t("This computer's Worker was not found in the authorized accounts. Pick the account that holds the Worker on the Cloudflare consent page."),
-            )?
-        }
+        None => find_worker_account(token, accounts, &worker, &credentials.origin, cancel)?,
     };
     if cancel.load(Ordering::Relaxed) {
         return Err(crate::i18n::t("The Worker update was cancelled.").into());
@@ -1010,6 +1057,23 @@ mod tests {
     #[test]
     fn bundled_worker_reports_the_expected_version() {
         assert!(WORKER_SOURCE.contains(&format!("const WORKER_VERSION = {WORKER_VERSION};")));
+    }
+
+    #[test]
+    fn the_worker_account_is_named_by_the_workers_dev_subdomain() {
+        assert_eq!(
+            workers_dev_subdomain("https://isolmass-share-abc.isolmaz-ai.workers.dev"),
+            Some("isolmaz-ai")
+        );
+        for origin in [
+            "https://share.example.com",
+            "http://isolmass-share-abc.isolmaz-ai.workers.dev",
+            "https://isolmaz-ai.workers.dev",
+            "https://a.b.c.workers.dev",
+            "https://isolmass-share-abc..workers.dev",
+        ] {
+            assert_eq!(workers_dev_subdomain(origin), None, "{origin}");
+        }
     }
 
     #[test]

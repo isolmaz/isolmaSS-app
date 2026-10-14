@@ -1323,6 +1323,34 @@ fn the_sweep_removes_only_stale_files_and_survives_what_it_cannot_delete() {
 }
 
 #[test]
+fn only_unexpected_cleanup_failures_are_logged() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let scratch = Scratch::new("cleanup-errors");
+    // The installer that started this version still has its own file open.
+    let busy = scratch.join("isolmass-setup-0.7.0.exe");
+    std::fs::write(&busy, b"x").expect("write file");
+    let holder = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&busy)
+        .expect("open without sharing");
+    let in_use = std::fs::remove_file(&busy).expect_err("the file is in use");
+    assert!(!cleanup_failure_matters(&in_use));
+    remove_stale_files_in(&scratch.join(""), [0, 7, 0]);
+    assert!(busy.exists(), "a file in use stays for a later start");
+    drop(holder);
+    remove_stale_files_in(&scratch.join(""), [0, 7, 0]);
+    assert!(!busy.exists());
+
+    let gone = std::fs::remove_file(&busy).expect_err("already removed");
+    assert!(!cleanup_failure_matters(&gone));
+    let folder = scratch.join("isolmass-setup-0.1.0.exe");
+    std::fs::create_dir(&folder).expect("create folder");
+    let not_a_file = std::fs::remove_file(&folder).expect_err("a folder is not a file");
+    assert!(cleanup_failure_matters(&not_a_file));
+}
+
+#[test]
 fn the_sweep_tolerates_a_missing_folder_and_a_path_that_is_not_a_folder() {
     let scratch = Scratch::new("sweep-missing");
     let missing = scratch.join("never-created");
