@@ -23,6 +23,8 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
 
 const SETTINGS_CLASS_NAME: PCWSTR = w!("isolmaSS_SettingsClass");
+/// Posted when another language is chosen: the window is rebuilt in it.
+const WM_LANGUAGE_CHANGED: u32 = WM_APP + 130;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UpdateStatus {
@@ -134,6 +136,97 @@ fn tab_names() -> [&'static str; TAB_COUNT] {
         crate::i18n::t("Sharing"),
         crate::i18n::t("Updates"),
     ]
+}
+
+/// Names of the colour swatches, in palette order.
+fn color_names() -> [&'static str; PALETTE.len()] {
+    [
+        crate::i18n::t("Red"),
+        crate::i18n::t("Orange"),
+        crate::i18n::t("Yellow"),
+        crate::i18n::t("Green"),
+        crate::i18n::t("Blue"),
+        crate::i18n::t("Purple"),
+        crate::i18n::t("Pink"),
+        crate::i18n::t("Teal"),
+        crate::i18n::t("White"),
+        crate::i18n::t("Black"),
+        crate::i18n::t("Light red"),
+        crate::i18n::t("Light orange"),
+        crate::i18n::t("Light yellow"),
+        crate::i18n::t("Light green"),
+        crate::i18n::t("Light blue"),
+        crate::i18n::t("Light purple"),
+        crate::i18n::t("Indigo"),
+        crate::i18n::t("Olive"),
+        crate::i18n::t("Grey"),
+        crate::i18n::t("Dark grey"),
+    ]
+}
+
+/// The controls whose text is fixed apart from the language; [`fixed_text`] gives it.
+/// The tabs, swatches and the controls that show values are set elsewhere.
+const FIXED_TEXT_IDS: [i32; 21] = [
+    ID_LABEL_HOTKEY,
+    ID_LABEL_DELAY,
+    ID_LABEL_FOLDER,
+    ID_LABEL_FORMAT,
+    ID_LABEL_QUALITY,
+    ID_LABEL_COLOR,
+    ID_LABEL_THICKNESS,
+    ID_LABEL_THEME,
+    ID_LABEL_LANGUAGE,
+    ID_BROWSE,
+    ID_COLOR_CUSTOM,
+    ID_WINDOW_SNAP,
+    ID_CLOSE_AFTER_ACTION,
+    ID_START_WITH_WINDOWS,
+    ID_NOTIFY_AFTER_SAVE,
+    ID_CHECK_UPDATES,
+    ID_CHECK_UPDATE,
+    ID_SAVE,
+    ID_CANCEL,
+    ID_LANGUAGE_NOTE,
+    ID_CLOUD_NOTE,
+];
+
+/// The text of a control from [`FIXED_TEXT_IDS`] in the current language.
+fn fixed_text(id: i32) -> &'static str {
+    match id {
+        ID_LABEL_HOTKEY => crate::i18n::t("Shortcut"),
+        ID_LABEL_DELAY => crate::i18n::t("Delay"),
+        ID_LABEL_FOLDER => crate::i18n::t("Folder"),
+        ID_LABEL_FORMAT => crate::i18n::t("Format"),
+        ID_LABEL_QUALITY => crate::i18n::t("JPEG quality"),
+        ID_LABEL_COLOR => crate::i18n::t("Default color"),
+        ID_LABEL_THICKNESS => crate::i18n::t("Line width"),
+        ID_LABEL_THEME => crate::i18n::t("Theme"),
+        ID_LABEL_LANGUAGE => crate::i18n::t("Language"),
+        ID_BROWSE => crate::i18n::t("Browse…"),
+        ID_COLOR_CUSTOM => crate::i18n::t("Custom…"),
+        ID_WINDOW_SNAP => crate::i18n::t("Snap to windows"),
+        ID_CLOSE_AFTER_ACTION => crate::i18n::t("Close after an action"),
+        ID_START_WITH_WINDOWS => crate::i18n::t("Start with Windows"),
+        ID_NOTIFY_AFTER_SAVE => crate::i18n::t("Notify after saving"),
+        ID_CHECK_UPDATES => crate::i18n::t("Check for updates automatically"),
+        ID_CHECK_UPDATE => crate::i18n::t("Check now"),
+        ID_SAVE => crate::i18n::t("Save"),
+        ID_CANCEL => crate::i18n::t("Cancel"),
+        ID_LANGUAGE_NOTE => {
+            crate::i18n::t("Applies at once. Cancel restores the previous language.")
+        }
+        ID_CLOUD_NOTE => crate::i18n::t(
+            "Upload sends the screenshot to the Worker in your own Cloudflare account and copies the link. Images go to no other server.",
+        ),
+        _ => "",
+    }
+}
+
+/// What the update status line says until a check reports something.
+fn idle_update_text() -> &'static str {
+    crate::i18n::t(
+        "Only releases signed by the publisher are installed. Installing restarts the app.",
+    )
 }
 
 /// Every colour is one click away (BGRA). The first six and the last two of
@@ -964,7 +1057,7 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
             BS_AUTORADIOBUTTON | BS_PUSHLIKE | if index == 0 { WS_GROUP.0 as i32 } else { 0 },
         )?;
     }
-    label(ID_LABEL_HOTKEY, crate::i18n::t("Shortcut"))?;
+    label(ID_LABEL_HOTKEY, fixed_text(ID_LABEL_HOTKEY))?;
     // BS_NOTIFY reports BN_KILLFOCUS, which ends a recording in progress.
     create_button(
         hwnd,
@@ -973,10 +1066,10 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
         BS_PUSHBUTTON | BS_NOTIFY | WS_GROUP.0 as i32,
     )?;
     create_note(hwnd, ID_HOTKEY_NOTE, false, false)?;
-    label(ID_LABEL_DELAY, crate::i18n::t("Delay"))?;
+    label(ID_LABEL_DELAY, fixed_text(ID_LABEL_DELAY))?;
     create_combo(hwnd, ID_DELAY)?;
 
-    label(ID_LABEL_FOLDER, crate::i18n::t("Folder"))?;
+    label(ID_LABEL_FOLDER, fixed_text(ID_LABEL_FOLDER))?;
     // SS_PATHELLIPSIS keeps the drive and file name of long paths visible.
     create_control(
         hwnd,
@@ -985,39 +1078,15 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
         WINDOW_STYLE(0x0000_8000),
         ID_FOLDER_LABEL,
     )?;
-    create_button(hwnd, ID_BROWSE, crate::i18n::t("Browse…"), BS_PUSHBUTTON)?;
-    label(ID_LABEL_FORMAT, crate::i18n::t("Format"))?;
+    create_button(hwnd, ID_BROWSE, fixed_text(ID_BROWSE), BS_PUSHBUTTON)?;
+    label(ID_LABEL_FORMAT, fixed_text(ID_LABEL_FORMAT))?;
     create_combo(hwnd, ID_FORMAT)?;
-    label(ID_LABEL_QUALITY, crate::i18n::t("JPEG quality"))?;
+    label(ID_LABEL_QUALITY, fixed_text(ID_LABEL_QUALITY))?;
     create_combo(hwnd, ID_QUALITY)?;
 
-    label(ID_LABEL_COLOR, crate::i18n::t("Default color"))?;
+    label(ID_LABEL_COLOR, fixed_text(ID_LABEL_COLOR))?;
     // The swatches render as circles; the window text stays for screen readers.
-    for (index, name) in [
-        crate::i18n::t("Red"),
-        crate::i18n::t("Orange"),
-        crate::i18n::t("Yellow"),
-        crate::i18n::t("Green"),
-        crate::i18n::t("Blue"),
-        crate::i18n::t("Purple"),
-        crate::i18n::t("Pink"),
-        crate::i18n::t("Teal"),
-        crate::i18n::t("White"),
-        crate::i18n::t("Black"),
-        crate::i18n::t("Light red"),
-        crate::i18n::t("Light orange"),
-        crate::i18n::t("Light yellow"),
-        crate::i18n::t("Light green"),
-        crate::i18n::t("Light blue"),
-        crate::i18n::t("Light purple"),
-        crate::i18n::t("Indigo"),
-        crate::i18n::t("Olive"),
-        crate::i18n::t("Grey"),
-        crate::i18n::t("Dark grey"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    for (index, name) in color_names().into_iter().enumerate() {
         create_button(
             hwnd,
             ID_COLOR_FIRST + index as i32,
@@ -1028,10 +1097,10 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
     create_button(
         hwnd,
         ID_COLOR_CUSTOM,
-        crate::i18n::t("Custom…"),
+        fixed_text(ID_COLOR_CUSTOM),
         BS_PUSHBUTTON | WS_GROUP.0 as i32,
     )?;
-    label(ID_LABEL_THICKNESS, crate::i18n::t("Line width"))?;
+    label(ID_LABEL_THICKNESS, fixed_text(ID_LABEL_THICKNESS))?;
     create_control(
         hwnd,
         w!("msctls_trackbar32"),
@@ -1051,63 +1120,49 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
     create_button(
         hwnd,
         ID_WINDOW_SNAP,
-        crate::i18n::t("Snap to windows"),
+        fixed_text(ID_WINDOW_SNAP),
         BS_AUTOCHECKBOX,
     )?;
     create_button(
         hwnd,
         ID_CLOSE_AFTER_ACTION,
-        crate::i18n::t("Close after an action"),
+        fixed_text(ID_CLOSE_AFTER_ACTION),
         BS_AUTOCHECKBOX,
     )?;
 
-    label(ID_LABEL_THEME, crate::i18n::t("Theme"))?;
+    label(ID_LABEL_THEME, fixed_text(ID_LABEL_THEME))?;
     create_combo(hwnd, ID_THEME)?;
-    label(ID_LABEL_LANGUAGE, crate::i18n::t("Language"))?;
+    label(ID_LABEL_LANGUAGE, fixed_text(ID_LABEL_LANGUAGE))?;
     create_combo(hwnd, ID_LANGUAGE)?;
     create_note(hwnd, ID_LANGUAGE_NOTE, false, false)?;
-    set_text(
-        hwnd,
-        ID_LANGUAGE_NOTE,
-        crate::i18n::t("Applies after you save and reopen Settings."),
-    );
+    set_text(hwnd, ID_LANGUAGE_NOTE, fixed_text(ID_LANGUAGE_NOTE));
     create_button(
         hwnd,
         ID_START_WITH_WINDOWS,
-        crate::i18n::t("Start with Windows"),
+        fixed_text(ID_START_WITH_WINDOWS),
         BS_AUTOCHECKBOX,
     )?;
     create_button(
         hwnd,
         ID_NOTIFY_AFTER_SAVE,
-        crate::i18n::t("Notify after saving"),
+        fixed_text(ID_NOTIFY_AFTER_SAVE),
         BS_AUTOCHECKBOX,
     )?;
     create_button(
         hwnd,
         ID_CHECK_UPDATES,
-        crate::i18n::t("Check for updates automatically"),
+        fixed_text(ID_CHECK_UPDATES),
         BS_AUTOCHECKBOX,
     )?;
     label(ID_VERSION, concat!("isolmaSS ", env!("CARGO_PKG_VERSION")))?;
     create_button(
         hwnd,
         ID_CHECK_UPDATE,
-        crate::i18n::t("Check now"),
+        fixed_text(ID_CHECK_UPDATE),
         BS_PUSHBUTTON,
     )?;
-    label(
-        ID_UPDATE_STATUS,
-        crate::i18n::t(
-            "Only releases signed by the publisher are installed. Installing restarts the app.",
-        ),
-    )?;
-    label(
-        ID_CLOUD_NOTE,
-        crate::i18n::t(
-            "Upload sends the screenshot to the Worker in your own Cloudflare account and copies the link. Images go to no other server.",
-        ),
-    )?;
+    label(ID_UPDATE_STATUS, idle_update_text())?;
+    label(ID_CLOUD_NOTE, fixed_text(ID_CLOUD_NOTE))?;
     // SS_ENDELLIPSIS keeps a long Worker address on one line.
     create_control(
         hwnd,
@@ -1132,10 +1187,10 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
     create_button(
         hwnd,
         ID_SAVE,
-        crate::i18n::t("Save"),
+        fixed_text(ID_SAVE),
         BS_DEFPUSHBUTTON | WS_GROUP.0 as i32,
     )?;
-    create_button(hwnd, ID_CANCEL, crate::i18n::t("Cancel"), BS_PUSHBUTTON)?;
+    create_button(hwnd, ID_CANCEL, fixed_text(ID_CANCEL), BS_PUSHBUTTON)?;
 
     if let Some(slider) = control(hwnd, ID_THICKNESS_SLIDER) {
         unsafe {
@@ -1297,8 +1352,8 @@ fn refresh_cloud(hwnd: HWND, settings: &Settings) {
     }
 }
 
-fn initialize_control_values(hwnd: HWND, settings: &Settings) {
-    refresh_hotkey(hwnd, settings);
+/// Fills the drop-down lists in the current language, each with its setting selected.
+fn fill_choice_combos(hwnd: HWND, settings: &Settings) {
     let mut delays: Vec<(i64, String)> = delay_choices()
         .iter()
         .map(|(value, text)| (*value as i64, (*text).to_owned()))
@@ -1359,6 +1414,11 @@ fn initialize_control_values(hwnd: HWND, settings: &Settings) {
             LanguagePreference::Turkish => 2,
         },
     );
+}
+
+fn initialize_control_values(hwnd: HWND, settings: &Settings) {
+    refresh_hotkey(hwnd, settings);
+    fill_choice_combos(hwnd, settings);
     refresh_colors(hwnd, settings);
     if let Some(slider) = control(hwnd, ID_THICKNESS_SLIDER) {
         unsafe {
@@ -1486,16 +1546,99 @@ fn apply_selection(hwnd: HWND, state: &mut SettingsWindowState, id: i32) {
             };
             apply_theme(hwnd, state);
         }
-        // Takes effect for windows opened after Save.
         ID_LANGUAGE => {
             state.settings.language = match value {
                 1 => LanguagePreference::English,
                 2 => LanguagePreference::Turkish,
                 _ => LanguagePreference::System,
             };
+            // Handled once the drop-down has closed, as it rebuilds the lists.
+            unsafe {
+                let _ = PostMessageW(hwnd, WM_LANGUAGE_CHANGED, WPARAM(0), LPARAM(0));
+            }
         }
         _ => {}
     }
+}
+
+/// The text of a control as it is shown now.
+fn control_text(hwnd: HWND, id: i32) -> String {
+    let Some(child) = control(hwnd, id) else {
+        return String::new();
+    };
+    let length = unsafe { GetWindowTextLengthW(child) }.max(0) as usize;
+    let mut text = vec![0u16; length + 1];
+    let copied = unsafe { GetWindowTextW(child, &mut text) }.max(0) as usize;
+    String::from_utf16_lossy(&text[..copied])
+}
+
+/// Switches the interface to the language chosen in the window: this window and,
+/// through the shared language setting, the tray menu and icon tooltip. Cancel or
+/// closing the window restores the saved language.
+fn apply_language(hwnd: HWND, state: &mut SettingsWindowState) {
+    // Whether the update line still shows its idle text, in the old language.
+    let idle_update = control_text(hwnd, ID_UPDATE_STATUS) == idle_update_text();
+    crate::i18n::set_preference(state.settings.language);
+    retranslate(hwnd, state, idle_update);
+    crate::tray::apply_tooltip();
+}
+
+/// Sets every text of the window in the current language and fits the window to
+/// the new text lengths. The tab, the values and the settings stay as they are.
+fn retranslate(hwnd: HWND, state: &SettingsWindowState, idle_update: bool) {
+    let title = wide_string(crate::i18n::t("isolmaSS Settings"));
+    unsafe {
+        let _ = SetWindowTextW(hwnd, PCWSTR(title.as_ptr()));
+    }
+    for id in FIXED_TEXT_IDS {
+        set_text(hwnd, id, fixed_text(id));
+    }
+    for (index, name) in tab_names().into_iter().enumerate() {
+        set_text(hwnd, ID_TAB_FIRST + index as i32, name);
+    }
+    for (index, name) in color_names().into_iter().enumerate() {
+        set_text(hwnd, ID_COLOR_FIRST + index as i32, name);
+    }
+    if idle_update {
+        set_text(hwnd, ID_UPDATE_STATUS, idle_update_text());
+    }
+    if !control_text(hwnd, ID_THICKNESS_NOTE).is_empty() {
+        set_text(hwnd, ID_THICKNESS_NOTE, thickness_problem());
+    }
+    // A rejection note names the key the user pressed: it is not kept.
+    clear_note(hwnd, ID_HOTKEY_NOTE);
+    if !state.recording_hotkey {
+        refresh_hotkey(hwnd, &state.settings);
+    }
+    refresh_cloud(hwnd, &state.settings);
+    fill_choice_combos(hwnd, &state.settings);
+    let height = layout(hwnd, state.dpi);
+    let (width, height) = window_size(hwnd, state.dpi, height);
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            width,
+            height,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        // Moved children are clipped out of the parent's repaint.
+        let _ = windows::Win32::Graphics::Gdi::RedrawWindow(
+            hwnd,
+            None,
+            None,
+            windows::Win32::Graphics::Gdi::RDW_INVALIDATE
+                | windows::Win32::Graphics::Gdi::RDW_ERASE
+                | windows::Win32::Graphics::Gdi::RDW_ALLCHILDREN,
+        );
+    }
+}
+
+/// The note under the line width field while its value is not accepted.
+fn thickness_problem() -> &'static str {
+    crate::i18n::t("Enter a value from 1 to 64 pixels.")
 }
 
 /// Starts listening for a new shortcut on the record button.
@@ -1646,11 +1789,7 @@ fn commit(hwnd: HWND, state: &mut SettingsWindowState) {
             // right under it and leave it ready for retyping.
             state.tab = TAB_EDITOR;
             show_tab(hwnd, state);
-            set_text(
-                hwnd,
-                ID_THICKNESS_NOTE,
-                crate::i18n::t("Enter a value from 1 to 64 pixels."),
-            );
+            set_text(hwnd, ID_THICKNESS_NOTE, thickness_problem());
             unsafe {
                 let _ = SetFocus(edit);
                 SendMessageW(
@@ -1920,6 +2059,10 @@ unsafe extern "system" fn settings_wnd_proc(
                         | windows::Win32::Graphics::Gdi::RDW_ALLCHILDREN,
                 );
             }
+            LRESULT(0)
+        }
+        WM_LANGUAGE_CHANGED => {
+            apply_language(hwnd, state);
             LRESULT(0)
         }
         crate::ui::WM_SWITCH_TAB => {
@@ -2208,6 +2351,7 @@ pub fn show_settings_dialog(current: &Settings, owner: Option<HWND>) -> Result<O
     } else {
         crate::theme::set_preference(current.theme_preference);
         crate::i18n::set_preference(current.language);
+        crate::tray::apply_tooltip();
         Ok(None)
     }
 }
@@ -2446,5 +2590,40 @@ mod tests {
         // row pitch, the gap the layout used to reserve all the time.
         assert_eq!(warning_room(NOTE), 18);
         assert_eq!(warning_room(2 * NOTE), warning_room(NOTE) + NOTE);
+    }
+
+    #[test]
+    fn rebuilt_texts_cover_distinct_controls_and_follow_the_language() {
+        use crate::i18n::{LanguagePreference, set_preference};
+        let _lock = crate::settings::test_env::lock(&crate::i18n::TEST_LANGUAGE_LOCK);
+        let mut ids = FIXED_TEXT_IDS.to_vec();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), FIXED_TEXT_IDS.len(), "an id is listed twice");
+        for id in FIXED_TEXT_IDS {
+            assert!(
+                ALL_CONTROLS.contains(&id),
+                "control {id} has no font update"
+            );
+        }
+
+        let texts = || {
+            let mut texts: Vec<&str> = FIXED_TEXT_IDS.iter().map(|&id| fixed_text(id)).collect();
+            texts.extend(tab_names());
+            texts.extend(color_names());
+            texts.push(idle_update_text());
+            texts.push(thickness_problem());
+            texts
+        };
+        set_preference(LanguagePreference::English);
+        let english = texts();
+        set_preference(LanguagePreference::Turkish);
+        let turkish = texts();
+        set_preference(LanguagePreference::System);
+
+        assert!(english.iter().all(|text| !text.is_empty()));
+        for (english, turkish) in english.iter().zip(&turkish) {
+            assert_ne!(english, turkish, "{english:?} stays untranslated");
+        }
     }
 }

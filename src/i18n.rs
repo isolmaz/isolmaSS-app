@@ -81,6 +81,20 @@ pub fn t(english: &'static str) -> &'static str {
     }
 }
 
+static ENGLISH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
+    tr::TABLE
+        .iter()
+        .map(|&(english, turkish)| (turkish, english))
+        .collect()
+});
+
+/// The English source text of an interface string that was already translated, so
+/// logs keep one language and stored texts can be translated again after a language
+/// change. Text that is not a translation is returned unchanged.
+pub fn english_of(text: &str) -> &str {
+    ENGLISH.get(text).copied().unwrap_or(text)
+}
+
 /// Translates `template` and replaces each `{}` with the next argument.
 pub fn tf(template: &'static str, args: &[&dyn std::fmt::Display]) -> String {
     let mut out = String::new();
@@ -242,6 +256,36 @@ mod tests {
         set_preference(LanguagePreference::Turkish);
         assert_eq!(current(), Language::Turkish);
         assert_eq!(code(), "tr");
+        set_preference(LanguagePreference::System);
+    }
+
+    #[test]
+    fn log_labels_stay_english_in_every_language() {
+        let _lock = lock(&TEST_LANGUAGE_LOCK);
+        let unique: Vec<&'static str> = tr::TABLE
+            .iter()
+            .filter(|(_, turkish)| tr::TABLE.iter().filter(|(_, t)| t == turkish).count() == 1)
+            .map(|(english, _)| *english)
+            .collect();
+        assert!(
+            unique.len() > 100,
+            "only {} unambiguous entries",
+            unique.len()
+        );
+        for preference in [
+            LanguagePreference::English,
+            LanguagePreference::Turkish,
+            LanguagePreference::English,
+        ] {
+            set_preference(preference);
+            for &english in &unique {
+                assert_eq!(english_of(t(english)), english, "{preference:?}");
+            }
+        }
+        set_preference(LanguagePreference::Turkish);
+        assert_eq!(english_of("Worker update"), "Worker update");
+        assert_eq!(english_of(t("Worker update")), "Worker update");
+        assert_eq!(english_of("settings recovery"), "settings recovery");
         set_preference(LanguagePreference::System);
     }
 
