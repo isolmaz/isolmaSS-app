@@ -22,6 +22,14 @@ impl OverlayState {
         crate::toast::show_upload(prepared, anchor);
         self.finish_upload(hwnd)
     }
+
+    /// Pins the selection to the screen and closes the editor, as an upload does once its
+    /// toast is up: the pin is its own window and outlives the editor.
+    pub(super) fn pin_selection(&mut self, hwnd: HWND) -> std::result::Result<(), String> {
+        let image = self.begin_pin()?;
+        crate::pin::show(image)?;
+        self.finish_upload(hwnd)
+    }
 }
 
 /// Hides the editor while another top-level flow needs the screen, and brings
@@ -260,6 +268,16 @@ pub(super) unsafe extern "system" fn overlay_wnd_proc(
                         &error.to_string(),
                     )
                 }
+            }
+            LRESULT(0)
+        }
+        WM_EDITOR_PIN => {
+            if state_ptr.is_null() {
+                return LRESULT(0);
+            }
+            let state = unsafe { &mut *state_ptr };
+            if let Err(error) = state.pin_selection(hwnd) {
+                OverlayState::show_action_error(hwnd, crate::i18n::t("Pin failed"), &error);
             }
             LRESULT(0)
         }

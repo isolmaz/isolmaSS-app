@@ -6,7 +6,7 @@ use crate::cloudflare_setup::{self, CloudCredentials, RequestBody, UploadProgres
 use crate::save::save_buffer_to_image;
 use crate::settings::{SaveFormat, Settings};
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod glue;
@@ -37,6 +37,18 @@ pub struct Prepared {
     bytes: u64,
     format: SaveFormat,
     credentials: CloudCredentials,
+}
+
+impl Prepared {
+    /// The encoded image on disk, there for as long as this value or a clone of it lives.
+    pub fn path(&self) -> &Path {
+        &self.file.0
+    }
+
+    /// File extension of the encoded image, without the dot.
+    pub fn extension(&self) -> &'static str {
+        self.format.extension()
+    }
 }
 
 #[derive(Deserialize)]
@@ -255,6 +267,8 @@ mod tests {
         .expect("prepare");
 
         let path = prepared.file.0.clone();
+        assert_eq!(prepared.path(), path.as_path());
+        assert_eq!(prepared.extension(), "png");
         assert_eq!(path.parent(), Some(std::env::temp_dir().as_path()));
         let name = path.file_name().unwrap().to_str().unwrap();
         assert!(
@@ -291,6 +305,7 @@ mod tests {
         assert!(path.extension().is_some_and(|extension| extension == "jpg"));
         assert_eq!(&std::fs::read(&path).unwrap()[..2], [0xFF, 0xD8]);
         assert_eq!(prepared.format, SaveFormat::Jpeg);
+        assert_eq!(prepared.extension(), "jpg");
     }
 
     #[test]

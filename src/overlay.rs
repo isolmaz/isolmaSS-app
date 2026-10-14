@@ -81,6 +81,7 @@ const WM_EDITOR_ERROR: u32 = 0x8000 + 302;
 const WM_EDITOR_SAVE_AS: u32 = 0x8000 + 303;
 const WM_EDITOR_PICK_COLOR: u32 = 0x8000 + 304;
 const WM_EDITOR_CLOUD_SETUP: u32 = 0x8000 + 305;
+const WM_EDITOR_PIN: u32 = 0x8000 + 330;
 /// Posted by the text recognition worker: `lParam` is the id of the finished job.
 const WM_EDITOR_RECOGNIZED: u32 = 0x8000 + 360;
 thread_local! { static ACTION_ERROR: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) }; }
@@ -119,8 +120,10 @@ pub fn is_editor_shortcut(vk: u32, modifiers: u32, editing: bool) -> bool {
         return false;
     }
     if modifiers & MOD_CONTROL.0 != 0 {
-        matches!(vk, 0x41 | 0x43 | 0x53 | 0x55 | 0x5a | 0x59 | 0xbc | 37..=40)
-            || modifiers & MOD_SHIFT.0 != 0 && vk == 0x52
+        matches!(
+            vk,
+            0x41 | 0x43 | 0x53 | 0x54 | 0x55 | 0x5a | 0x59 | 0xbc | 37..=40
+        ) || modifiers & MOD_SHIFT.0 != 0 && vk == 0x52
             || editing && matches!(vk, 0x56 | 0x58 | 8 | 46)
     } else {
         matches!(vk, 8 | 13 | 27 | 35..=40 | 46) || !editing && tool_for_key(vk).is_some()
@@ -268,7 +271,7 @@ fn place_notice(
 }
 
 /// Pointer travel, in pixels, that turns a click into a drag (`SM_CXDRAG`/`SM_CYDRAG`).
-fn drag_threshold(dpi: u32) -> (i32, i32) {
+pub(crate) fn drag_threshold(dpi: u32) -> (i32, i32) {
     unsafe {
         (
             windows::Win32::UI::HiDpi::GetSystemMetricsForDpi(SM_CXDRAG, dpi).max(1),
@@ -277,7 +280,11 @@ fn drag_threshold(dpi: u32) -> (i32, i32) {
     }
 }
 
-fn exceeds_drag_threshold(origin: (i32, i32), pt: (i32, i32), threshold: (i32, i32)) -> bool {
+pub(crate) fn exceeds_drag_threshold(
+    origin: (i32, i32),
+    pt: (i32, i32),
+    threshold: (i32, i32),
+) -> bool {
     (pt.0 - origin.0).abs() > threshold.0 || (pt.1 - origin.1).abs() > threshold.1
 }
 
@@ -1197,6 +1204,7 @@ impl OverlayState {
                     Self::show_action_error(hwnd, crate::i18n::t("Upload failed"), &error);
                 }
             }
+            ToolbarItem::Action(ToolbarAction::Pin) => self.request_pin(hwnd),
             ToolbarItem::Action(ToolbarAction::CopyText) => {
                 self.start_recognition(hwnd, Intent::CopyText)
             }
@@ -1395,7 +1403,7 @@ impl OverlayState {
         // 2. Text editing owns keys, except copy: commit first so the flattened
         // screenshot contains the final text and never includes editor affordances.
         if self.text_edit.is_some() {
-            if ctrl_down && matches!(vk as u8, b'C' | b'S' | b'U') {
+            if ctrl_down && matches!(vk as u8, b'C' | b'S' | b'T' | b'U') {
                 self.commit_text(hwnd);
             } else if vk == VK_RETURN.0 as usize {
                 self.commit_text(hwnd);
@@ -1513,6 +1521,11 @@ impl OverlayState {
             if let Err(error) = self.upload_selection(hwnd) {
                 Self::show_action_error(hwnd, crate::i18n::t("Upload failed"), &error);
             }
+            return LRESULT(0);
+        }
+
+        if self.mode == OverlayMode::SelectionActive && ctrl_down && vk == 'T' as usize {
+            self.request_pin(hwnd);
             return LRESULT(0);
         }
 
@@ -1665,8 +1678,8 @@ impl OverlayState {
         LRESULT(0)
     }
 
-    /// Every toolbar command for the F10 menu: the buttons on screen, the tools the
-    /// collapsed tool strip hides and the text recognition commands, which have no button.
+    /// Every command for the F10 menu: the buttons on screen, the tools the collapsed tool
+    /// strip hides, Pin to screen and the text recognition commands, which have no button.
     /// `None` until a frame has laid the toolbar out.
     fn command_menu_buttons(&self) -> Option<Vec<crate::toolbar::ToolbarButton>> {
         let mut buttons = self.toolbar.as_ref()?.buttons.clone();
@@ -1688,13 +1701,19 @@ impl OverlayState {
                 );
             }
         }
+        // Pinning and the text recognition commands have no toolbar button; the menu and
+        // their shortcuts reach them. They follow Upload in this order.
         let after_upload = buttons
             .iter()
             .position(|button| button.item == ToolbarItem::Action(ToolbarAction::Upload))
             .map_or(buttons.len(), |index| index + 1);
-        for (offset, action) in [ToolbarAction::CopyText, ToolbarAction::RedactSensitive]
-            .into_iter()
-            .enumerate()
+        for (offset, action) in [
+            ToolbarAction::Pin,
+            ToolbarAction::CopyText,
+            ToolbarAction::RedactSensitive,
+        ]
+        .into_iter()
+        .enumerate()
         {
             buttons.insert(
                 after_upload + offset,
@@ -1723,9 +1742,9 @@ impl OverlayState {
         })
     }
 
-    /// Applies what the command menu returned. A tool takes effect directly, and so do the
-    /// text recognition commands, which have no button; any other command is replayed as a
-    /// click on its toolbar button so behavior stays identical.
+    /// Applies what the command menu returned. A tool, Pin to screen and the text
+    /// recognition commands take effect directly; any other command is replayed as a click
+    /// on its toolbar button so behavior stays identical.
     fn apply_command_menu_choice(
         &mut self,
         hwnd: HWND,
@@ -1737,6 +1756,8 @@ impl OverlayState {
                 self.select_tool(tool);
                 self.redraw(hwnd);
             }
+            // No button to click: the menu is the only place that lists these.
+            Ok(Some(ToolbarItem::Action(ToolbarAction::Pin))) => self.request_pin(hwnd),
             Ok(Some(
                 item
                 @ ToolbarItem::Action(ToolbarAction::CopyText | ToolbarAction::RedactSensitive),
@@ -1972,6 +1993,50 @@ impl OverlayState {
         }
         .map_err(|error| crate::i18n::tf("Could not close the editor: {}", &[&error]))?;
         Ok(())
+    }
+
+    /// Asks the window to pin the selection. The pin window is opened by the window
+    /// procedure, after the key or menu handler that asked has returned.
+    fn request_pin(&self, hwnd: HWND) {
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                hwnd,
+                WM_EDITOR_PIN,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        }
+    }
+
+    /// The selection as the export renders it, which is what Copy would put on the
+    /// clipboard, with the screen position it was selected at.
+    fn begin_pin(&mut self) -> std::result::Result<crate::pin::PinImage, String> {
+        let selection = self
+            .committed_selection
+            .ok_or_else(|| crate::i18n::t("Select a screen region first.").to_string())?;
+        self.composite_scene_with(CompositionPolicy::EXPORT);
+        let width = self.capture.width;
+        let height = self.capture.height;
+        let pixels = unsafe {
+            std::slice::from_raw_parts(self.bits_ptr, width as usize * height as usize * 4)
+        };
+        let extracted = crate::save::extract_selection(pixels, width, height, &selection);
+        self.composite_scene();
+        let (pixels, image_width, image_height) = extracted.map_err(|error| {
+            crate::i18n::tf(
+                "Could not prepare the screenshot for pinning: {}",
+                &[&error],
+            )
+        })?;
+        let placed = selection.clamp(width, height);
+        Ok(crate::pin::PinImage {
+            pixels,
+            width: image_width,
+            height: image_height,
+            origin: (self.capture.x + placed.left, self.capture.y + placed.top),
+            format: self.settings.save_format,
+            jpeg_quality: self.settings.jpeg_quality,
+        })
     }
 
     fn editor_cursor(&self, pt: (i32, i32)) -> PCWSTR {
