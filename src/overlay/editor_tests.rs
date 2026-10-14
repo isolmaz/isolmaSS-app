@@ -677,6 +677,7 @@ fn letters_select_tools() {
         ('n', ToolKind::Step),
         ('b', ToolKind::Blur),
         ('m', ToolKind::Redact),
+        ('i', ToolKind::ColorPicker),
     ] {
         assert_eq!(tool_for_key(letter.to_ascii_uppercase() as u32), Some(tool));
     }
@@ -690,8 +691,8 @@ fn shortcut_keys_depend_on_modifiers_and_text_editing() {
     // Alt and Win combinations belong to Windows.
     assert!(!is_editor_shortcut(0x43, MOD_CONTROL.0 | MOD_ALT.0, false));
     assert!(!is_editor_shortcut(0x43, MOD_WIN.0, false));
-    // Ctrl+C, S, U, Z, Y, comma and the arrows always count.
-    for vk in [0x43, 0x53, 0x55, 0x5a, 0x59, 0xbc, 37, 40] {
+    // Ctrl+A, C, S, U, Z, Y, comma and the arrows always count.
+    for vk in [0x41, 0x43, 0x53, 0x55, 0x5a, 0x59, 0xbc, 37, 40] {
         assert!(is_editor_shortcut(vk, MOD_CONTROL.0, false), "vk {vk:#x}");
     }
     assert!(!is_editor_shortcut(0x51, MOD_CONTROL.0, false));
