@@ -217,6 +217,7 @@ fn run_session(
         cache_requested: false,
         pointer: (0, 0),
         preferences_dirty: false,
+        recognition: RecognitionState::system(),
     });
     std::mem::forget(mem_guard);
     std::mem::forget(bitmap_guard);

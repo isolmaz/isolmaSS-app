@@ -15,6 +15,11 @@ pub enum ToolbarAction {
     Save,
     Copy,
     Upload,
+    /// Copies the text of the selection. It and `RedactSensitive` have no toolbar button;
+    /// the keyboard command menu lists both after Upload.
+    CopyText,
+    /// Covers the e-mail addresses and phone numbers of the selection.
+    RedactSensitive,
     Settings,
     Cancel,
 }
@@ -646,6 +651,8 @@ impl Toolbar {
                         ToolbarAction::Save => 0xe74e,
                         ToolbarAction::Copy => 0xe8c8,
                         ToolbarAction::Upload => 0xe753,
+                        ToolbarAction::CopyText => 0xe8d2,
+                        ToolbarAction::RedactSensitive => 0xe73b,
                         ToolbarAction::Settings => 0xe713,
                         ToolbarAction::Cancel => 0xe711,
                     };
@@ -673,6 +680,10 @@ impl Toolbar {
                 ToolbarItem::Action(ToolbarAction::Save) => crate::i18n::t("Save"),
                 ToolbarItem::Action(ToolbarAction::Copy) => crate::i18n::t("Copy"),
                 ToolbarItem::Action(ToolbarAction::Upload) => crate::i18n::t("Upload"),
+                ToolbarItem::Action(ToolbarAction::CopyText) => crate::i18n::t("Copy text"),
+                ToolbarItem::Action(ToolbarAction::RedactSensitive) => {
+                    crate::i18n::t("Redact emails and phone numbers")
+                }
                 ToolbarItem::Action(ToolbarAction::Settings) => crate::i18n::t("Settings"),
                 ToolbarItem::Action(ToolbarAction::Cancel) => crate::i18n::t("Cancel"),
                 ToolbarItem::Color => crate::i18n::t("Color"),
@@ -784,6 +795,8 @@ fn shortcut(item: ToolbarItem) -> Option<&'static str> {
         ToolbarItem::Action(ToolbarAction::Save) => "Ctrl+S",
         ToolbarItem::Action(ToolbarAction::Copy) => "Ctrl+C",
         ToolbarItem::Action(ToolbarAction::Upload) => "Ctrl+U",
+        ToolbarItem::Action(ToolbarAction::CopyText) => "Ctrl+Shift+C",
+        ToolbarItem::Action(ToolbarAction::RedactSensitive) => "Ctrl+Shift+R",
         ToolbarItem::Action(ToolbarAction::Settings) => "Ctrl+,",
         ToolbarItem::Action(ToolbarAction::Cancel) => "Esc",
         ToolbarItem::MoreTools
@@ -917,6 +930,10 @@ fn build_command_menu(buttons: &[ToolbarButton]) -> windows::core::Result<Option
             }
             ToolbarItem::Action(ToolbarAction::Upload) => {
                 crate::i18n::t("Upload and copy link").to_owned()
+            }
+            ToolbarItem::Action(ToolbarAction::CopyText) => crate::i18n::t("Copy text").to_owned(),
+            ToolbarItem::Action(ToolbarAction::RedactSensitive) => {
+                crate::i18n::t("Redact emails and phone numbers").to_owned()
             }
             ToolbarItem::Action(ToolbarAction::Settings) => crate::i18n::t("Settings").to_owned(),
             ToolbarItem::Action(ToolbarAction::Cancel) => crate::i18n::t("Cancel").to_owned(),

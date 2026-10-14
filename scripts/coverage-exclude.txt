@@ -25,6 +25,9 @@ src/upload/glue.rs
 # Update check, download and installer launch against the live release server
 src/updater/live.rs
 
+# Windows text recognition engine: needs an installed recognition language (CI has none)
+src/ocr/engine.rs
+
 # Windows with message loops
 src/settings_window.rs
 src/cloud_settings_window.rs

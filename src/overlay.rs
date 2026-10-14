@@ -8,6 +8,7 @@ use crate::hotkey::{
     WM_OVERLAY_CHAR, WM_OVERLAY_KEYDOWN, register_overlay, set_overlay_ime_composing,
     set_overlay_text_editing, unregister_overlay,
 };
+use crate::ocr::Intent;
 use crate::save::save_screenshot;
 use crate::settings::{Settings, show_settings_dialog};
 use crate::toolbar::{Toolbar, ToolbarAction, ToolbarItem};
@@ -42,9 +43,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{PCWSTR, Result, w};
 
+mod recognition;
 mod render;
 mod session;
 mod window;
+use recognition::RecognitionState;
 pub use session::{measure_overlay, show_overlay_session};
 
 #[cfg(test)]
@@ -53,6 +56,8 @@ mod action_tests;
 mod editor_tests;
 #[cfg(test)]
 mod key_tests;
+#[cfg(test)]
+mod recognition_tests;
 #[cfg(test)]
 mod test_support;
 
@@ -73,6 +78,8 @@ const WM_EDITOR_ERROR: u32 = 0x8000 + 302;
 const WM_EDITOR_SAVE_AS: u32 = 0x8000 + 303;
 const WM_EDITOR_PICK_COLOR: u32 = 0x8000 + 304;
 const WM_EDITOR_CLOUD_SETUP: u32 = 0x8000 + 305;
+/// Posted by the text recognition worker: `lParam` is the id of the finished job.
+const WM_EDITOR_RECOGNIZED: u32 = 0x8000 + 360;
 thread_local! { static ACTION_ERROR: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) }; }
 
 pub fn tool_for_key(vk: u32) -> Option<ToolKind> {
@@ -91,12 +98,13 @@ pub fn tool_for_key(vk: u32) -> Option<ToolKind> {
 }
 
 pub fn is_editor_shortcut(vk: u32, modifiers: u32, editing: bool) -> bool {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{MOD_ALT, MOD_WIN};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{MOD_ALT, MOD_SHIFT, MOD_WIN};
     if modifiers & (MOD_ALT.0 | MOD_WIN.0) != 0 {
         return false;
     }
     if modifiers & MOD_CONTROL.0 != 0 {
         matches!(vk, 0x43 | 0x53 | 0x55 | 0x5a | 0x59 | 0xbc | 37..=40)
+            || modifiers & MOD_SHIFT.0 != 0 && vk == 0x52
             || editing && matches!(vk, 0x41 | 0x56 | 0x58 | 8 | 46)
     } else {
         matches!(vk, 8 | 13 | 27 | 35..=40 | 46) || !editing && tool_for_key(vk).is_some()
@@ -534,6 +542,7 @@ pub struct OverlayState {
     cache_requested: bool,
     pointer: (i32, i32),
     preferences_dirty: bool,
+    recognition: RecognitionState,
 }
 
 /// A press on the line-width wheel: dragging scrolls it, a plain click picks the row.
@@ -731,6 +740,7 @@ impl OverlayState {
             cache_requested: false,
             pointer: (0, 0),
             preferences_dirty: false,
+            recognition: RecognitionState::system(),
         }
     }
 
@@ -949,6 +959,12 @@ impl OverlayState {
                     Self::show_action_error(hwnd, crate::i18n::t("Upload failed"), &error);
                 }
             }
+            ToolbarItem::Action(ToolbarAction::CopyText) => {
+                self.start_recognition(hwnd, Intent::CopyText)
+            }
+            ToolbarItem::Action(ToolbarAction::RedactSensitive) => {
+                self.start_recognition(hwnd, Intent::RedactSensitive)
+            }
             ToolbarItem::Action(ToolbarAction::Settings) => unsafe {
                 let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
                     hwnd,
@@ -1125,6 +1141,16 @@ impl OverlayState {
                     LPARAM(0),
                 );
             }
+            return LRESULT(0);
+        }
+
+        // Text recognition: Ctrl+Shift+C copies the selection's text, Ctrl+Shift+R covers its
+        // e-mail addresses and phone numbers. Both work while a text box is open.
+        if ctrl_down
+            && mods as u32 & windows::Win32::UI::Input::KeyboardAndMouse::MOD_SHIFT.0 != 0
+            && let Some(intent) = Intent::for_key(vk)
+        {
+            self.start_recognition(hwnd, intent);
             return LRESULT(0);
         }
 
@@ -1393,8 +1419,9 @@ impl OverlayState {
         LRESULT(0)
     }
 
-    /// Every toolbar command for the F10 menu: the buttons on screen plus the tools the
-    /// collapsed tool strip hides. `None` until a frame has laid the toolbar out.
+    /// Every toolbar command for the F10 menu: the buttons on screen, the tools the
+    /// collapsed tool strip hides and the text recognition commands, which have no button.
+    /// `None` until a frame has laid the toolbar out.
     fn command_menu_buttons(&self) -> Option<Vec<crate::toolbar::ToolbarButton>> {
         let mut buttons = self.toolbar.as_ref()?.buttons.clone();
         for tool in [
@@ -1421,6 +1448,24 @@ impl OverlayState {
                 );
             }
         }
+        let after_upload = buttons
+            .iter()
+            .position(|button| button.item == ToolbarItem::Action(ToolbarAction::Upload))
+            .map_or(buttons.len(), |index| index + 1);
+        for (offset, action) in [ToolbarAction::CopyText, ToolbarAction::RedactSensitive]
+            .into_iter()
+            .enumerate()
+        {
+            buttons.insert(
+                after_upload + offset,
+                crate::toolbar::ToolbarButton {
+                    item: ToolbarItem::Action(action),
+                    rect: Rect::default(),
+                    is_enabled: true,
+                    is_checked: false,
+                },
+            );
+        }
         Some(buttons)
     }
 
@@ -1438,8 +1483,9 @@ impl OverlayState {
         })
     }
 
-    /// Applies what the command menu returned. A tool takes effect directly; any other
-    /// command is replayed as a click on its toolbar button so behavior stays identical.
+    /// Applies what the command menu returned. A tool takes effect directly, and so do the
+    /// text recognition commands, which have no button; any other command is replayed as a
+    /// click on its toolbar button so behavior stays identical.
     fn apply_command_menu_choice(
         &mut self,
         hwnd: HWND,
@@ -1453,6 +1499,10 @@ impl OverlayState {
                 self.persist_editor_preferences();
                 self.redraw(hwnd);
             }
+            Ok(Some(
+                item
+                @ ToolbarItem::Action(ToolbarAction::CopyText | ToolbarAction::RedactSensitive),
+            )) => self.activate_toolbar_item(hwnd, item, self.pointer),
             Ok(Some(item)) => {
                 if let Some(rect) = buttons
                     .iter()

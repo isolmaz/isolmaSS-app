@@ -461,7 +461,8 @@ fn the_command_menu_lists_every_tool_even_when_the_strip_is_collapsed() {
             .any(|b| b.item == ToolbarItem::Tool(ToolKind::Text))
     );
     let menu = state.command_menu_buttons().expect("a toolbar is laid out");
-    assert_eq!(menu.len(), shown.len() + 5);
+    // Five hidden tools and the two text recognition commands.
+    assert_eq!(menu.len(), shown.len() + 5 + 2);
     let items: Vec<ToolbarItem> = menu.iter().map(|b| b.item).collect();
     let undo = items
         .iter()
@@ -491,12 +492,36 @@ fn the_command_menu_lists_every_tool_even_when_the_strip_is_collapsed() {
 }
 
 #[test]
-fn an_expanded_strip_needs_no_extra_menu_entries() {
+fn an_expanded_strip_needs_no_extra_tool_entries() {
     let mut state = state_with_toolbar();
     state.tools_expanded = true;
     state.composite_scene();
     let shown = state.toolbar.as_ref().unwrap().buttons.len();
-    assert_eq!(state.command_menu_buttons().unwrap().len(), shown);
+    // Only the two text recognition commands are added.
+    assert_eq!(state.command_menu_buttons().unwrap().len(), shown + 2);
+}
+
+#[test]
+fn the_command_menu_lists_the_text_recognition_commands_after_upload() {
+    let state = state_with_toolbar();
+    let items: Vec<ToolbarItem> = state
+        .command_menu_buttons()
+        .unwrap()
+        .iter()
+        .map(|button| button.item)
+        .collect();
+    let upload = items
+        .iter()
+        .position(|item| *item == ToolbarItem::Action(ToolbarAction::Upload))
+        .unwrap();
+    assert_eq!(
+        &items[upload + 1..upload + 4],
+        &[
+            ToolbarItem::Action(ToolbarAction::CopyText),
+            ToolbarItem::Action(ToolbarAction::RedactSensitive),
+            ToolbarItem::Action(ToolbarAction::Settings),
+        ]
+    );
 }
 
 #[test]

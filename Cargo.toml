@@ -40,6 +40,11 @@ windows = { version = "0.58", features = [
     "Win32_Networking_WinHttp",
     "Win32_Security_Cryptography",
     "Win32_Globalization",
+    "Media_Ocr",
+    "Graphics_Imaging",
+    "Storage_Streams",
+    "Foundation",
+    "Foundation_Collections",
 ] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
