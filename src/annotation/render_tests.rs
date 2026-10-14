@@ -399,6 +399,35 @@ fn text_is_drawn_in_its_color_inside_its_measured_box() {
 }
 
 #[test]
+fn an_arrow_box_hugs_the_drawn_arrow() {
+    for (start, end, thickness) in [
+        ((20, 30), (150, 90), 4),
+        ((150, 30), (30, 100), 16),
+        ((40, 60), (160, 60), 40),
+    ] {
+        let object = arrow(start, end, thickness);
+        let canvas = drawn(200, 140, |dc| object.render_gdi(dc));
+        let changed = canvas.changed();
+        assert!(!changed.is_empty());
+        let mut drawn_box = Rect::new(changed[0].0, changed[0].1, changed[0].0, changed[0].1);
+        for &(x, y) in &changed {
+            drawn_box = drawn_box.union(&Rect::new(x, y, x + 1, y + 1));
+        }
+        let bounds = object.bounds();
+        let slack = [
+            drawn_box.left - bounds.left,
+            drawn_box.top - bounds.top,
+            bounds.right - drawn_box.right,
+            bounds.bottom - drawn_box.bottom,
+        ];
+        assert!(
+            slack.iter().all(|gap| (0..=3).contains(gap)),
+            "thickness {thickness}: drawn {drawn_box:?}, bounds {bounds:?}"
+        );
+    }
+}
+
+#[test]
 fn a_rectangle_selection_gets_a_dashed_box_and_four_corner_grips() {
     let object = rectangle(Rect::new(30, 30, 90, 70), 2);
     for (dpi, half) in [(96, 4), (192, 8)] {
