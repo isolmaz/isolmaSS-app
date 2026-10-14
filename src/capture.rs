@@ -1,5 +1,5 @@
 use std::ffi::c_void;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Gdi::{
@@ -255,22 +255,16 @@ pub const MIN_SELECTION: i32 = 8;
 static LAST_REGION: Mutex<Option<Rect>> = Mutex::new(None);
 
 pub fn remember_last_region(region: Rect) {
-    *LAST_REGION
-        .lock()
-        .unwrap_or_else(|error| error.into_inner()) = Some(region);
+    *LAST_REGION.lock().unwrap_or_else(PoisonError::into_inner) = Some(region);
 }
 
 pub fn last_region() -> Option<Rect> {
-    *LAST_REGION
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
+    *LAST_REGION.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[cfg(test)]
 pub fn forget_last_region() {
-    *LAST_REGION
-        .lock()
-        .unwrap_or_else(|error| error.into_inner()) = None;
+    *LAST_REGION.lock().unwrap_or_else(PoisonError::into_inner) = None;
 }
 
 /// The monitor Ctrl+A selects: the one under `cursor`, else the one holding `anchor`, else
