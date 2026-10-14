@@ -163,6 +163,28 @@ fn arrow_geometry(start: (i32, i32), end: (i32, i32), thickness: i32) -> Option<
     })
 }
 
+/// The pixels an arrow covers: the round-capped shaft and the head triangle, plus one pixel
+/// of anti-aliasing on every side.
+fn arrow_extent(start: (i32, i32), end: (i32, i32), thickness: i32) -> Rect {
+    let reach = (thickness + 1) / 2 + 1;
+    let Some(arrow) = arrow_geometry(start, end, thickness) else {
+        return Rect::normalized(start, end).inflate(reach, reach);
+    };
+    // The shaft stops at the head's base; the tip is a point of the triangle.
+    let base = (arrow.base.0.round() as i32, arrow.base.1.round() as i32);
+    let mut extent = Rect::normalized(start, base).inflate(reach, reach);
+    for (x, y) in arrow.head {
+        let corner = Rect::new(
+            x.floor() as i32 - 1,
+            y.floor() as i32 - 1,
+            x.ceil() as i32 + 2,
+            y.ceil() as i32 + 2,
+        );
+        extent = extent.union(&corner);
+    }
+    extent
+}
+
 /// Hollow frame with plain GDI: `rect` outlined by a `thickness` px pen.
 fn plain_frame(hdc: HDC, rect: Rect, color: [u8; 4], thickness: i32) {
     crate::drawing::with_pen(hdc, PS_SOLID, thickness, bgra_to_colorref(color), || {
@@ -277,7 +299,7 @@ impl AnnotationObject {
                 end,
                 thickness,
                 ..
-            } => Rect::normalized(*start, *end).inflate(*thickness * 4, *thickness * 4),
+            } => arrow_extent(*start, *end, *thickness),
             AnnotationKind::Pen {
                 points, thickness, ..
             }
@@ -868,7 +890,7 @@ impl AnnotationObject {
     /// Renders selection bounding indicators (dashed rectangle + corner handles) around this object.
     pub fn render_selection_indicator(&self, hdc: HDC, dpi: u32) {
         // Same rect as resize_handle_points so handles sit on the dashed box the
-        // user sees; arrows keep the stroke-inflated bounds to contain the head.
+        // user sees; an arrow's box is its drawn extent, so it holds the head.
         let half = grip_half(dpi);
         let b = match &self.kind {
             AnnotationKind::Arrow { .. } => self.bounds().inflate(half, half),
@@ -1972,7 +1994,17 @@ mod tests {
                 rectangle_kind(Rect::new(10, 20, 50, 40), 3),
                 Rect::new(7, 17, 53, 43),
             ),
-            (arrow_kind((50, 10), (20, 40), 2), Rect::new(12, 2, 58, 48)),
+            // Arrow: the shaft to the head's base grown by half its width plus a pixel,
+            // joined with the head triangle (tip included) plus a pixel.
+            (arrow_kind((50, 10), (20, 40), 2), Rect::new(19, 8, 52, 42)),
+            // A thick arrow's head (half-width 58) reaches past the shaft on both sides,
+            // and nothing extends beyond the tip.
+            (
+                arrow_kind((0, 0), (200, 0), 40),
+                Rect::new(-21, -59, 202, 60),
+            ),
+            // Too short for a head: just the stroke around the points.
+            (arrow_kind((5, 5), (6, 5), 3), Rect::new(2, 2, 9, 8)),
             // Pen: the points' box including the last pixel, grown by the stroke width.
             (pen_kind(&points, 3), Rect::new(7, 2, 34, 44)),
             // Highlight: the marker is twice as thick as the stroke width.
