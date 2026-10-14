@@ -373,6 +373,424 @@ fn every_toolbar_command_shows_its_keyboard_shortcut() {
     }
 }
 
+/// Work areas where the expanded rail is too tall as one column: the work area, its dpi
+/// and a selection with room for the rail on its right and the action bar below it.
+const SHORT_WORK_AREAS: [(Rect, u32, Rect); 3] = [
+    (
+        Rect::new(0, 0, 1920, 1040),
+        192,
+        Rect::new(400, 200, 1200, 700),
+    ),
+    (
+        Rect::new(0, 0, 1366, 728),
+        144,
+        Rect::new(100, 100, 500, 500),
+    ),
+    (
+        Rect::new(0, 0, 1366, 728),
+        120,
+        Rect::new(100, 100, 500, 500),
+    ),
+];
+
+/// What the collapsed rail shows, bottom to top; a split rail keeps it as its main column.
+const MAIN_COLUMN: [ToolbarItem; 7] = [
+    ToolbarItem::Tool(ToolKind::Select),
+    ToolbarItem::Tool(ToolKind::Rectangle),
+    ToolbarItem::Tool(ToolKind::Arrow),
+    ToolbarItem::Tool(ToolKind::Pen),
+    ToolbarItem::MoreTools,
+    ToolbarItem::Action(ToolbarAction::Undo),
+    ToolbarItem::Action(ToolbarAction::Redo),
+];
+
+fn is_rail_item(item: ToolbarItem) -> bool {
+    MAIN_COLUMN.contains(&item) || is_more_tool(item)
+}
+
+fn inside(inner: Rect, outer: Rect) -> bool {
+    within((inner.left, inner.top, inner.right, inner.bottom), outer)
+}
+
+#[test]
+fn an_expanded_rail_too_tall_for_one_column_gets_a_second_one_and_keeps_the_l() {
+    for (viewport, dpi, selection) in SHORT_WORK_AREAS {
+        let what = format!("{viewport:?} at {dpi} dpi");
+        let scale = |value: i32| value * dpi as i32 / 96;
+        let (size, pad, gap) = (scale(32), scale(6), scale(2));
+        let rows = (MAIN_COLUMN.len() + MORE_TOOLS.len()) as i32;
+        let one_column = 2 * pad + rows * size + (rows - 1) * gap + scale(12);
+        let safe_height = viewport.height() - 2 * scale(Toolbar::OUTER_PAD);
+        assert!(
+            one_column + scale(Toolbar::ACTION_HEIGHT) > safe_height,
+            "{what}: one column fits"
+        );
+
+        let toolbar = toolbar_for(selection, viewport, true, false, dpi);
+        let collapsed = toolbar_for(selection, viewport, false, false, dpi);
+        let (rail, bar) = (toolbar.tool_bounds, toolbar.action_bounds);
+        assert_ne!(rail, bar, "{what}: the grid took over");
+        assert_eq!(collapsed.tool_bounds.width(), size + 2 * pad, "{what}");
+
+        // Two columns with the 2 px (design) gap, still an L beside and below the selection.
+        assert_eq!(rail.width(), 2 * size + 2 * pad + gap, "{what}");
+        assert_eq!(
+            rail.height(),
+            2 * pad + MORE_TOOLS.len() as i32 * size + (MORE_TOOLS.len() as i32 - 1) * gap,
+            "{what}"
+        );
+        assert_eq!(rail.left, selection.right + scale(Toolbar::GAP), "{what}");
+        assert_eq!(bar.top, selection.bottom + scale(Toolbar::GAP), "{what}");
+        assert_eq!((rail.bottom, rail.right), (bar.top, bar.right), "{what}");
+        assert!(inside(rail, viewport) && inside(bar, viewport), "{what}");
+        assert!(!rail.intersects(&selection) && !bar.intersects(&selection));
+
+        // The main column is the collapsed rail, row for row, next to the selection.
+        for item in MAIN_COLUMN {
+            let rect = rect_of(&toolbar, item);
+            let plain = rect_of(&collapsed, item);
+            assert_eq!(rect.left, rail.left + pad, "{what}: {item:?}");
+            assert_eq!((rect.width(), rect.height()), (size, size), "{what}");
+            assert_eq!(
+                rect.top - rail.bottom,
+                plain.top - collapsed.tool_bounds.bottom,
+                "{what}: {item:?}"
+            );
+        }
+        // The tools behind the chevron stack in the second column from the bottom up.
+        let more_left = rail.left + pad + size + gap;
+        for (index, tool) in MORE_TOOLS.into_iter().enumerate() {
+            let bottom = rail.bottom - pad - index as i32 * (size + gap);
+            assert_eq!(
+                rect_of(&toolbar, ToolbarItem::Tool(tool)),
+                Rect::new(more_left, bottom - size, more_left + size, bottom),
+                "{what}: {tool:?}"
+            );
+        }
+        assert_eq!(more_left + size + pad, rail.right, "{what}");
+
+        for (index, button) in toolbar.buttons.iter().enumerate() {
+            let at = format!("{what}: {:?}", button.item);
+            assert!(inside(button.rect, viewport), "{at}");
+            if is_rail_item(button.item) {
+                assert!(inside(button.rect, rail), "{at}");
+                assert!(!button.rect.intersects(&bar), "{at}");
+            } else {
+                assert!(inside(button.rect, bar), "{at}");
+            }
+            for other in &toolbar.buttons[index + 1..] {
+                assert!(!button.rect.intersects(&other.rect), "{at} overlaps");
+            }
+        }
+    }
+}
+
+#[test]
+fn the_split_rail_flips_with_the_l_and_the_main_column_stays_next_to_the_selection() {
+    let viewport = Rect::new(0, 0, 1920, 1040);
+    let (size, pad, gap) = (64, 12, 4);
+    // The rail's side of the selection decides which column is the main one; where the
+    // chevron stays put when the rail grows, it must not move.
+    let cases = [
+        (
+            "right of the selection",
+            Rect::new(400, 200, 1200, 700),
+            true,
+            true,
+        ),
+        (
+            "left of the selection",
+            Rect::new(1100, 200, 1900, 700),
+            false,
+            true,
+        ),
+        (
+            "beside a left-half window",
+            Rect::new(0, 0, 960, 1040),
+            true,
+            true,
+        ),
+        (
+            "beside a right-half window",
+            Rect::new(960, 0, 1920, 1040),
+            false,
+            true,
+        ),
+        ("inside a full-screen selection", viewport, true, false),
+    ];
+    for (what, selection, main_on_left, chevron_stays) in cases {
+        let toolbar = toolbar_for(selection, viewport, true, false, 192);
+        let (rail, bar) = (toolbar.tool_bounds, toolbar.action_bounds);
+        assert_ne!(rail, bar, "{what}: the grid took over");
+        assert_eq!(rail.width(), 2 * size + 2 * pad + gap, "{what}");
+        assert_eq!(rail.bottom, bar.top, "{what}");
+        assert!(inside(rail, viewport) && inside(bar, viewport), "{what}");
+        let main = rect_of(&toolbar, ToolbarItem::Tool(ToolKind::Select));
+        let more = rect_of(&toolbar, ToolbarItem::Tool(ToolKind::Ellipse));
+        if main_on_left {
+            assert_eq!(main.left, rail.left + pad, "{what}");
+            assert_eq!(more.left, main.right + gap, "{what}");
+            assert_eq!(more.right + pad, rail.right, "{what}");
+        } else {
+            assert_eq!(main.right + pad, rail.right, "{what}");
+            assert_eq!(more.right + gap, main.left, "{what}");
+            assert_eq!(more.left - pad, rail.left, "{what}");
+        }
+        if chevron_stays {
+            let collapsed = toolbar_for(selection, viewport, false, false, 192);
+            assert_eq!(
+                rect_of(&toolbar, ToolbarItem::MoreTools),
+                rect_of(&collapsed, ToolbarItem::MoreTools),
+                "{what}"
+            );
+        }
+    }
+}
+
+#[test]
+fn at_96_dpi_the_expanded_rail_stays_one_column_with_the_rows_it_always_had() {
+    let viewport = Rect::new(0, 0, 1920, 1040);
+    let toolbar = toolbar_for(Rect::new(200, 100, 800, 600), viewport, true, false, 96);
+    assert_eq!(toolbar.tool_bounds, Rect::new(808, 76, 852, 608));
+    // Rows climb from the bottom in 34 px steps; the chevron and Undo add a 6 px gap above.
+    let rows = [
+        (ToolbarItem::Tool(ToolKind::Select), 570),
+        (ToolbarItem::Tool(ToolKind::Rectangle), 536),
+        (ToolbarItem::Tool(ToolKind::Arrow), 502),
+        (ToolbarItem::Tool(ToolKind::Pen), 468),
+        (ToolbarItem::MoreTools, 434),
+        (ToolbarItem::Tool(ToolKind::Ellipse), 394),
+        (ToolbarItem::Tool(ToolKind::Line), 360),
+        (ToolbarItem::Tool(ToolKind::Highlight), 326),
+        (ToolbarItem::Tool(ToolKind::Text), 292),
+        (ToolbarItem::Tool(ToolKind::Step), 258),
+        (ToolbarItem::Tool(ToolKind::Blur), 224),
+        (ToolbarItem::Tool(ToolKind::Redact), 190),
+        (ToolbarItem::Tool(ToolKind::ColorPicker), 156),
+        (ToolbarItem::Action(ToolbarAction::Undo), 122),
+        (ToolbarItem::Action(ToolbarAction::Redo), 82),
+    ];
+    for (item, top) in rows {
+        assert_eq!(
+            rect_of(&toolbar, item),
+            Rect::new(814, top, 846, top + 32),
+            "{item:?}"
+        );
+    }
+}
+
+#[test]
+fn the_rail_splits_exactly_when_one_column_and_the_bar_overflow_the_work_area() {
+    // At 96 dpi one column is 532 px, two are 282 px, the bar 42 px, and the work area
+    // keeps 8 px at each edge.
+    let rail_in = |height: i32| {
+        let viewport = Rect::new(0, 0, 1920, height);
+        toolbar_for(Rect::new(300, 100, 900, 300), viewport, true, false, 96)
+    };
+    let size = |toolbar: &Toolbar| (toolbar.tool_bounds.width(), toolbar.tool_bounds.height());
+    assert_eq!(size(&rail_in(532 + 42 + 16)), (44, 532));
+    assert_eq!(size(&rail_in(532 + 42 + 16 - 1)), (78, 282));
+    assert_eq!(size(&rail_in(282 + 42 + 16)), (78, 282));
+    let grid = rail_in(282 + 42 + 16 - 1);
+    assert_eq!(grid.tool_bounds, grid.action_bounds);
+}
+
+#[test]
+fn a_tiny_work_area_still_gets_the_grid_for_the_expanded_rail() {
+    for (width, height, dpi) in [(640, 440, 192), (320, 240, 96), (1366, 300, 144)] {
+        let viewport = Rect::new(0, 0, width, height);
+        let toolbar = toolbar_for(Rect::new(10, 10, 18, 18), viewport, true, false, dpi);
+        assert_eq!(toolbar.tool_bounds, toolbar.action_bounds, "{viewport:?}");
+        assert!(inside(toolbar.tool_bounds, viewport), "{viewport:?}");
+        for button in &toolbar.buttons {
+            assert!(inside(button.rect, viewport), "{:?}", button.item);
+            if button.is_enabled {
+                assert_eq!(
+                    toolbar.hit_test(centre(button.rect)),
+                    Some(button.item),
+                    "{viewport:?} {:?}",
+                    button.item
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn second_column_buttons_are_hit_hovered_and_given_tooltips_like_the_main_column() {
+    let viewport = Rect::new(0, 0, 1920, 1040);
+    // The rail right of its selection, then left of it.
+    let cases = [
+        (Rect::new(400, 200, 1200, 700), true),
+        (Rect::new(1100, 200, 1900, 700), false),
+    ];
+    for (selection, tooltip_right_of_rail) in cases {
+        let mut toolbar = toolbar_for(selection, viewport, true, false, 192);
+        let rail = toolbar.tool_bounds;
+        let buttons = toolbar.buttons.clone();
+        let on_rail = buttons
+            .iter()
+            .filter(|button| is_rail_item(button.item) && button.is_enabled);
+        for button in on_rail {
+            let (item, rect) = (button.item, button.rect);
+            assert_eq!(toolbar.hit_test(centre(rect)), Some(item), "{item:?}");
+            assert_eq!(toolbar.hit_test((rect.left, rect.top)), Some(item));
+            assert_eq!(
+                toolbar.hit_test((rect.right - 1, rect.bottom - 1)),
+                Some(item)
+            );
+            toolbar.hovered_item = None;
+            assert!(toolbar.update_hover(centre(rect)), "{item:?}");
+            assert_eq!(toolbar.hovered_item, Some(item));
+            assert!(!toolbar.update_hover(centre(rect)), "{item:?}");
+
+            let tip = toolbar.tooltip_bounds(rect, 300, 60);
+            assert!(inside(tip, viewport), "{item:?}: {tip:?}");
+            assert!(
+                toolbar
+                    .buttons
+                    .iter()
+                    .all(|other| !tip.intersects(&other.rect)),
+                "{item:?}: {tip:?} covers a button"
+            );
+            if tooltip_right_of_rail {
+                assert!(tip.left >= rail.right, "{item:?}: {tip:?}");
+            } else {
+                assert!(tip.right <= rail.left, "{item:?}: {tip:?}");
+            }
+            assert!(((tip.top + tip.bottom) / 2 - middle(rect)).abs() <= 1);
+        }
+        // The gutter between the columns is panel, not a button.
+        let main = rect_of(&toolbar, ToolbarItem::Tool(ToolKind::Select));
+        let more = rect_of(&toolbar, ToolbarItem::Tool(ToolKind::Ellipse));
+        let gutter = (main.right.min(more.right), middle(more));
+        assert!(toolbar.contains_point(gutter));
+        assert_eq!(toolbar.hit_test(gutter), None);
+    }
+}
+
+#[test]
+fn the_wheel_of_a_split_rail_never_covers_the_rail() {
+    let tall = Rect::new(0, 0, 1920, 1040);
+    let short = Rect::new(0, 0, 1366, 728);
+    // Work area, dpi, selection, whether the wheel moves right past the rail, and whether
+    // it opens above its button. The rail sits at the bar's left end except in the fourth
+    // case, where it is at the right end and the wheel stays under its button.
+    let cases = [
+        (tall, 192, Rect::new(0, 0, 960, 1040), true, true),
+        (tall, 192, Rect::new(1100, 200, 1900, 700), true, true),
+        (tall, 192, Rect::new(1100, 300, 1900, 980), true, false),
+        (tall, 192, Rect::new(400, 200, 1200, 700), false, true),
+        (short, 144, Rect::new(900, 100, 1350, 500), true, true),
+    ];
+    for (viewport, dpi, selection, past_rail, above) in cases {
+        let what = format!("{viewport:?} at {dpi} dpi, {selection:?}");
+        let toolbar = toolbar_for(selection, viewport, true, true, dpi);
+        let rail = toolbar.tool_bounds;
+        assert_ne!(rail, toolbar.action_bounds, "{what}: the grid took over");
+        let main = rect_of(&toolbar, ToolbarItem::Tool(ToolKind::Select));
+        let more = rect_of(&toolbar, ToolbarItem::Tool(ToolKind::Ellipse));
+        assert_ne!(main.left, more.left, "{what}: not a split rail");
+
+        let wheel = toolbar.wheel_bounds.expect("the wheel is open");
+        let anchor = rect_of(&toolbar, ToolbarItem::Thickness);
+        let pad = 4 * dpi as i32 / 96;
+        assert!(inside(wheel, viewport), "{what}: {wheel:?}");
+        assert!(
+            !wheel.intersects(&rail),
+            "{what}: {wheel:?} covers {rail:?}"
+        );
+        for button in &toolbar.buttons {
+            if !matches!(button.item, ToolbarItem::ThicknessOption(_)) {
+                assert!(
+                    !wheel.intersects(&button.rect),
+                    "{what}: covers {:?}",
+                    button.item
+                );
+            }
+        }
+        let left = if past_rail {
+            rail.right + pad
+        } else {
+            anchor.left
+        };
+        assert_eq!(wheel.left, left, "{what}");
+        if above {
+            assert_eq!(wheel.bottom, anchor.top - pad, "{what}");
+        } else {
+            assert_eq!(wheel.top, anchor.bottom + pad, "{what}");
+        }
+    }
+}
+
+#[test]
+fn the_open_wheel_owns_its_whole_panel_for_hits_and_hover() {
+    // Line width 1: the first two rows (values -1 and 0) have no button.
+    let mut toolbar = Toolbar::layout(
+        &SELECTION,
+        VIEWPORT,
+        ToolKind::Rectangle,
+        PRESET_COLORS[0],
+        1,
+        false,
+        true,
+        true,
+        true,
+        true,
+        true,
+        DPI,
+        None,
+    );
+    let wheel = toolbar.wheel_bounds.expect("the wheel is open");
+    // Slide a tool under the whole wheel.
+    let select = ToolbarItem::Tool(ToolKind::Select);
+    toolbar
+        .buttons
+        .iter_mut()
+        .find(|button| button.item == select)
+        .expect("the rail has Select")
+        .rect = wheel;
+    let (pad, row) = (8, toolbar.wheel_row_height());
+    let row_middle = |index: i32| wheel.top + pad + index * row + row / 2;
+    let x = (wheel.left + wheel.right) / 2;
+    let nothing = [
+        ("top-left padding", (wheel.left, wheel.top)),
+        ("bottom-right padding", (wheel.right - 1, wheel.bottom - 1)),
+        ("side padding", (wheel.left + 1, middle(wheel))),
+        ("first empty row", (x, row_middle(0))),
+        ("second empty row", (x, row_middle(1))),
+    ];
+    for (what, point) in nothing {
+        assert_eq!(toolbar.hit_test(point), None, "{what}");
+        assert!(!toolbar.update_hover(point), "{what} hovers nothing");
+        assert_eq!(toolbar.hovered_item, None, "{what}");
+    }
+    let one = ToolbarItem::ThicknessOption(1);
+    assert_eq!(toolbar.hit_test((x, row_middle(2))), Some(one));
+    assert!(toolbar.update_hover((x, row_middle(2))));
+    assert_eq!(toolbar.hovered_item, Some(one));
+}
+
+#[test]
+fn splitting_the_rail_keeps_the_button_order_the_command_menu_follows() {
+    let viewport = Rect::new(0, 0, 1920, 1040);
+    let selection = Rect::new(400, 200, 1200, 700);
+    let layout_at = |dpi: u32| {
+        let toolbar = toolbar_for(selection, viewport, true, false, dpi);
+        let menu = build_command_menu(&toolbar.buttons)
+            .expect("the menu is built")
+            .expect("there are buttons");
+        let items: Vec<ToolbarItem> = toolbar.buttons.iter().map(|button| button.item).collect();
+        (toolbar.tool_bounds.width(), items, menu.items)
+    };
+    let (one_column, one_items, one_menu) = layout_at(96);
+    let (two_columns, two_items, two_menu) = layout_at(192);
+    assert_eq!((one_column, two_columns), (44, 156), "one rail splits");
+    assert_eq!(one_items, two_items);
+    assert_eq!(one_menu, two_menu);
+    assert_eq!(two_menu, two_items);
+}
+
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
@@ -863,6 +1281,62 @@ fn tooltips_open_beside_the_rail_and_below_the_bar_in_card_colour() {
             2,
             "bar tooltip",
         );
+    }
+}
+
+#[test]
+fn second_column_buttons_are_drawn_like_the_main_column() {
+    let viewport = Rect::new(0, 0, 1920, 1040);
+    let ellipse = ToolbarItem::Tool(ToolKind::Ellipse);
+    let highlight = ToolbarItem::Tool(ToolKind::Highlight);
+    let picker = ToolbarItem::Tool(ToolKind::ColorPicker);
+    for (preference, theme) in THEMES {
+        let _theme = ForcedTheme::new(preference);
+        let t = tokens_for(theme);
+        let mut toolbar = Toolbar::layout(
+            &Rect::new(400, 200, 1200, 700),
+            viewport,
+            ToolKind::Highlight,
+            PRESET_COLORS[0],
+            5,
+            true,
+            true,
+            true,
+            false,
+            false,
+            true,
+            192,
+            None,
+        );
+        assert_ne!(toolbar.tool_bounds, toolbar.action_bounds, "a split rail");
+        let fill = |toolbar: &Toolbar, item: ToolbarItem| {
+            let canvas = render_in(toolbar, viewport, None);
+            fill_of(&canvas, rect_of(toolbar, item))
+        };
+        assert_color(fill(&toolbar, ellipse), t.card, 2, "idle");
+        assert_color(fill(&toolbar, highlight), t.accent_tint, 2, "active tool");
+        let canvas = render_in(&toolbar, viewport, None);
+        let active = rect_of(&toolbar, highlight);
+        assert_color(
+            canvas.pixel(active.left, middle(active)),
+            t.accent_ink,
+            4,
+            "active outline",
+        );
+        toolbar.hovered_item = Some(ellipse);
+        assert_color(fill(&toolbar, ellipse), t.subtle_hover, 2, "hovered");
+        toolbar.pressed_item = Some(ellipse);
+        assert_color(fill(&toolbar, ellipse), t.subtle_pressed, 2, "pressed");
+
+        // The tooltip opens beside the whole rail, 4 design px (8 px) from its edge.
+        toolbar.hovered_item = Some(picker);
+        toolbar.pressed_item = None;
+        let canvas = render_in(&toolbar, viewport, None);
+        let probe = (
+            toolbar.tool_bounds.right + 8 + 6,
+            middle(rect_of(&toolbar, picker)),
+        );
+        assert_color(canvas.pixel(probe.0, probe.1), t.card, 2, "tooltip");
     }
 }
 
