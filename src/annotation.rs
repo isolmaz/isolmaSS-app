@@ -1392,6 +1392,8 @@ pub fn snap_angle_45(start: (i32, i32), current: (i32, i32)) -> (i32, i32) {
 #[derive(Debug, Clone)]
 pub enum EditCommand {
     Add(AnnotationObject),
+    /// Several objects added together; one undo removes them all.
+    AddMany(Vec<AnnotationObject>),
     Delete {
         object: AnnotationObject,
         index: usize,
@@ -1538,6 +1540,13 @@ impl HistoryManager {
                     self.redo_stack.push(EditCommand::Add(removed));
                 }
             }
+            EditCommand::AddMany(added) => {
+                let (removed, kept): (Vec<_>, Vec<_>) = std::mem::take(objects)
+                    .into_iter()
+                    .partition(|object| added.iter().any(|item| item.id == object.id));
+                *objects = kept;
+                self.redo_stack.push(EditCommand::AddMany(removed));
+            }
             EditCommand::Delete { object, index } => {
                 objects.insert(index.min(objects.len()), object.clone());
                 self.redo_stack.push(EditCommand::Delete { object, index });
@@ -1588,6 +1597,10 @@ impl HistoryManager {
                 // of re-finding by id (unwrap breaks if ids ever collide).
                 self.undo_stack.push(EditCommand::Add(obj.clone()));
                 objects.push(obj);
+            }
+            EditCommand::AddMany(added) => {
+                self.undo_stack.push(EditCommand::AddMany(added.clone()));
+                objects.extend(added);
             }
             EditCommand::Delete { object, index } => {
                 if let Some(pos) = objects.iter().position(|o| o.id == object.id) {
@@ -3242,6 +3255,26 @@ mod tests {
         assert!(history.can_undo());
         assert!(history.undo(&mut objects));
         assert!(objects.is_empty());
+    }
+
+    #[test]
+    fn several_objects_added_together_undo_and_redo_as_one_step() {
+        let kept = AnnotationObject::new(1, frame_at(0));
+        let added: Vec<_> = (2..=4)
+            .map(|id| AnnotationObject::new(id, frame_at(id as i32)))
+            .collect();
+        let mut objects = vec![kept.clone()];
+        objects.extend(added.clone());
+        let mut history = HistoryManager::default();
+        history.record(EditCommand::AddMany(added.clone()));
+
+        assert!(history.undo(&mut objects));
+        assert_eq!(objects, vec![kept.clone()]);
+        assert!(!history.can_undo());
+        assert!(history.redo(&mut objects));
+        assert_eq!(objects, [vec![kept.clone()], added].concat());
+        assert!(history.undo(&mut objects));
+        assert_eq!(objects, vec![kept]);
     }
 
     #[test]

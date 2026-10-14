@@ -352,6 +352,8 @@ fn every_toolbar_command_shows_its_keyboard_shortcut() {
         (ToolbarAction::Copy, "Ctrl+C"),
         (ToolbarAction::Upload, "Ctrl+U"),
         (ToolbarAction::Pin, "Ctrl+T"),
+        (ToolbarAction::CopyText, "Ctrl+Shift+C"),
+        (ToolbarAction::RedactSensitive, "Ctrl+Shift+R"),
         (ToolbarAction::Settings, "Ctrl+,"),
         (ToolbarAction::Cancel, "Esc"),
     ] {
@@ -1145,6 +1147,8 @@ fn menu_label(item: ToolbarItem) -> String {
         Action(Copy) => "Copy to clipboard".into(),
         Action(Upload) => "Upload and copy link".into(),
         Action(Pin) => "Pin to screen".into(),
+        Action(CopyText) => "Copy text".into(),
+        Action(RedactSensitive) => "Redact emails and phone numbers".into(),
         Action(Settings) => "Settings".into(),
         Action(Cancel) => "Cancel".into(),
         Color => "Choose color…".into(),
@@ -1306,4 +1310,79 @@ fn the_pin_command_has_its_own_glyph_and_a_tooltip() {
 #[test]
 fn there_is_no_menu_without_buttons() {
     assert!(build_command_menu(&[]).expect("no error").is_none());
+}
+
+const RECOGNITION_COMMANDS: [ToolbarAction; 2] =
+    [ToolbarAction::CopyText, ToolbarAction::RedactSensitive];
+
+#[test]
+fn text_recognition_commands_draw_a_glyph_and_a_tooltip_when_given_a_button() {
+    let viewport = Rect::new(0, 0, 1100, 700);
+    let mut toolbar = toolbar_for(Rect::new(100, 300, 500, 560), viewport, false, false, 96);
+    let bare = render_in(&toolbar, viewport, None).pixels();
+    let rect = Rect::new(700, 100, 744, 142);
+    for action in RECOGNITION_COMMANDS {
+        let item = ToolbarItem::Action(action);
+        toolbar.buttons.push(ToolbarButton {
+            item,
+            rect,
+            is_enabled: true,
+            is_checked: false,
+        });
+        let resting = render_in(&toolbar, viewport, None);
+        let drawn = resting.changed_since(&bare).expect("the button is drawn");
+        assert!(within(drawn, rect), "{item:?} draws inside its button");
+        toolbar.hovered_item = Some(item);
+        let tooltip = render_in(&toolbar, viewport, None)
+            .changed_since(&resting.pixels())
+            .expect("hovering changes the picture");
+        assert!(!within(tooltip, rect), "{item:?} has a tooltip");
+        assert!(within(tooltip, viewport), "{tooltip:?} leaves the viewport");
+        toolbar.hovered_item = None;
+        toolbar.buttons.pop();
+    }
+}
+
+#[test]
+fn text_recognition_commands_join_the_commands_group_of_the_menu() {
+    let _english = English::new();
+    let toolbar = standard(false, false);
+    let mut buttons = toolbar.buttons.clone();
+    let upload = buttons
+        .iter()
+        .position(|button| button.item == ToolbarItem::Action(ToolbarAction::Upload))
+        .expect("Upload is a button");
+    for (offset, action) in RECOGNITION_COMMANDS.into_iter().enumerate() {
+        buttons.insert(
+            upload + 1 + offset,
+            ToolbarButton {
+                item: ToolbarItem::Action(action),
+                rect: Rect::default(),
+                is_enabled: true,
+                is_checked: false,
+            },
+        );
+    }
+    let menu = build_command_menu(&buttons)
+        .expect("the menu is built")
+        .expect("there are buttons");
+    let hmenu = menu.menu.0;
+    for (index, button) in buttons.iter().enumerate() {
+        assert_eq!(
+            menu_string(hmenu, index as u32 + 1, MF_BYCOMMAND),
+            menu_label(button.item),
+            "{:?}",
+            button.item
+        );
+    }
+    let headings = (0..unsafe { GetMenuItemCount(hmenu) })
+        .filter(|&position| unsafe { GetMenuItemID(hmenu, position) } == 0)
+        .count();
+    let without = build_command_menu(&toolbar.buttons)
+        .expect("the menu is built")
+        .expect("there are buttons");
+    let headings_without = (0..unsafe { GetMenuItemCount(without.menu.0) })
+        .filter(|&position| unsafe { GetMenuItemID(without.menu.0, position) } == 0)
+        .count();
+    assert_eq!(headings, headings_without, "no extra group heading");
 }

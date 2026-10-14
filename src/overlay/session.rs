@@ -224,6 +224,7 @@ fn run_session(
         cache_requested: false,
         pointer: (0, 0),
         preferences_dirty: false,
+        recognition: RecognitionState::system(),
     });
     if let Some(region) = preselected {
         state.preselect(region);

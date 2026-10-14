@@ -720,6 +720,12 @@ fn shortcut_keys_depend_on_modifiers_and_text_editing() {
         assert!(is_editor_shortcut(vk, MOD_CONTROL.0, false), "vk {vk:#x}");
     }
     assert!(!is_editor_shortcut(0x51, MOD_CONTROL.0, false));
+    // Ctrl+Shift+R redacts e-mail addresses and phone numbers; Ctrl+R alone is not ours.
+    let shift = windows::Win32::UI::Input::KeyboardAndMouse::MOD_SHIFT.0;
+    assert!(is_editor_shortcut(0x52, MOD_CONTROL.0 | shift, false));
+    assert!(is_editor_shortcut(0x52, MOD_CONTROL.0 | shift, true));
+    assert!(!is_editor_shortcut(0x52, MOD_CONTROL.0, false));
+    assert!(!is_editor_shortcut(0x52, shift, true));
     // Plain keys: editing keys always, tool letters only outside text boxes.
     for vk in [8, 13, 27, 35, 40, 46] {
         assert!(is_editor_shortcut(vk, 0, true), "vk {vk:#x}");

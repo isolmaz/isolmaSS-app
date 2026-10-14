@@ -12,6 +12,7 @@ mod drawing;
 mod hotkey;
 mod i18n;
 mod instance;
+mod ocr;
 mod overlay;
 mod pin;
 mod save;
