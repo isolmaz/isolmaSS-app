@@ -548,4 +548,108 @@ mod tests {
         state.committed_selection = Some(region);
         assert_eq!(state.hud_target(), Some(region));
     }
+
+    use crate::overlay::test_support::{DIMMED, backbuffer_state, count_color, pixel};
+
+    const SEL: Rect = Rect::new(100, 80, 300, 200);
+    const RED: [u8; 4] = [49, 49, 224, 255];
+
+    fn rgb_at(state: &OverlayState, x: i32, y: i32) -> [u8; 3] {
+        let found = pixel(state, x, y);
+        [found[0], found[1], found[2]]
+    }
+
+    fn scene() -> OverlayState {
+        let mut state = backbuffer_state(640, 480);
+        state.set_selection_active(SEL);
+        state
+    }
+
+    #[test]
+    fn the_bounding_box_of_points_is_one_pixel_wider_than_the_extremes() {
+        assert_eq!(points_extent(&[]), Rect::default());
+        assert_eq!(points_extent(&[(5, 7)]), Rect::new(5, 7, 6, 8));
+        assert_eq!(
+            points_extent(&[(5, 7), (-2, 20), (9, 3)]),
+            Rect::new(-2, 3, 10, 21)
+        );
+    }
+
+    #[test]
+    fn hovering_without_a_target_shows_the_dimmed_capture() {
+        let mut state = backbuffer_state(640, 480);
+        state.composite_scene();
+        for (x, y) in [(0, 0), (320, 240), (639, 479)] {
+            assert_eq!(rgb_at(&state, x, y), [DIMMED[0], DIMMED[1], DIMMED[2]]);
+        }
+        assert!(state.toolbar.is_none());
+        assert!(state.hud_rect.is_none());
+    }
+
+    #[test]
+    fn a_hovered_window_is_punched_out_and_framed_in_amber() {
+        let mut state = backbuffer_state(640, 480);
+        state.hover_snap_rect = Some(Rect::new(50, 60, 150, 140));
+        state.composite_scene();
+        let amber = crate::theme::BRAND_AMBER_BGRA;
+        assert_eq!(rgb_at(&state, 100, 100), [0, 0, 0]);
+        assert_eq!(rgb_at(&state, 49, 100), [amber[0], amber[1], amber[2]]);
+        assert_eq!(rgb_at(&state, 10, 10), [DIMMED[0], DIMMED[1], DIMMED[2]]);
+        assert!(state.hud_rect.is_some());
+    }
+
+    #[test]
+    fn an_active_selection_without_a_region_draws_nothing() {
+        let mut state = backbuffer_state(640, 480);
+        state.mode = OverlayMode::SelectionActive;
+        state.composite_scene();
+        assert_eq!(rgb_at(&state, 10, 10), [0, 0, 0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "Overlay pixel buffer is not initialized")]
+    fn composing_needs_a_pixel_buffer() {
+        let mut state = OverlayState::create_test_state(Rc::new(CaptureBuffer::dummy(64, 64)));
+        state.composite_scene();
+    }
+
+    #[test]
+    fn the_editor_scene_draws_the_frame_and_chrome_that_the_export_leaves_out() {
+        let mut editor = scene();
+        editor.composite_scene();
+        let amber = crate::theme::BRAND_AMBER_BGRA;
+        assert_eq!(rgb_at(&editor, 200, 140), [0, 0, 0]);
+        assert_eq!(rgb_at(&editor, 10, 10), [DIMMED[0], DIMMED[1], DIMMED[2]]);
+        assert_eq!(
+            rgb_at(&editor, SEL.left - 1, SEL.top + 20),
+            [amber[0], amber[1], amber[2]]
+        );
+        assert!(editor.toolbar.is_some());
+        assert!(editor.hud_rect.is_some());
+
+        let mut export = scene();
+        export.composite_scene_with(CompositionPolicy::EXPORT);
+        assert_eq!(
+            rgb_at(&export, SEL.left - 1, SEL.top + 20),
+            [DIMMED[0], DIMMED[1], DIMMED[2]]
+        );
+        assert!(export.toolbar.is_none());
+        assert!(export.hud_rect.is_none());
+    }
+
+    #[test]
+    fn drawing_stays_inside_the_selection() {
+        let mut state = scene();
+        state.objects.push(AnnotationObject::new(
+            1,
+            AnnotationKind::Rectangle {
+                rect: Rect::new(60, 100, 250, 160),
+                color: RED,
+                thickness: 4,
+            },
+        ));
+        state.composite_scene();
+        assert!(count_color(&state, Rect::new(100, 90, 300, 170), RED) > 0);
+        assert_eq!(count_color(&state, Rect::new(54, 100, 66, 160), RED), 0);
+    }
 }
