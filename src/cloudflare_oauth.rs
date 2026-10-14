@@ -20,7 +20,7 @@ const CALLBACK_PORT: u16 = 38481;
 const MAX_ACCOUNTS: usize = 200;
 const WORKER_SOURCE: &str = include_str!("../cloudflare/worker.mjs");
 /// Must equal `WORKER_VERSION` in `cloudflare/worker.mjs` (checked by a test).
-pub const WORKER_VERSION: u64 = 3;
+pub const WORKER_VERSION: u64 = 4;
 /// Per-account rate-limit namespace for share-link views (60 per IP per minute).
 const VIEW_LIMITER: &str = "4917";
 
@@ -204,32 +204,42 @@ fn constant_equal(left: &[u8], right: &[u8]) -> bool {
     difference == 0
 }
 
+/// The app icon as a favicon, matching the share pages served by the Worker.
+const CALLBACK_ICON: &str = "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%20256%20256%22%20fill%3D%22none%22%3E%3Crect%20x%3D%2216%22%20y%3D%2216%22%20width%3D%22224%22%20height%3D%22224%22%20rx%3D%2252%22%20fill%3D%22%23F59E0B%22%2F%3E%3Cpath%20d%3D%22M184%20104V76C184%2064.9543%20175.046%2056%20164%2056H76C64.9543%2056%2056%2064.9543%2056%2076V164C56%20175.046%2064.9543%20184%2076%20184H104%22%20stroke%3D%22%23141413%22%20stroke-width%3D%2222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%2F%3E%3Cpath%20d%3D%22M120%20120L210%20150L168%20168L150%20210L120%20120Z%22%20fill%3D%22%23FFFFFF%22%20stroke%3D%22%23141413%22%20stroke-width%3D%2212%22%20stroke-linejoin%3D%22round%22%2F%3E%3C%2Fsvg%3E";
+const CALLBACK_CHECK: &str = r#"<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>"#;
+const CALLBACK_CROSS: &str = r#"<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>"#;
+/// Windows 11 look shared with the Worker's share pages: Segoe UI Variable, Fluent
+/// neutrals in light and dark, an 8 px card and amber only as the accent.
+const CALLBACK_CSS: &str = r#":root{--bg:#F3F3F3;--card:#FFFFFF;--fg:#1A1A1A;--muted:#5D5D5D;--line:#E5E5E5;--accent:#F59E0B;--ink:#141413}@media (prefers-color-scheme:dark){:root{--bg:#202020;--card:#2B2B2B;--fg:#FFFFFF;--muted:#C5C5C5;--line:#3A3A3A}}*{box-sizing:border-box}body{margin:0;min-height:100dvh;display:flex;flex-direction:column;background:var(--bg);color:var(--fg);font:16px/1.5 "Segoe UI Variable Text","Segoe UI",system-ui,sans-serif}main{margin:auto}.card{width:min(26rem,100% - 2rem);padding:2rem;background:var(--card);border:1px solid var(--line);border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,.08)}.glyph{display:grid;place-items:center;width:2.5rem;height:2.5rem;margin-bottom:1rem;border-radius:8px;background:var(--accent);color:var(--ink)}h1{margin:0 0 .5rem;font-size:1.25rem;font-weight:600;line-height:1.3}.note{margin:0;color:var(--muted)}footer{padding:1rem;text-align:center;color:var(--muted);font-size:.875rem}"#;
+
 fn callback_reply(socket: &mut TcpStream, accepted: bool) {
     use crate::i18n::t;
-    let html = if accepted {
-        format!(
-            "<!doctype html><html lang={}><meta charset=utf-8><title>isolmaSS · {}</title><main><h1>{}</h1><p>{}</p></main><script>window.close()</script>",
-            crate::i18n::code(),
+    let (title, heading, note, glyph) = if accepted {
+        (
             t("Connecting"),
             t("Permission granted"),
-            t("Setup is finishing in the app. You can close this tab.")
+            t("You can close this tab and return to isolmaSS."),
+            CALLBACK_CHECK,
         )
     } else {
-        format!(
-            "<!doctype html><html lang={}><meta charset=utf-8><title>isolmaSS · {}</title><main><h1>{}</h1><p>{}</p></main>",
-            crate::i18n::code(),
+        (
             t("Stopped"),
             t("Could not connect"),
-            t("Check the error message in the app.")
+            t("Check the error message in the app."),
+            CALLBACK_CROSS,
         )
     };
+    let html = format!(
+        "<!doctype html><html lang=\"{lang}\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"color-scheme\" content=\"light dark\"><meta name=\"robots\" content=\"noindex\"><title>isolmaSS · {title}</title><link rel=\"icon\" type=\"image/svg+xml\" href=\"{CALLBACK_ICON}\"><style>{CALLBACK_CSS}</style></head><body><main class=\"card\"><div class=\"glyph\">{glyph}</div><h1>{heading}</h1><p class=\"note\">{note}</p></main><footer>isolmaSS</footer></body></html>",
+        lang = crate::i18n::code(),
+    );
     let status = if accepted {
         "200 OK"
     } else {
         "400 Bad Request"
     };
     let head = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; script-src 'unsafe-inline'\r\nX-Content-Type-Options: nosniff\r\n\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'\r\nX-Content-Type-Options: nosniff\r\n\r\n",
         html.len()
     );
     let _ = socket
