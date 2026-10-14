@@ -434,7 +434,8 @@ fn an_upload_that_cannot_reach_its_window_does_not_wait_for_setup() {
     }
     let error = state
         .begin_upload(window.0)
-        .expect_err("the setup request cannot be posted");
+        .err()
+        .expect("the setup request cannot be posted");
     assert!(!error.is_empty());
     assert!(!state.setup_pending, "a failed request is not pending");
 }
