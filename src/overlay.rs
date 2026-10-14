@@ -30,10 +30,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_DOWN, VK_ESCAPE, VK_OEM_COMMA, VK_RETURN, VK_SHIFT, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CS_DBLCLKS, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetCursorPos,
-    GetWindowLongPtrW, IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_IBEAM, IDC_SIZEALL, IDC_SIZENESW,
-    IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, KillTimer, LWA_ALPHA, LoadCursorW, MA_ACTIVATE,
-    RegisterClassExW, SM_CXDRAG, SM_CYDRAG, SW_SHOW, SetCursor, SetForegroundWindow,
+    CS_DBLCLKS, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetCaretBlinkTime,
+    GetCursorPos, GetWindowLongPtrW, IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_IBEAM, IDC_SIZEALL,
+    IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, KillTimer, LWA_ALPHA, LoadCursorW,
+    MA_ACTIVATE, RegisterClassExW, SM_CXDRAG, SM_CYDRAG, SW_SHOW, SetCursor, SetForegroundWindow,
     SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, ShowWindow, WM_CHAR, WM_CLOSE,
     WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION,
     WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
@@ -50,6 +50,14 @@ const OVERLAY_CLASS_NAME: windows::core::PCWSTR = w!("isolmaSS_OverlayClass");
 
 const DEFAULT_FONT_SIZE: i32 = 22;
 const DEFAULT_BLUR_BLOCK: i32 = 12;
+const CARET_TIMER: usize = 1;
+const FADE_TIMER: usize = 2;
+/// Length of the dimming fade-in when the overlay opens.
+const FADE_IN_MS: u32 = 120;
+/// Fade timer period, about one display frame.
+const FADE_STEP_MS: u32 = 16;
+/// `wParam` flag of the mouse messages: Shift is held.
+const MK_SHIFT: usize = 0x0004;
 const WM_EDITOR_SETTINGS: u32 = 0x8000 + 301;
 const WM_EDITOR_ERROR: u32 = 0x8000 + 302;
 const WM_EDITOR_SAVE_AS: u32 = 0x8000 + 303;
@@ -79,7 +87,7 @@ pub fn is_editor_shortcut(vk: u32, modifiers: u32, editing: bool) -> bool {
     }
     if modifiers & MOD_CONTROL.0 != 0 {
         matches!(vk, 0x43 | 0x53 | 0x55 | 0x5a | 0x59 | 0xbc | 37..=40)
-            || editing && matches!(vk, 0x41 | 0x56)
+            || editing && matches!(vk, 0x41 | 0x56 | 0x58 | 8 | 46)
     } else {
         matches!(vk, 8 | 13 | 27 | 35..=40 | 46) || !editing && tool_for_key(vk).is_some()
     }
@@ -107,11 +115,16 @@ fn intersect_rects(a: Rect, b: Rect) -> Rect {
 
 /// Edge length of a selection grip; `Rect::hit_test_selection` uses half of it.
 fn selection_handle_size(dpi: u32) -> i32 {
-    8 * dpi as i32 / 96
+    (8 * dpi as i32 / 96).max(8)
 }
 
+/// Grips sit on the accent frame drawn around the selection, so the zones follow it.
 fn hit_selection(selection: &Rect, pt: (i32, i32), dpi: u32) -> SelectionHitZone {
-    selection.hit_test_selection(pt, 4 * dpi as i32 / 96, selection_handle_size(dpi))
+    selection.selection_frame(dpi).hit_test_selection(
+        pt,
+        4 * dpi as i32 / 96,
+        selection_handle_size(dpi),
+    )
 }
 
 /// Half size, in pixels, of an object's resize grip and its hit tolerance.
@@ -143,7 +156,8 @@ fn place_capture_hud(selection: Rect, viewport: Rect, dpi: u32, obstacles: &[Rec
     let width = scale(136).min(viewport.width().max(1));
     let height = scale(28);
     let grip = selection_handle_size(dpi);
-    let gap = grip / 2 + scale(4);
+    let frame = Rect::selection_frame_thickness(dpi);
+    let gap = frame + grip / 2 + scale(4);
     let max_x = (viewport.right - width).max(viewport.left);
     let x = selection.left.clamp(viewport.left, max_x);
     let above = Rect::new(
@@ -162,7 +176,7 @@ fn place_capture_hud(selection: Rect, viewport: Rect, dpi: u32, obstacles: &[Rec
     let inside_y = (selection.top + scale(8) + grip)
         .clamp(viewport.top, (viewport.bottom - height).max(viewport.top));
     let inside = Rect::new(inside_x, inside_y, inside_x + width, inside_y + height);
-    let grips = selection_grip_boxes(&selection, grip / 2 + scale(1));
+    let grips = selection_grip_boxes(&selection.selection_frame(dpi), grip / 2 + scale(1));
     [above, below, inside]
         .into_iter()
         .filter(|rect| rect.top >= viewport.top && rect.bottom <= viewport.bottom)
@@ -398,10 +412,42 @@ struct DragObjectState {
     original_kind: AnnotationKind,
 }
 
+/// Blink period for the system caret blink time: `INFINITE` turns blinking off, 0 is a
+/// failed query and falls back to the Windows default.
+fn caret_blink_interval(blink_time: u32) -> Option<u32> {
+    match blink_time {
+        u32::MAX => None,
+        0 => Some(500),
+        milliseconds => Some(milliseconds),
+    }
+}
+
+/// Starts or restarts the caret blink cycle at the system rate. Restarting makes the
+/// caret solid for a whole period after every edit; with blinking off it stays solid.
+fn start_caret_timer(hwnd: HWND) {
+    unsafe {
+        match caret_blink_interval(GetCaretBlinkTime()) {
+            Some(interval) => {
+                let _ = SetTimer(hwnd, CARET_TIMER, interval, None);
+            }
+            None => {
+                let _ = KillTimer(hwnd, CARET_TIMER);
+            }
+        }
+    }
+}
+
+/// Window opacity `elapsed_ms` into the opening fade: eases out from nearly clear to opaque.
+fn fade_alpha(elapsed_ms: u32) -> u8 {
+    let progress = elapsed_ms.min(FADE_IN_MS) as f32 / FADE_IN_MS as f32;
+    let eased = 1.0 - (1.0 - progress) * (1.0 - progress);
+    (1.0 + 254.0 * eased).round() as u8
+}
+
 /// Stops the caret timer and hands the keyboard back to shortcuts and the IME.
 fn stop_text_input(hwnd: HWND) {
     unsafe {
-        let _ = KillTimer(hwnd, 1);
+        let _ = KillTimer(hwnd, CARET_TIMER);
     }
     set_overlay_text_editing(false);
     set_overlay_ime_composing(false);
@@ -464,6 +510,10 @@ pub struct OverlayState {
     dragging_object: Option<DragObjectState>,
     dragging_selection: Option<DragSelectionState>,
     text_edit: Option<TextEditState>,
+    /// The button went down inside the text box: moving the pointer extends the selection.
+    text_dragging: bool,
+    /// Start of the opening fade; `None` once the overlay is fully opaque.
+    fade_started: Option<std::time::Instant>,
     /// A press outside the selection becomes a new region only once the pointer drags.
     pending_reselect: Option<(i32, i32)>,
     /// A new region was started outside the previous session; Esc puts that session back.
@@ -520,6 +570,11 @@ impl OverlayState {
     /// Aborts the gesture in progress and puts back the state it started from.
     fn cancel_active_gesture(&mut self) -> bool {
         let mut cancelled = self.pending_reselect.take().is_some();
+        cancelled |= self
+            .toolbar
+            .as_mut()
+            .and_then(|toolbar| toolbar.pressed_item.take())
+            .is_some();
         cancelled |= self.drawing_shape.take().is_some();
         if let Some(drag) = self.dragging_object.take() {
             if let Some(object) = self.objects.iter_mut().find(|object| object.id == drag.id) {
@@ -660,6 +715,8 @@ impl OverlayState {
             dragging_object: None,
             dragging_selection: None,
             text_edit: None,
+            text_dragging: false,
+            fade_started: None,
             pending_reselect: None,
             reselecting: false,
             discarded_session: None,
@@ -816,6 +873,176 @@ impl OverlayState {
                 };
             }
             self.redraw(hwnd);
+        }
+    }
+
+    /// Runs a toolbar command. Buttons act when released over themselves; the rows of the
+    /// line-width wheel act on press because dragging them scrolls the wheel.
+    fn activate_toolbar_item(&mut self, hwnd: HWND, item: ToolbarItem, pt: (i32, i32)) {
+        if !matches!(
+            item,
+            ToolbarItem::Thickness | ToolbarItem::ThicknessOption(_)
+        ) && self.thickness_input.take().is_some()
+        {
+            set_overlay_text_editing(false);
+        }
+        // Picking a color recolors the text being typed instead of ending it.
+        if item != ToolbarItem::Color {
+            self.commit_text(hwnd);
+        }
+
+        match item {
+            ToolbarItem::Tool(k) => {
+                self.active_tool = k;
+                self.persist_editor_preferences();
+                self.selected_id = None;
+                self.redraw(hwnd);
+            }
+            ToolbarItem::MoreTools => {
+                self.tools_expanded = !self.tools_expanded;
+                self.redraw(hwnd);
+            }
+            ToolbarItem::Action(ToolbarAction::Undo) => {
+                self.history.undo(&mut self.objects);
+                if let Some(selection) = self.history.take_selection_update() {
+                    self.committed_selection = Some(selection);
+                }
+                self.selected_id = None;
+                self.redraw(hwnd);
+            }
+            ToolbarItem::Action(ToolbarAction::Redo) => {
+                self.history.redo(&mut self.objects);
+                if let Some(selection) = self.history.take_selection_update() {
+                    self.committed_selection = Some(selection);
+                }
+                self.selected_id = None;
+                self.redraw(hwnd);
+            }
+            ToolbarItem::Action(ToolbarAction::Save) => match self.save_selection_to_file() {
+                Ok(path) => {
+                    if self.settings.notify_after_save {
+                        crate::tray::show_notification(
+                            crate::i18n::t("Screenshot saved"),
+                            &path.display().to_string(),
+                        );
+                    }
+                    if self.settings.close_after_action {
+                        let _ = unsafe { DestroyWindow(hwnd) };
+                    } else {
+                        self.redraw(hwnd);
+                    }
+                }
+                Err(error) => Self::show_action_error(hwnd, crate::i18n::t("Save failed"), &error),
+            },
+            ToolbarItem::Action(ToolbarAction::Copy) => {
+                match self.copy_selection_to_clipboard(hwnd) {
+                    Ok(()) => {
+                        if self.settings.close_after_action {
+                            let _ = unsafe { DestroyWindow(hwnd) };
+                        } else {
+                            self.redraw(hwnd);
+                        }
+                    }
+                    Err(error) => {
+                        Self::show_action_error(hwnd, crate::i18n::t("Copy failed"), &error)
+                    }
+                }
+            }
+            ToolbarItem::Action(ToolbarAction::Upload) => {
+                if let Err(error) = self.upload_selection(hwnd) {
+                    Self::show_action_error(hwnd, crate::i18n::t("Upload failed"), &error);
+                }
+            }
+            ToolbarItem::Action(ToolbarAction::Settings) => unsafe {
+                let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                    hwnd,
+                    WM_EDITOR_SETTINGS,
+                    WPARAM(0),
+                    LPARAM(0),
+                );
+            },
+            ToolbarItem::Action(ToolbarAction::Cancel) => {
+                self.discard_session();
+                self.redraw(hwnd);
+            }
+            ToolbarItem::Color => unsafe {
+                let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                    hwnd,
+                    WM_EDITOR_PICK_COLOR,
+                    WPARAM(0),
+                    LPARAM(0),
+                );
+            },
+            ToolbarItem::Thickness => {
+                let open = self.thickness_input.take().is_none();
+                if open {
+                    self.thickness_input = Some(String::new());
+                }
+                set_overlay_text_editing(open);
+                self.redraw(hwnd);
+            }
+            ToolbarItem::ThicknessOption(value) => {
+                self.thickness_drag = Some(ThicknessDrag {
+                    start_y: pt.1,
+                    start_value: self.active_thickness,
+                    picked: value,
+                    moved: false,
+                });
+                self.thickness_drag_original = self.selected_id.and_then(|id| {
+                    self.objects
+                        .iter()
+                        .find(|object| object.id == id)
+                        .map(|object| (id, object.kind.clone()))
+                });
+            }
+        }
+    }
+
+    /// Opens the Text object under `pt` for editing. `place_caret` puts the caret where
+    /// it was clicked instead of after the last character.
+    fn begin_text_reedit(&mut self, hwnd: HWND, pt: (i32, i32), place_caret: bool) -> bool {
+        let Some(object) = self.objects.iter().rfind(|object| {
+            matches!(object.kind, AnnotationKind::Text { .. }) && object.hit_test(pt)
+        }) else {
+            return false;
+        };
+        let id = object.id;
+        let AnnotationKind::Text {
+            pos,
+            text,
+            color,
+            font_size,
+        } = object.kind.clone()
+        else {
+            return false;
+        };
+        self.dragging_object = None;
+        let mut edit = TextEditState::new(pos, text, color, font_size, Some(id));
+        if place_caret {
+            let at = edit.caret_at(pt.0);
+            edit.move_to(at, false);
+        }
+        self.text_edit = Some(edit);
+        start_caret_timer(hwnd);
+        set_overlay_text_editing(true);
+        self.selected_id = None;
+        self.redraw(hwnd);
+        true
+    }
+
+    /// One step of the opening fade; the timer stops once the overlay is opaque.
+    fn advance_fade(&mut self, hwnd: HWND) {
+        let elapsed = self.fade_started.map_or(FADE_IN_MS, |started| {
+            started.elapsed().as_millis().min(FADE_IN_MS as u128) as u32
+        });
+        unsafe {
+            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), fade_alpha(elapsed), LWA_ALPHA);
+            if elapsed >= FADE_IN_MS {
+                let _ = KillTimer(hwnd, FADE_TIMER);
+            }
+        }
+        if elapsed >= FADE_IN_MS {
+            self.fade_started = None;
         }
     }
 
@@ -1003,22 +1230,49 @@ impl OverlayState {
                     let shift =
                         mods as u32 & windows::Win32::UI::Input::KeyboardAndMouse::MOD_SHIFT.0 != 0;
                     match vk {
+                        8 if ctrl_down => {
+                            edit.delete_word(false);
+                        }
                         8 => {
                             edit.backspace();
+                        }
+                        46 if ctrl_down => {
+                            edit.delete_word(true);
                         }
                         46 => {
                             edit.delete();
                         }
-                        37 => edit.move_to(edit.caret.saturating_sub(1), shift),
-                        39 => edit.move_to(edit.caret + 1, shift),
+                        37 if ctrl_down => edit.move_word(false, shift),
+                        37 => edit.step(false, shift),
+                        39 if ctrl_down => edit.move_word(true, shift),
+                        39 => edit.step(true, shift),
                         36 => edit.move_to(0, shift),
                         35 => edit.move_to(edit.text.chars().count(), shift),
                         0x41 if ctrl_down => edit.select_all(),
+                        0x58 if ctrl_down => {
+                            if let Some(selected) = edit.selected_text() {
+                                match crate::clipboard::copy_text_to_clipboard(
+                                    Some(hwnd),
+                                    &selected,
+                                ) {
+                                    Ok(()) => {
+                                        edit.delete_selected();
+                                    }
+                                    Err(error) => Self::show_action_error(
+                                        hwnd,
+                                        crate::i18n::t("Cut failed"),
+                                        &error.to_string(),
+                                    ),
+                                }
+                            }
+                        }
                         0x5a if ctrl_down => edit.undo(),
                         0x59 if ctrl_down => edit.redo(),
                         _ => {}
                     }
+                    edit.caret_visible = true;
                 }
+                start_caret_timer(hwnd);
                 self.redraw(hwnd);
                 return LRESULT(0);
             }
@@ -1229,6 +1483,8 @@ impl OverlayState {
         }
         if let Some(edit) = &mut self.text_edit {
             edit.insert_utf16(ch_code);
+            edit.caret_visible = true;
+            start_caret_timer(hwnd);
             self.redraw(hwnd);
         }
         LRESULT(0)
@@ -1832,9 +2088,15 @@ unsafe extern "system" fn overlay_wnd_proc(
         WM_TIMER => {
             if !state_ptr.is_null() {
                 let state = unsafe { &mut *state_ptr };
-                if let Some(edit) = &mut state.text_edit {
-                    edit.caret_visible = !edit.caret_visible;
-                    state.redraw_chrome(hwnd);
+                match wparam.0 {
+                    CARET_TIMER => {
+                        if let Some(edit) = &mut state.text_edit {
+                            edit.caret_visible = !edit.caret_visible;
+                            state.redraw_chrome(hwnd);
+                        }
+                    }
+                    FADE_TIMER => state.advance_fade(hwnd),
+                    _ => {}
                 }
             }
             LRESULT(0)
@@ -1856,43 +2118,15 @@ unsafe extern "system" fn overlay_wnd_proc(
                     .toolbar
                     .as_ref()
                     .is_some_and(|toolbar| toolbar.contains_point(pt));
+                // Double-clicking a committed text object reopens it, caret after the last
+                // character. A text box already open takes the click as a caret placement.
                 if state.mode == OverlayMode::SelectionActive
                     && state.active_tool == ToolKind::Select
+                    && state.text_edit.is_none()
                     && !over_toolbar
+                    && state.begin_text_reedit(hwnd, pt, false)
                 {
-                    // Double-click on existing committed text object: re-opens it in text editing mode with caret at the end!
-                    if let Some(pos) = state.objects.iter().rposition(|o| {
-                        if let AnnotationKind::Text { .. } = o.kind {
-                            o.hit_test(pt)
-                        } else {
-                            false
-                        }
-                    }) {
-                        let obj = state.objects[pos].clone();
-                        if let AnnotationKind::Text {
-                            pos: t_pos,
-                            text,
-                            color,
-                            font_size,
-                        } = obj.kind
-                        {
-                            state.dragging_object = None;
-                            state.text_edit = Some(TextEditState::new(
-                                t_pos,
-                                text,
-                                color,
-                                font_size,
-                                Some(obj.id),
-                            ));
-                            unsafe {
-                                let _ = SetTimer(hwnd, 1, 500, None);
-                            }
-                            set_overlay_text_editing(true);
-                            state.selected_id = None;
-                            state.redraw(hwnd);
-                            return LRESULT(0);
-                        }
-                    }
+                    return LRESULT(0);
                 }
                 // A fast second press is an ordinary press, unless the first one belonged
                 // to another mode (double-clicking a hovered window to snap it).
@@ -2270,7 +2504,20 @@ unsafe extern "system" fn overlay_wnd_proc(
                             return LRESULT(0);
                         }
 
-                        // 4. Toolbar hover update
+                        // 4. Selecting text with the pointer
+                        if state.text_dragging {
+                            if let Some(edit) = &mut state.text_edit {
+                                let at = edit.caret_at(client_x);
+                                if at != edit.caret {
+                                    edit.move_to(at, true);
+                                    start_caret_timer(hwnd);
+                                    state.redraw_chrome(hwnd);
+                                }
+                            }
+                            return LRESULT(0);
+                        }
+
+                        // 5. Toolbar hover update
                         if state.toolbar.as_mut().is_some_and(|tb| tb.update_hover(pt)) {
                             state.redraw_chrome(hwnd);
                         }
@@ -2303,138 +2550,20 @@ unsafe extern "system" fn overlay_wnd_proc(
                     }
                     OverlayMode::DraggingSelection => {}
                     OverlayMode::SelectionActive => {
-                        // 1. Toolbar button click
-                        if let Some(item) = state.toolbar.as_ref().and_then(|tb| tb.hit_test(pt)) {
-                            if !matches!(
-                                item,
-                                ToolbarItem::Thickness | ToolbarItem::ThicknessOption(_)
-                            ) && state.thickness_input.take().is_some()
-                            {
-                                set_overlay_text_editing(false);
-                            }
-                            // Picking a color recolors the text being typed instead of ending it.
-                            if item != ToolbarItem::Color {
-                                state.commit_text(hwnd);
-                            }
+                        // A press that never got its release must not fire on the next one.
+                        if let Some(toolbar) = &mut state.toolbar {
+                            toolbar.pressed_item = None;
+                        }
 
-                            match item {
-                                ToolbarItem::Tool(k) => {
-                                    state.active_tool = k;
-                                    state.persist_editor_preferences();
-                                    state.selected_id = None;
-                                    state.redraw(hwnd);
+                        // 1. Toolbar button: pressed now, executed when released over it.
+                        if let Some(item) = state.toolbar.as_ref().and_then(|tb| tb.hit_test(pt)) {
+                            if matches!(item, ToolbarItem::ThicknessOption(_)) {
+                                state.activate_toolbar_item(hwnd, item, pt);
+                            } else {
+                                if let Some(toolbar) = &mut state.toolbar {
+                                    toolbar.pressed_item = Some(item);
                                 }
-                                ToolbarItem::MoreTools => {
-                                    state.tools_expanded = !state.tools_expanded;
-                                    state.redraw(hwnd);
-                                }
-                                ToolbarItem::Action(ToolbarAction::Undo) => {
-                                    state.history.undo(&mut state.objects);
-                                    if let Some(selection) = state.history.take_selection_update() {
-                                        state.committed_selection = Some(selection);
-                                    }
-                                    state.selected_id = None;
-                                    state.redraw(hwnd);
-                                }
-                                ToolbarItem::Action(ToolbarAction::Redo) => {
-                                    state.history.redo(&mut state.objects);
-                                    if let Some(selection) = state.history.take_selection_update() {
-                                        state.committed_selection = Some(selection);
-                                    }
-                                    state.selected_id = None;
-                                    state.redraw(hwnd);
-                                }
-                                ToolbarItem::Action(ToolbarAction::Save) => {
-                                    match state.save_selection_to_file() {
-                                        Ok(path) => {
-                                            if state.settings.notify_after_save {
-                                                crate::tray::show_notification(
-                                                    crate::i18n::t("Screenshot saved"),
-                                                    &path.display().to_string(),
-                                                );
-                                            }
-                                            if state.settings.close_after_action {
-                                                let _ = unsafe { DestroyWindow(hwnd) };
-                                            } else {
-                                                state.redraw(hwnd);
-                                            }
-                                        }
-                                        Err(error) => OverlayState::show_action_error(
-                                            hwnd,
-                                            crate::i18n::t("Save failed"),
-                                            &error,
-                                        ),
-                                    }
-                                }
-                                ToolbarItem::Action(ToolbarAction::Copy) => {
-                                    match state.copy_selection_to_clipboard(hwnd) {
-                                        Ok(()) => {
-                                            if state.settings.close_after_action {
-                                                let _ = unsafe { DestroyWindow(hwnd) };
-                                            } else {
-                                                state.redraw(hwnd);
-                                            }
-                                        }
-                                        Err(error) => OverlayState::show_action_error(
-                                            hwnd,
-                                            crate::i18n::t("Copy failed"),
-                                            &error,
-                                        ),
-                                    }
-                                }
-                                ToolbarItem::Action(ToolbarAction::Upload) => {
-                                    if let Err(error) = state.upload_selection(hwnd) {
-                                        OverlayState::show_action_error(
-                                            hwnd,
-                                            crate::i18n::t("Upload failed"),
-                                            &error,
-                                        );
-                                    }
-                                }
-                                ToolbarItem::Action(ToolbarAction::Settings) => unsafe {
-                                    let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
-                                        hwnd,
-                                        WM_EDITOR_SETTINGS,
-                                        WPARAM(0),
-                                        LPARAM(0),
-                                    );
-                                },
-                                ToolbarItem::Action(ToolbarAction::Cancel) => {
-                                    state.discard_session();
-                                    state.redraw(hwnd);
-                                }
-                                ToolbarItem::Color => unsafe {
-                                    let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
-                                        hwnd,
-                                        WM_EDITOR_PICK_COLOR,
-                                        WPARAM(0),
-                                        LPARAM(0),
-                                    );
-                                },
-                                ToolbarItem::Thickness => {
-                                    let open = state.thickness_input.take().is_none();
-                                    if open {
-                                        state.thickness_input = Some(String::new());
-                                    }
-                                    set_overlay_text_editing(open);
-                                    state.redraw(hwnd);
-                                }
-                                ToolbarItem::ThicknessOption(value) => {
-                                    state.thickness_drag = Some(ThicknessDrag {
-                                        start_y: pt.1,
-                                        start_value: state.active_thickness,
-                                        picked: value,
-                                        moved: false,
-                                    });
-                                    state.thickness_drag_original =
-                                        state.selected_id.and_then(|id| {
-                                            state
-                                                .objects
-                                                .iter()
-                                                .find(|object| object.id == id)
-                                                .map(|object| (id, object.kind.clone()))
-                                        });
-                                }
+                                state.redraw_chrome(hwnd);
                             }
                             return LRESULT(0);
                         }
@@ -2450,6 +2579,22 @@ unsafe extern "system" fn overlay_wnd_proc(
 
                         if state.thickness_input.take().is_some() {
                             set_overlay_text_editing(false);
+                        }
+                        // A press inside the text box places the caret, Shift extends the
+                        // selection, and dragging selects; the text stays open.
+                        if state
+                            .text_edit
+                            .as_ref()
+                            .is_some_and(|edit| edit.contains(pt, state.dpi))
+                        {
+                            if let Some(edit) = &mut state.text_edit {
+                                let at = edit.caret_at(client_x);
+                                edit.move_to(at, wparam.0 & MK_SHIFT != 0);
+                            }
+                            state.text_dragging = true;
+                            start_caret_timer(hwnd);
+                            state.redraw_chrome(hwnd);
+                            return LRESULT(0);
                         }
                         // If text edit active, commit it when clicked elsewhere
                         if state.text_edit.is_some() {
@@ -2629,6 +2774,11 @@ unsafe extern "system" fn overlay_wnd_proc(
                                     state.redraw(hwnd);
                                 }
                                 ToolKind::Text => {
+                                    // Clicking existing text edits it instead of stacking a box.
+                                    if state.begin_text_reedit(hwnd, pt, true) {
+                                        state.text_dragging = true;
+                                        return LRESULT(0);
+                                    }
                                     state.text_edit = Some(TextEditState::new(
                                         pt,
                                         String::new(),
@@ -2636,9 +2786,7 @@ unsafe extern "system" fn overlay_wnd_proc(
                                         DEFAULT_FONT_SIZE * state.dpi as i32 / 96,
                                         None,
                                     ));
-                                    unsafe {
-                                        let _ = SetTimer(hwnd, 1, 500, None);
-                                    }
+                                    start_caret_timer(hwnd);
                                     set_overlay_text_editing(true);
                                     state.redraw(hwnd);
                                 }
@@ -2669,6 +2817,21 @@ unsafe extern "system" fn overlay_wnd_proc(
                 let _ = unsafe { ReleaseCapture() };
                 let shift_down = (unsafe { GetKeyState(VK_SHIFT.0 as i32) } as u16 & 0x8000) != 0;
                 state.pending_reselect = None;
+                state.text_dragging = false;
+                // A toolbar button acts only when the button is released over it.
+                if let Some(item) = state
+                    .toolbar
+                    .as_mut()
+                    .and_then(|toolbar| toolbar.pressed_item.take())
+                {
+                    let released_over = state.toolbar.as_ref().and_then(|tb| tb.hit_test(pt));
+                    if released_over == Some(item) {
+                        state.activate_toolbar_item(hwnd, item, pt);
+                    } else {
+                        state.redraw_chrome(hwnd);
+                    }
+                    return LRESULT(0);
+                }
                 if let Some(drag) = state.thickness_drag.take() {
                     if !drag.moved {
                         state.change_thickness(drag.picked, false);
@@ -3034,7 +3197,7 @@ mod tests {
         let selection = Rect::new(400, 300, 1000, 700);
         assert_eq!(
             place_capture_hud(selection, VIEWPORT, 96, &[]),
-            Rect::new(400, 264, 536, 292)
+            Rect::new(400, 262, 536, 290)
         );
     }
 
@@ -3043,7 +3206,7 @@ mod tests {
         let selection = Rect::new(200, 0, 900, 400);
         assert_eq!(
             place_capture_hud(selection, VIEWPORT, 96, &[]),
-            Rect::new(200, 408, 336, 436)
+            Rect::new(200, 410, 336, 438)
         );
     }
 
@@ -3053,7 +3216,7 @@ mod tests {
         let action_bar = Rect::new(348, 250, 632, 292);
         assert_eq!(
             place_capture_hud(selection, VIEWPORT, 96, &[action_bar]),
-            Rect::new(400, 708, 536, 736)
+            Rect::new(400, 710, 536, 738)
         );
     }
 
@@ -3061,7 +3224,7 @@ mod tests {
     fn hud_sits_inside_past_the_corner_grip_for_a_full_screen_selection() {
         let hud = place_capture_hud(VIEWPORT, VIEWPORT, 96, &[]);
         assert_eq!(hud, Rect::new(16, 16, 152, 44));
-        let grips = selection_grip_boxes(&VIEWPORT, 4);
+        let grips = selection_grip_boxes(&VIEWPORT.selection_frame(96), 4);
         assert!(grips.iter().all(|grip| !rects_intersect(&hud, grip)));
     }
 
@@ -3249,5 +3412,79 @@ mod tests {
         assert_eq!(state.mode(), OverlayMode::SelectionActive);
         assert_eq!(state.committed_selection(), Some(original));
         assert_eq!(state.object_count(), 1);
+    }
+
+    #[test]
+    fn escape_cancels_a_pressed_toolbar_button_only() {
+        let mut state = state_with_rectangle();
+        let selection = state.committed_selection().unwrap();
+        let mut toolbar = Toolbar::layout(
+            &selection,
+            Rect::new(0, 0, 800, 600),
+            ToolKind::Rectangle,
+            state.active_color,
+            state.active_thickness,
+            false,
+            true,
+            true,
+            false,
+            true,
+            false,
+            96,
+        );
+        toolbar.pressed_item = Some(ToolbarItem::Action(ToolbarAction::Cancel));
+        state.toolbar = Some(toolbar);
+        assert_eq!(state.handle_escape_action(), EscapeAction::CancelledGesture);
+        assert_eq!(state.toolbar.as_ref().unwrap().pressed_item, None);
+        assert_eq!(state.mode(), OverlayMode::SelectionActive);
+        assert_eq!(state.object_count(), 1);
+    }
+
+    #[test]
+    fn grip_zones_follow_the_frame_drawn_outside_the_selection() {
+        let selection = Rect::new(100, 100, 300, 200);
+        // The frame is two pixels out at 96 DPI, so the top-left grip is centred on (98, 98).
+        assert_eq!(
+            hit_selection(&selection, (95, 95), 96),
+            SelectionHitZone::TopLeftCorner
+        );
+        assert_ne!(
+            hit_selection(&selection, (103, 103), 96),
+            SelectionHitZone::TopLeftCorner
+        );
+        assert_eq!(
+            hit_selection(&selection, (200, 95), 96),
+            SelectionHitZone::TopEdge
+        );
+    }
+
+    #[test]
+    fn editing_text_forwards_word_shortcuts_to_the_overlay() {
+        let ctrl = MOD_CONTROL.0;
+        for vk in [8, 46, 0x58, 0x41, 0x56, 37, 39] {
+            assert!(is_editor_shortcut(vk, ctrl, true), "vk {vk:#x}");
+        }
+        // Outside a text box those keys belong to the focused application.
+        for vk in [8, 46, 0x58] {
+            assert!(!is_editor_shortcut(vk, ctrl, false), "vk {vk:#x}");
+        }
+    }
+
+    #[test]
+    fn caret_blinks_at_the_system_rate_unless_blinking_is_off() {
+        assert_eq!(caret_blink_interval(530), Some(530));
+        assert_eq!(caret_blink_interval(u32::MAX), None);
+        assert_eq!(caret_blink_interval(0), Some(500));
+    }
+
+    #[test]
+    fn fade_runs_from_nearly_clear_to_opaque_and_stays_there() {
+        assert_eq!(fade_alpha(0), 1);
+        assert_eq!(fade_alpha(FADE_IN_MS), 255);
+        assert_eq!(fade_alpha(FADE_IN_MS * 10), 255);
+        let steps: Vec<u8> = (0..=FADE_IN_MS).step_by(8).map(fade_alpha).collect();
+        assert!(steps.windows(2).all(|pair| pair[0] <= pair[1]));
+        // Ease-out: more than half of the opacity is reached by the midpoint.
+        assert!(fade_alpha(FADE_IN_MS / 2) > 128);
     }
 }

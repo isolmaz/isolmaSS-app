@@ -230,18 +230,26 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         &capture.original[offset..offset + 4]
     );
 
+    let frame = selection.selection_frame(96);
     CaptureBuffer::draw_border(
         &mut working_buffer,
         capture.width,
         capture.height,
-        &selection,
+        &frame,
         [246, 130, 59, 255],
-        2,
+        Rect::selection_frame_thickness(96),
     );
-    let border_offset = ((selection.top * capture.width + selection.left) * 4) as usize;
+    // The frame ring sits just outside the selection, so the first selected pixel stays
+    // exactly what will be exported.
+    let ring_offset = ((frame.top * capture.width + frame.left) * 4) as usize;
     assert_eq!(
-        &working_buffer[border_offset..border_offset + 4],
+        &working_buffer[ring_offset..ring_offset + 4],
         &[246, 130, 59, 255]
+    );
+    let selected_offset = ((selection.top * capture.width + selection.left) * 4) as usize;
+    assert_eq!(
+        &working_buffer[selected_offset..selected_offset + 4],
+        &capture.original[selected_offset..selected_offset + 4]
     );
 
     capture.restore_dimmed(&mut working_buffer, &selection.inflate(2, 2));
@@ -1111,8 +1119,9 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         96,
     );
 
-    // Verify 8x8 corner handle has white fill [255, 255, 255, 255]
-    let handle_center_offset = (20 * 100 + 20) * 4;
+    // Verify 8x8 corner handle, centred on the frame's outer corner, has white fill
+    let outer_corner = test_rect.selection_frame(96);
+    let handle_center_offset = ((outer_corner.top * 100 + outer_corner.left) * 4) as usize;
     assert_eq!(
         &test_buf[handle_center_offset..handle_center_offset + 4],
         &[255, 255, 255, 255]

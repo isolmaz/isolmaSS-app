@@ -43,11 +43,16 @@ pub struct Toolbar {
     pub wheel_bounds: Option<Rect>,
     pub buttons: Vec<ToolbarButton>,
     pub hovered_item: Option<ToolbarItem>,
+    /// The button held down by the primary mouse button. It is drawn pressed only while
+    /// it is also hovered, so dragging off it shows the command will not run.
+    pub pressed_item: Option<ToolbarItem>,
     pub active_color: [u8; 4],
     pub active_thickness: i32,
     pub dpi: u32,
     expanded: bool,
     viewport: Rect,
+    /// The captured region the panels float around; tooltips open away from it.
+    selection: Rect,
     wheel_row: i32,
 }
 
@@ -232,6 +237,15 @@ impl Toolbar {
         .map(|(right, below, x, y)| make_l(right, below, x, y))
         .find(|(tool, action)| contains(safe, *tool) && contains(safe, *action));
 
+        // A selection as tall as the work area (a window snapped to half the screen)
+        // leaves no room above or below it, but usually plenty beside it. The action bar
+        // stays level with the selection's bottom edge and the rail sits directly above.
+        let bar_top = selection.bottom.min(safe.bottom) - action_height;
+        let beside = [(false, selection.right + gap), (true, selection.left - gap)]
+            .into_iter()
+            .map(|(right, x)| make_l(right, true, x, bar_top))
+            .find(|(tool, action)| contains(safe, *tool) && contains(safe, *action));
+
         let inside = if selection.width() >= action_width + inner_pad * 2
             && selection.height() >= tool_height + action_height + inner_pad * 2
         {
@@ -243,7 +257,7 @@ impl Toolbar {
             None
         };
 
-        let (tool_bounds, action_bounds) = outside.or(inside).unwrap_or_else(|| {
+        let (tool_bounds, action_bounds) = outside.or(beside).or(inside).unwrap_or_else(|| {
             // A tiny selection cannot contain the editor. Keep the complete L bounded to
             // the selected monitor's work area rather than leaking onto another monitor.
             make_l(true, true, safe.right, safe.bottom - action_height)
@@ -323,11 +337,13 @@ impl Toolbar {
             wheel_bounds: None,
             buttons,
             hovered_item: None,
+            pressed_item: None,
             active_color,
             active_thickness,
             dpi,
             expanded,
             viewport,
+            selection: *selection,
             wheel_row: scale(Self::WHEEL_ROW),
         };
         if tool_height + action_height > safe.height() || action_width > safe.width() {
@@ -465,7 +481,7 @@ impl Toolbar {
 
     /// Flat, high-contrast controls share the settings window's visual language.
     pub fn render(&self, hdc: HDC, thickness_input: Option<&str>) {
-        use crate::drawing::{corner_diameter, icon, label, rounded};
+        use crate::drawing::{corner_diameter, elevation, icon, label, rounded};
         use crate::theme::{RADIUS_CONTROL, RADIUS_OVERLAY};
         let scale = |value: i32| (value * self.dpi as i32 / 96).max(1);
         // `rounded` takes the corner diameter; the radii are visible radii.
@@ -485,13 +501,7 @@ impl Toolbar {
             if index == 1 && self.tool_bounds == self.action_bounds {
                 continue;
             }
-            rounded(
-                hdc,
-                panel.inflate(1, 1),
-                corner(RADIUS_OVERLAY + 1),
-                stroke,
-                stroke,
-            );
+            elevation(hdc, panel, scale(RADIUS_OVERLAY), self.dpi);
             rounded(hdc, panel, corner(RADIUS_OVERLAY), card, stroke);
         }
         let mut wheel_drawn = false;
@@ -501,16 +511,11 @@ impl Toolbar {
                 && let Some(wheel) = self.wheel_bounds
             {
                 wheel_drawn = true;
-                rounded(
-                    hdc,
-                    wheel.inflate(1, 1),
-                    corner(RADIUS_OVERLAY + 1),
-                    stroke,
-                    stroke,
-                );
+                elevation(hdc, wheel, scale(RADIUS_OVERLAY), self.dpi);
                 rounded(hdc, wheel, corner(RADIUS_OVERLAY), card, stroke);
             }
             let hovered = self.hovered_item == Some(button.item) && button.is_enabled;
+            let pressed = hovered && self.pressed_item == Some(button.item);
             let selected = button.is_checked
                 && matches!(
                     button.item,
@@ -520,13 +525,18 @@ impl Toolbar {
                         | ToolbarItem::ThicknessOption(_)
                 );
             let primary = button.item == ToolbarItem::Action(ToolbarAction::Copy);
-            // Hover stays neutral so it never reads as a second selection.
-            let fill = if primary && hovered {
+            // Hover and press stay neutral so they never read as a second selection;
+            // a selected button keeps its tint and accent border while pressed.
+            let fill = if primary && pressed {
+                tokens.accent_pressed
+            } else if primary && hovered {
                 tokens.accent_hover
             } else if primary {
                 accent
             } else if selected {
                 tint
+            } else if pressed {
+                tokens.subtle_pressed
             } else if hovered {
                 tokens.subtle_hover
             } else {
@@ -665,20 +675,19 @@ impl Toolbar {
                 // The wheel rows already show their value.
                 ToolbarItem::ThicknessOption(_) => return,
             };
-            let margin = scale(4);
+            let keys = shortcut(item);
+            let size = scale(13);
+            let pad = scale(10);
+            let split = scale(8);
             // `label` draws with a negative (character-height) size; measure the same way.
-            let width = (crate::drawing::measure_text(tip, -scale(13)).0 + scale(20))
-                .min((self.viewport.width() - margin * 2).max(1));
-            let height = scale(30);
-            let x = button.rect.left.clamp(
-                self.viewport.left + margin,
-                (self.viewport.right - width - margin).max(self.viewport.left + margin),
-            );
-            let y = (button.rect.top - height - margin).clamp(
-                self.viewport.top + margin,
-                (self.viewport.bottom - height - margin).max(self.viewport.top + margin),
-            );
-            let bounds = Rect::new(x, y, x + width, y + height);
+            let tip_width = crate::drawing::measure_text(tip, -size).0;
+            let keys_width = keys.map_or(0, |keys| {
+                crate::drawing::measure_text(keys, -size).0 + split
+            });
+            let width = (tip_width + keys_width + pad * 2)
+                .min((self.viewport.width() - scale(4) * 2).max(1));
+            let bounds = self.tooltip_bounds(button.rect, width, scale(30));
+            elevation(hdc, bounds, scale(RADIUS_OVERLAY), self.dpi);
             rounded(
                 hdc,
                 bounds,
@@ -686,9 +695,97 @@ impl Toolbar {
                 tokens.card,
                 tokens.stroke,
             );
-            label(hdc, bounds, tip, scale(13), tokens.text, true);
+            let inner = Rect::new(
+                bounds.left + pad,
+                bounds.top,
+                bounds.right - pad,
+                bounds.bottom,
+            );
+            label(hdc, inner, tip, size, tokens.text, false);
+            if let Some(keys) = keys {
+                let left = (inner.left + tip_width + split).min(inner.right);
+                let rect = Rect::new(left, inner.top, inner.right, inner.bottom);
+                label(hdc, rect, keys, size, tokens.text_secondary, false);
+            }
         }
     }
+
+    /// Where the tooltip for the button at `anchor` opens. Rail buttons get it beside the
+    /// rail, vertically centred, so it never covers the next button in the column; the
+    /// action bar's buttons get it above or below. Either way it opens on the side away
+    /// from the selection when that fits, and is always kept inside the viewport.
+    fn tooltip_bounds(&self, anchor: Rect, width: i32, height: i32) -> Rect {
+        let margin = (4 * self.dpi as i32 / 96).max(1);
+        let view = self.viewport;
+        let (min_x, min_y) = (view.left + margin, view.top + margin);
+        let max_x = (view.right - width - margin).max(min_x);
+        let max_y = (view.bottom - height - margin).max(min_y);
+        let fits_x = |x: i32| (min_x..=max_x).contains(&x);
+        let fits_y = |y: i32| (min_y..=max_y).contains(&y);
+        let selection = self.selection;
+        let beside_rail = self.tool_bounds != self.action_bounds
+            && self.tool_bounds.contains(anchor.left, anchor.top);
+        if beside_rail {
+            let rail = self.tool_bounds;
+            let right = rail.right + margin;
+            let left = rail.left - margin - width;
+            let rail_is_right_of_selection =
+                rail.left + rail.right >= selection.left + selection.right;
+            let (first, second) = if rail_is_right_of_selection {
+                (right, left)
+            } else {
+                (left, right)
+            };
+            let x = [first, second]
+                .into_iter()
+                .find(|x| fits_x(*x))
+                .unwrap_or_else(|| first.clamp(min_x, max_x));
+            let y = ((anchor.top + anchor.bottom - height) / 2).clamp(min_y, max_y);
+            return Rect::new(x, y, x + width, y + height);
+        }
+        let below = anchor.bottom + margin;
+        let above = anchor.top - height - margin;
+        let bar = self.action_bounds;
+        let bar_is_below_selection = bar.top + bar.bottom >= selection.top + selection.bottom;
+        let (first, second) = if bar_is_below_selection {
+            (below, above)
+        } else {
+            (above, below)
+        };
+        let y = [first, second]
+            .into_iter()
+            .find(|y| fits_y(*y))
+            .unwrap_or_else(|| first.clamp(min_y, max_y));
+        let x = anchor.left.clamp(min_x, max_x);
+        Rect::new(x, y, x + width, y + height)
+    }
+}
+
+/// The keyboard shortcut shown after a toolbar tooltip. Key names are not translated.
+/// Every entry is handled by the editor's key handling in `overlay.rs`.
+fn shortcut(item: ToolbarItem) -> Option<&'static str> {
+    Some(match item {
+        ToolbarItem::Tool(ToolKind::Select) => "V",
+        ToolbarItem::Tool(ToolKind::Rectangle) => "R",
+        ToolbarItem::Tool(ToolKind::Arrow) => "A",
+        ToolbarItem::Tool(ToolKind::Pen) => "P",
+        ToolbarItem::Tool(ToolKind::Highlight) => "H",
+        ToolbarItem::Tool(ToolKind::Text) => "T",
+        ToolbarItem::Tool(ToolKind::Step) => "N",
+        ToolbarItem::Tool(ToolKind::Blur) => "B",
+        ToolbarItem::Tool(ToolKind::Redact) => "M",
+        ToolbarItem::Action(ToolbarAction::Undo) => "Ctrl+Z",
+        ToolbarItem::Action(ToolbarAction::Redo) => "Ctrl+Y",
+        ToolbarItem::Action(ToolbarAction::Save) => "Ctrl+S",
+        ToolbarItem::Action(ToolbarAction::Copy) => "Ctrl+C",
+        ToolbarItem::Action(ToolbarAction::Upload) => "Ctrl+U",
+        ToolbarItem::Action(ToolbarAction::Settings) => "Ctrl+,",
+        ToolbarItem::Action(ToolbarAction::Cancel) => "Esc",
+        ToolbarItem::MoreTools
+        | ToolbarItem::Color
+        | ToolbarItem::Thickness
+        | ToolbarItem::ThicknessOption(_) => return None,
+    })
 }
 
 /// Draw tool-specific geometry at a shared stroke weight; no misleading font glyph aliases.
@@ -806,8 +903,8 @@ pub fn show_command_menu(
             }
             ToolbarItem::Action(ToolbarAction::Settings) => crate::i18n::t("Settings").to_owned(),
             ToolbarItem::Action(ToolbarAction::Cancel) => crate::i18n::t("Cancel").to_owned(),
-            ToolbarItem::Color => crate::i18n::t("Choose color...").to_owned(),
-            ToolbarItem::Thickness => crate::i18n::t("Line width...").to_owned(),
+            ToolbarItem::Color => crate::i18n::t("Choose color…").to_owned(),
+            ToolbarItem::Thickness => crate::i18n::t("Line width…").to_owned(),
             ToolbarItem::ThicknessOption(value) => format!("{value} px"),
         }
     }
@@ -1006,6 +1103,35 @@ mod tests {
     }
 
     #[test]
+    fn half_screen_full_height_selection_gets_the_l_beside_it() {
+        let viewport = Rect::new(0, 0, 1920, 1040);
+        let selection = Rect::new(0, 0, 960, 1040);
+        let toolbar = layout(selection, viewport);
+        for panel in [toolbar.tool_bounds, toolbar.action_bounds] {
+            assert!(panel.left >= selection.right + Toolbar::GAP, "{panel:?}");
+            assert_in_viewport(panel, viewport);
+        }
+        assert_eq!(
+            toolbar.action_bounds.bottom,
+            viewport.bottom - Toolbar::OUTER_PAD
+        );
+        assert_eq!(toolbar.tool_bounds.bottom, toolbar.action_bounds.top);
+        assert_exact_l_corner(&toolbar);
+    }
+
+    #[test]
+    fn full_height_selection_on_the_right_gets_the_l_to_its_left() {
+        let viewport = Rect::new(0, 0, 1920, 1040);
+        let selection = Rect::new(960, 0, 1920, 1040);
+        let toolbar = layout(selection, viewport);
+        for panel in [toolbar.tool_bounds, toolbar.action_bounds] {
+            assert!(panel.right <= selection.left - Toolbar::GAP, "{panel:?}");
+            assert_in_viewport(panel, viewport);
+        }
+        assert_exact_l_corner(&toolbar);
+    }
+
+    #[test]
     fn selection_on_second_monitor_never_uses_neighbor() {
         let viewport = Rect::new(1920, 0, 3840, 1040);
         let toolbar = layout(Rect::new(1940, 120, 2520, 680), viewport);
@@ -1049,6 +1175,105 @@ mod tests {
                 && button.rect.right <= toolbar.tool_bounds.right.max(toolbar.action_bounds.right)
         }));
     }
+
+    fn overlaps(a: Rect, b: Rect) -> bool {
+        a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
+    }
+
+    fn rail_buttons(toolbar: &Toolbar) -> Vec<&ToolbarButton> {
+        toolbar
+            .buttons
+            .iter()
+            .filter(|button| {
+                toolbar
+                    .tool_bounds
+                    .contains(button.rect.left, button.rect.top)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rail_tooltips_open_beside_the_rail_away_from_the_selection() {
+        let viewport = Rect::new(0, 0, 1920, 1040);
+        // Rail right of the selection with room on its right, then the same rail with no
+        // room there, then a rail left of its selection.
+        let cases = [
+            (Rect::new(200, 100, 800, 600), true),
+            (Rect::new(1200, 100, 1800, 600), false),
+            (Rect::new(1500, 100, 1920, 600), false),
+        ];
+        for (selection, tooltip_right_of_rail) in cases {
+            let toolbar = layout(selection, viewport);
+            let rail = rail_buttons(&toolbar);
+            assert!(rail.len() > 5);
+            for button in rail {
+                let tip = toolbar.tooltip_bounds(button.rect, 150, 30);
+                assert_in_viewport(tip, viewport);
+                assert!(
+                    toolbar
+                        .buttons
+                        .iter()
+                        .all(|other| !overlaps(tip, other.rect)),
+                    "{tip:?} covers a button"
+                );
+                if tooltip_right_of_rail {
+                    assert!(tip.left >= toolbar.tool_bounds.right, "{tip:?}");
+                } else {
+                    assert!(tip.right <= toolbar.tool_bounds.left, "{tip:?}");
+                }
+                let centre = (button.rect.top + button.rect.bottom) / 2;
+                assert!(((tip.top + tip.bottom) / 2 - centre).abs() <= 1, "{tip:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn action_bar_tooltips_go_below_the_bar_and_flip_above_without_room() {
+        let viewport = Rect::new(0, 0, 1920, 1040);
+        let save = |toolbar: &Toolbar| {
+            toolbar
+                .buttons
+                .iter()
+                .find(|button| button.item == ToolbarItem::Action(ToolbarAction::Save))
+                .unwrap()
+                .rect
+        };
+        let toolbar = layout(Rect::new(200, 100, 800, 600), viewport);
+        let tip = toolbar.tooltip_bounds(save(&toolbar), 150, 30);
+        assert!(tip.top >= save(&toolbar).bottom, "{tip:?}");
+        assert_in_viewport(tip, viewport);
+
+        let toolbar = layout(viewport, viewport);
+        let tip = toolbar.tooltip_bounds(save(&toolbar), 150, 30);
+        assert!(tip.bottom <= save(&toolbar).top, "{tip:?}");
+        assert_in_viewport(tip, viewport);
+    }
+
+    #[test]
+    fn tool_shortcuts_match_the_editor_key_bindings() {
+        for tool in [
+            ToolKind::Select,
+            ToolKind::Rectangle,
+            ToolKind::Arrow,
+            ToolKind::Pen,
+            ToolKind::Highlight,
+            ToolKind::Text,
+            ToolKind::Step,
+            ToolKind::Blur,
+            ToolKind::Redact,
+        ] {
+            let key = shortcut(ToolbarItem::Tool(tool)).expect("every tool has a key");
+            assert_eq!(key.len(), 1, "{tool:?}");
+            assert_eq!(
+                crate::overlay::tool_for_key(u32::from(key.as_bytes()[0])),
+                Some(tool),
+                "{tool:?}"
+            );
+        }
+        assert_eq!(shortcut(ToolbarItem::Color), None);
+        assert_eq!(shortcut(ToolbarItem::MoreTools), None);
+    }
+
     #[test]
     fn high_dpi_short_monitor_keeps_every_command_clickable() {
         for (width, height, dpi) in [

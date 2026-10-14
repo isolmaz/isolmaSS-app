@@ -34,6 +34,24 @@ fn register_overlay_class() -> Result<()> {
     Ok(())
 }
 
+/// Whether the user allows animation inside windows (Settings > Accessibility > Visual effects).
+fn client_area_animation_enabled() -> bool {
+    use windows::Win32::Foundation::BOOL;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+    };
+    let mut enabled = BOOL(1);
+    let queried = unsafe {
+        SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            Some(std::ptr::from_mut(&mut enabled).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    };
+    queried.is_err() || enabled.as_bool()
+}
+
 pub fn show_overlay_session(
     capture: Rc<CaptureBuffer>,
     triggered: Instant,
@@ -146,6 +164,8 @@ fn run_session(
         dragging_object: None,
         dragging_selection: None,
         text_edit: None,
+        text_dragging: false,
+        fade_started: None,
         pending_reselect: None,
         reselecting: false,
         discarded_session: None,
@@ -193,8 +213,12 @@ fn run_session(
     let _window = crate::ui::OwnedWindow(hwnd);
     state.dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd) }.max(96);
 
+    // The dimming fades in over the live desktop, which is identical to the frozen capture
+    // beneath it; calibration and the "reduce animations" setting open fully opaque.
+    let fade = !measure && client_area_animation_enabled();
     unsafe {
-        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
+        let initial_alpha = if fade { fade_alpha(0) } else { 255 };
+        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), initial_alpha, LWA_ALPHA);
         SetWindowLongPtrW(
             hwnd,
             GWLP_USERDATA,
@@ -216,6 +240,12 @@ fn run_session(
     let visible = triggered.elapsed();
     if measure {
         return Ok((None, visible));
+    }
+    if fade {
+        state.fade_started = Some(Instant::now());
+        unsafe {
+            let _ = SetTimer(hwnd, FADE_TIMER, FADE_STEP_MS, None);
+        }
     }
     crate::diagnostics::record(
         "capture",

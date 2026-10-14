@@ -8,6 +8,8 @@ use windows::Win32::Graphics::Gdi::{
     SelectObject,
 };
 
+mod smooth;
+
 /// Available annotation tools.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ToolKind {
@@ -141,8 +143,44 @@ fn grip_half(dpi: u32) -> i32 {
     (4 * dpi / 96).max(4) as i32
 }
 
+/// Shaft end and head triangle of an arrow, in client coordinates.
+struct ArrowGeometry {
+    /// Where the shaft meets the head.
+    base: (f64, f64),
+    /// Head triangle: tip, left corner, right corner.
+    head: [(f64, f64); 3],
+}
+
+/// Lays out an arrow from `start` to `end`; `None` when it is too short to draw.
+fn arrow_geometry(start: (i32, i32), end: (i32, i32), thickness: i32) -> Option<ArrowGeometry> {
+    let dx = (end.0 - start.0) as f64;
+    let dy = (end.1 - start.1) as f64;
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 2.0 {
+        return None;
+    }
+
+    let u = (dx / len, dy / len);
+    let perp = (-u.1, u.0);
+    let head_len = (thickness as f64 * 2.5).clamp(16.0, 96.0).min(len * 0.5);
+    let head_width = head_len * 0.5 + thickness as f64 * 0.25;
+
+    let base = (end.0 as f64 - u.0 * head_len, end.1 as f64 - u.1 * head_len);
+    Some(ArrowGeometry {
+        base,
+        head: [
+            (end.0 as f64, end.1 as f64),
+            (base.0 + perp.0 * head_width, base.1 + perp.1 * head_width),
+            (base.0 - perp.0 * head_width, base.1 - perp.1 * head_width),
+        ],
+    })
+}
+
 pub fn render_pen_preview(hdc: HDC, points: &[(i32, i32)], color: [u8; 4], thickness: i32) {
     if points.len() < 2 {
+        return;
+    }
+    if smooth::polyline(hdc, points, color, thickness) {
         return;
     }
     thread_local! { static POINTS: std::cell::RefCell<Vec<POINT>> = const { std::cell::RefCell::new(Vec::new()) }; }
@@ -672,7 +710,8 @@ impl AnnotationObject {
         }
     }
 
-    /// Renders vector shapes (Rectangle, Arrow, Pen, Text) via native Win32 GDI.
+    /// Renders vector shapes (Rectangle, Arrow, Pen, Text) onto `hdc`. Strokes are
+    /// anti-aliased through GDI+ when it is available and drawn with plain GDI otherwise.
     pub fn render_gdi(&self, hdc: HDC) {
         match &self.kind {
             AnnotationKind::Rectangle {
@@ -680,6 +719,9 @@ impl AnnotationObject {
                 color,
                 thickness,
             } => {
+                if smooth::frame(hdc, *rect, *color, *thickness) {
+                    return;
+                }
                 let pen = unsafe { CreatePen(PS_SOLID, *thickness, bgra_to_colorref(*color)) };
                 if pen.is_invalid() {
                     return;
@@ -709,10 +751,10 @@ impl AnnotationObject {
                 color,
                 thickness,
             } => {
-                let dx = (end.0 - start.0) as f64;
-                let dy = (end.1 - start.1) as f64;
-                let len = (dx * dx + dy * dy).sqrt();
-                if len < 2.0 {
+                let Some(arrow) = arrow_geometry(*start, *end, *thickness) else {
+                    return;
+                };
+                if smooth::arrow(hdc, *start, &arrow, *color, *thickness) {
                     return;
                 }
 
@@ -728,14 +770,8 @@ impl AnnotationObject {
                     pen,
                 };
 
-                let u = (dx / len, dy / len);
-                let perp = (-u.1, u.0);
-                let head_len = (*thickness as f64 * 2.5).clamp(16.0, 96.0).min(len * 0.5);
-                let head_width = head_len * 0.5 + *thickness as f64 * 0.25;
-
-                let base = (end.0 as f64 - u.0 * head_len, end.1 as f64 - u.1 * head_len);
-                let p_left = (base.0 + perp.0 * head_width, base.1 + perp.1 * head_width);
-                let p_right = (base.0 - perp.0 * head_width, base.1 - perp.1 * head_width);
+                let base = arrow.base;
+                let [_, p_left, p_right] = arrow.head;
 
                 // Draw shaft
                 let shaft_points = [
@@ -1859,5 +1895,48 @@ mod tests {
             Some(AnnotationResizeHandle::TopLeft)
         );
         assert_eq!(rectangle.hit_resize_handle((92, 92), 3, 96), None);
+    }
+
+    #[test]
+    fn arrow_head_follows_thickness_and_is_capped_by_the_arrow_length() {
+        // Arrows start at the origin: (end, thickness, head length, head half-width).
+        for (end, thickness, head_len, half_width) in [
+            ((100, 0), 3, 16.0, 8.75),
+            ((200, 0), 40, 96.0, 58.0),
+            // Half the length caps the head of a short arrow.
+            ((20, 0), 3, 10.0, 5.75),
+        ] {
+            let arrow = arrow_geometry((0, 0), end, thickness).unwrap();
+            let tip = (end.0 as f64, 0.0);
+            assert_eq!(arrow.head[0], tip);
+            assert_eq!(arrow.base, (tip.0 - head_len, 0.0));
+            assert_eq!(arrow.head[1], (tip.0 - head_len, half_width));
+            assert_eq!(arrow.head[2], (tip.0 - head_len, -half_width));
+        }
+    }
+
+    #[test]
+    fn arrow_head_is_a_symmetric_triangle_on_the_shaft_axis_when_diagonal() {
+        let (start, end) = ((0, 0), (30, 40));
+        let arrow = arrow_geometry(start, end, 3).unwrap();
+        let [tip, left, right] = arrow.head;
+        let length = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).hypot(a.1 - b.1);
+        let axis = (end.0 as f64 - start.0 as f64, end.1 as f64 - start.1 as f64);
+
+        assert!((length(tip, arrow.base) - 16.0).abs() < 1e-9);
+        assert!((length(left, right) - 17.5).abs() < 1e-9);
+        assert!((length(left, arrow.base) - length(right, arrow.base)).abs() < 1e-9);
+        // The base lies on the shaft axis and the head's width is square to it.
+        let on_axis = axis.0 * arrow.base.1 - axis.1 * arrow.base.0;
+        assert!(on_axis.abs() < 1e-9);
+        let across = axis.0 * (left.0 - right.0) + axis.1 * (left.1 - right.1);
+        assert!(across.abs() < 1e-9);
+    }
+
+    #[test]
+    fn arrows_shorter_than_two_pixels_have_no_geometry() {
+        assert!(arrow_geometry((5, 5), (5, 5), 3).is_none());
+        assert!(arrow_geometry((5, 5), (6, 6), 3).is_none());
+        assert!(arrow_geometry((5, 5), (7, 5), 3).is_some());
     }
 }

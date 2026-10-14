@@ -12,7 +12,7 @@ Everything about using the app. Sharing and the Worker are covered in [CLOUDFLAR
 4. Draw with **Select/move**, **Frame**, **Arrow** and **Pen**, or open the chevron for **Highlighter**, **Text**, **Numbered steps**, **Blur** and opaque **Redact**. F10/Apps lists every command. Select a drawing to move, recolor, resize, change its width or delete it. Undo and redo cover every edit.
 5. Choose **Copy**, **Save**, Save as (Ctrl+Shift+S) or **Upload**. Editor chrome, handles and unfinished previews never appear in the output.
 
-**Upload** closes the editor at once and shows a small card in the bottom-right corner: *Uploading…*, then *Uploaded · link copied* with the link, **Copy** and **Open**. The link is already on the clipboard. If the transfer fails the card shows the reason and **Try again**; the clipboard is left unchanged. The first **Upload** opens Cloudflare setup instead (see below).
+**Upload** closes the editor at once and shows a small card in the bottom-right corner: *Uploading… 42%* with real progress, then *Uploaded · link copied* with the link, **Copy** and **Open**. The link is already on the clipboard. If the transfer fails the card shows the reason (for example a full Worker or the daily limit, with what to change) and **Try again**; the clipboard is left unchanged. The first **Upload** opens Cloudflare setup instead (see below).
 
 **Redact** replaces covered pixels opaquely and is drawn after other annotations. Blur and highlighter are visual effects, **not** secure redaction. Inspect the image before sharing sensitive material.
 
@@ -32,9 +32,10 @@ Everything about using the app. Sharing and the Worker are covered in [CLOUDFLAR
 | Arrow keys / Shift+arrows | Move the selection or object by 1 / 10 pixels |
 | Ctrl+arrows | Resize the selection when no object is selected |
 | Shift while drawing | Square rectangle/redaction; 45° arrow angles |
-| Esc or right-click | Cancel the current edit, deselect, clear the selection, or close the editor |
+| Esc or right-click | Cancel the stroke or drag in progress, then the current edit, deselect, clear the selection, or close the editor |
+| Ctrl+Z after clearing | Restore the selection and drawings that Esc or a new region discarded |
 
-While editing text, Enter commits; Ctrl+C, Ctrl+S and Ctrl+U commit before exporting. Text is single-line, up to 16 KiB; pasted newlines become spaces. The toolbar is icon-only; hovering shows each tool's full name. The color square shows the active color and opens the Windows color picker. The compact line-width button opens a wheel underneath for **1–64 px** (click a row, drag or scroll it, use the arrow keys, or type a number and press Enter). The active and custom colors persist.
+While editing text, Enter commits; Ctrl+C, Ctrl+S and Ctrl+U commit before exporting. Click inside the text to move the caret (Shift-click or drag selects), Ctrl+Left/Right jump by word, Ctrl+Backspace/Delete delete a word and Ctrl+X cuts. With the Text tool, clicking existing text edits it. Text is single-line, up to 16 KiB; pasted newlines become spaces. The toolbar is icon-only; hovering shows each tool's full name and shortcut. Toolbar buttons act when released, so dragging off a button cancels it. A plain click outside the selection only deselects; dragging there starts a new region. The color square shows the active color and opens the Windows color picker. The compact line-width button opens a wheel underneath for **1–64 px** (click a row, drag or scroll it, use the arrow keys, or type a number and press Enter). The active and custom colors persist.
 
 ## Settings
 

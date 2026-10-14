@@ -127,6 +127,19 @@ impl Rect {
         x >= self.left && x < self.right && y >= self.top && y < self.bottom
     }
 
+    /// Thickness of the accent frame around a selection at `dpi`.
+    pub fn selection_frame_thickness(dpi: u32) -> i32 {
+        (2 * dpi / 96).max(2) as i32
+    }
+
+    /// Outer rectangle of the accent frame around this selection. The frame ring hugs the
+    /// selection from outside so every exported pixel stays visible; grips are centred on
+    /// this rectangle's corners and edge midpoints, and hit-testing must use it too.
+    pub fn selection_frame(&self, dpi: u32) -> Self {
+        let thickness = Self::selection_frame_thickness(dpi);
+        self.inflate(thickness, thickness)
+    }
+
     /// Hit-tests a point `pt` against this selection rectangle:
     /// - 4 Corner handles (8x8 px centered on vertices) -> diagonal resize
     /// - 4 Border edge bands (6-8 px centered on edges, excluding corners) -> drag-to-move
@@ -647,10 +660,13 @@ impl CaptureBuffer {
     }
 
     /// Draws a dual-tone high-contrast selection border and eight resize handles,
-    /// sized for `dpi` so they match the hit-test geometry.
-    /// Outer border: dark outline, `(dpi / 96).max(1)` px.
-    /// Main border: accent outline, `(2 * dpi / 96).max(2)` px.
-    /// Handles: white squares, `8 * dpi / 96` px (at least 8) with a dark border.
+    /// sized for `dpi` so they match the hit-test geometry. Everything is laid out
+    /// around `rect.selection_frame(dpi)`, so the selected pixels themselves are never
+    /// covered except by the inner halves of the grips.
+    /// Main border: accent ring, `(2 * dpi / 96).max(2)` px, directly outside `rect`.
+    /// Outer border: dark outline, `(dpi / 96).max(1)` px, outside the accent ring.
+    /// Handles: white squares, `8 * dpi / 96` px (at least 8) with a dark border,
+    /// centred on the accent ring's outer edge.
     pub fn draw_contrast_selection(
         target: &mut [u8],
         width: i32,
@@ -665,27 +681,28 @@ impl CaptureBuffer {
 
         let dark_border = crate::theme::BRAND_INK_BGRA;
         let handle_fill = [255, 255, 255, 255]; // Crisp white
-        let frame = (2 * dpi / 96).max(2) as i32;
+        let thickness = Rect::selection_frame_thickness(dpi);
         let outline = (dpi / 96).max(1) as i32;
+        let frame = rect.selection_frame(dpi);
 
         // 1. Dual-tone selection rectangle: dark outline around the accent frame.
-        let outer = rect.inflate(outline, outline);
+        let outer = frame.inflate(outline, outline);
         Self::draw_border(target, width, height, &outer, dark_border, outline);
-        Self::draw_border(target, width, height, rect, accent_bgra, frame);
+        Self::draw_border(target, width, height, &frame, accent_bgra, thickness);
 
         // Four corners and four edge midpoints share the hit-test geometry.
         let half_h = (4 * dpi / 96).max(4) as i32;
-        let middle_x = rect.left + rect.width() / 2;
-        let middle_y = rect.top + rect.height() / 2;
+        let middle_x = frame.left + frame.width() / 2;
+        let middle_y = frame.top + frame.height() / 2;
         let handles = [
-            (rect.left, rect.top),
-            (rect.right, rect.top),
-            (rect.left, rect.bottom),
-            (rect.right, rect.bottom),
-            (middle_x, rect.top),
-            (rect.right, middle_y),
-            (middle_x, rect.bottom),
-            (rect.left, middle_y),
+            (frame.left, frame.top),
+            (frame.right, frame.top),
+            (frame.left, frame.bottom),
+            (frame.right, frame.bottom),
+            (middle_x, frame.top),
+            (frame.right, middle_y),
+            (middle_x, frame.bottom),
+            (frame.left, middle_y),
         ];
 
         for (cx, cy) in handles {
@@ -765,9 +782,104 @@ mod tests {
             96,
         );
 
-        // Corner handle should be filled with white [255, 255, 255, 255]
-        let offset = (10 * 100 + 10) * 4;
+        // The grip is centred on the frame's outer corner (8, 8), not on the selection's.
+        let offset = (8 * 100 + 8) * 4;
         assert_eq!(&buffer[offset..offset + 4], &[255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn selection_frame_grows_by_the_dpi_scaled_thickness() {
+        let rect = Rect::new(30, 40, 90, 100);
+        for (dpi, thickness) in [(48, 2), (96, 2), (144, 3), (192, 4)] {
+            assert_eq!(Rect::selection_frame_thickness(dpi), thickness, "dpi {dpi}");
+            assert_eq!(
+                rect.selection_frame(dpi),
+                Rect::new(
+                    30 - thickness,
+                    40 - thickness,
+                    90 + thickness,
+                    100 + thickness
+                ),
+                "dpi {dpi}"
+            );
+        }
+    }
+
+    #[test]
+    fn selection_frame_leaves_every_selected_pixel_visible() {
+        let accent = [246, 130, 59, 255];
+        for dpi in [96, 192] {
+            let mut buffer = vec![0u8; 200 * 200 * 4];
+            let rect = Rect::new(60, 60, 140, 120);
+            CaptureBuffer::draw_contrast_selection(&mut buffer, 200, 200, &rect, accent, dpi);
+            let thickness = Rect::selection_frame_thickness(dpi);
+            let pixel =
+                |x: i32, y: i32| buffer[(y as usize * 200 + x as usize) * 4..][..4].to_vec();
+
+            // Each probe starts at the ring pixel next to the selection and runs outward
+            // across one side, away from every grip: the ring is `thickness` pixels wide
+            // and the selected pixel beside it is untouched.
+            for ((x, y), (dx, dy)) in [
+                ((rect.left - 1, 72), (-1, 0)),
+                ((rect.right, 72), (1, 0)),
+                ((76, rect.top - 1), (0, -1)),
+                ((76, rect.bottom), (0, 1)),
+            ] {
+                for step in 0..thickness {
+                    let (ring_x, ring_y) = (x + dx * step, y + dy * step);
+                    assert_eq!(
+                        pixel(ring_x, ring_y),
+                        accent,
+                        "dpi {dpi} ({ring_x}, {ring_y})"
+                    );
+                }
+                assert_eq!(pixel(x - dx, y - dy), [0; 4], "dpi {dpi} ({x}, {y})");
+            }
+        }
+    }
+
+    #[test]
+    fn selection_frame_stays_visible_when_the_selection_touches_the_buffer_edge() {
+        let accent = [246, 130, 59, 255];
+        let mut buffer = vec![0u8; 100 * 100 * 4];
+        let full = Rect::new(0, 0, 100, 100);
+        CaptureBuffer::draw_contrast_selection(&mut buffer, 100, 100, &full, accent, 96);
+        // Ring sides that fall outside the buffer are clamped onto its outermost
+        // pixels; the probes sit between the grips.
+        for (x, y) in [(0, 20), (99, 20), (20, 0), (20, 99)] {
+            assert_eq!(buffer[(y * 100 + x) * 4..][..4], accent, "({x}, {y})");
+        }
+    }
+
+    #[test]
+    fn grip_pixels_and_frame_hit_zones_agree() {
+        let dpi = 96;
+        let mut buffer = vec![0u8; 200 * 200 * 4];
+        let rect = Rect::new(60, 60, 140, 120);
+        let accent = [246, 130, 59, 255];
+        CaptureBuffer::draw_contrast_selection(&mut buffer, 200, 200, &rect, accent, dpi);
+        let frame = rect.selection_frame(dpi);
+        let middle_x = frame.left + frame.width() / 2;
+        let middle_y = frame.top + frame.height() / 2;
+        for ((x, y), zone) in [
+            ((frame.left, frame.top), SelectionHitZone::TopLeftCorner),
+            ((frame.right, frame.top), SelectionHitZone::TopRightCorner),
+            (
+                (frame.left, frame.bottom),
+                SelectionHitZone::BottomLeftCorner,
+            ),
+            (
+                (frame.right, frame.bottom),
+                SelectionHitZone::BottomRightCorner,
+            ),
+            ((middle_x, frame.top), SelectionHitZone::TopEdge),
+            ((frame.right, middle_y), SelectionHitZone::RightEdge),
+            ((middle_x, frame.bottom), SelectionHitZone::BottomEdge),
+            ((frame.left, middle_y), SelectionHitZone::LeftEdge),
+        ] {
+            assert_eq!(buffer[(y as usize * 200 + x as usize) * 4..][..4], [255; 4]);
+            assert_eq!(frame.hit_test_selection((x, y), 4, 8), zone);
+        }
     }
 
     #[test]
@@ -783,14 +895,14 @@ mod tests {
             192,
         );
 
-        // The top-left grip is centred on (30, 30); its top row is dark
-        // and spans 2 * (4 * 192 / 96) = 16 px.
-        let top_row = 22 * 200;
+        // The top-left grip is centred on the frame's outer corner (26, 26); its top
+        // row is dark and spans 2 * (4 * 192 / 96) = 16 px.
+        let top_row = 18 * 200;
         let dark: Vec<usize> = (0..45)
             .filter(|&x| buffer[(top_row + x) * 4..][..4] == crate::theme::BRAND_INK_BGRA)
             .collect();
-        assert_eq!(dark, (22..38).collect::<Vec<_>>());
-        assert_eq!(&buffer[(30 * 200 + 30) * 4..][..4], &[255, 255, 255, 255]);
+        assert_eq!(dark, (18..34).collect::<Vec<_>>());
+        assert_eq!(&buffer[(26 * 200 + 26) * 4..][..4], &[255, 255, 255, 255]);
     }
 
     #[test]
@@ -803,15 +915,16 @@ mod tests {
             CaptureBuffer::draw_contrast_selection(&mut buffer, 200, 200, &rect, accent, dpi);
 
             // Row 45 crosses only the left edge, between the grips.
+            // The ring lies outside the selection; its first selected pixel stays untouched.
             let pixel = |x: i32| buffer[(45 * 200 + x as usize) * 4..][..4].to_vec();
-            assert_eq!(pixel(30 - outline - 1), [0; 4], "dpi {dpi}");
-            for x in 30 - outline..30 {
+            assert_eq!(pixel(30 - frame - outline - 1), [0; 4], "dpi {dpi}");
+            for x in 30 - frame - outline..30 - frame {
                 assert_eq!(pixel(x), crate::theme::BRAND_INK_BGRA, "dpi {dpi} x {x}");
             }
-            for x in 30..30 + frame {
+            for x in 30 - frame..30 {
                 assert_eq!(pixel(x), accent, "dpi {dpi} x {x}");
             }
-            assert_eq!(pixel(30 + frame), [0; 4], "dpi {dpi}");
+            assert_eq!(pixel(30), [0; 4], "dpi {dpi}");
         }
     }
 }
