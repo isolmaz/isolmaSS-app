@@ -260,6 +260,27 @@ fn the_uxtheme_entry_points_resolve_on_this_windows() {
 }
 
 #[test]
+fn without_the_uxtheme_entry_points_nothing_is_changed() {
+    let missing = load_uxtheme(w!("isolmass-no-such-library.dll"));
+    let _state = ForcedTheme::new(ThemePreference::Dark);
+    assert_eq!(app_mode(), FORCE_DARK);
+    set_app_mode_with(&missing, 1);
+    assert_eq!(app_mode(), FORCE_DARK, "no entry point, no mode change");
+
+    let parent = TestWindow::popup();
+    let edit = parent.child(w!("EDIT"));
+    apply_control_theme_with(&missing, edit, true, true);
+    assert!(
+        !dark_mode_allowed(edit),
+        "the per-window switch is unavailable"
+    );
+    assert!(
+        !CONTROL_THEME_LOGGED.load(Ordering::Relaxed),
+        "the visual style class is still applied"
+    );
+}
+
+#[test]
 fn a_missing_uxtheme_leaves_every_entry_point_unset() {
     let api = load_uxtheme(w!("isolmass-no-such-library.dll"));
     assert!(api.set_preferred_app_mode.is_none());

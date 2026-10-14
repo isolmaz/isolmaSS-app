@@ -502,6 +502,42 @@ fn button_fill_follows_selection_hover_and_press() {
 }
 
 #[test]
+fn a_check_mark_only_selects_tools_and_the_width_controls() {
+    let _theme = ForcedTheme::new(ThemePreference::Light);
+    let t = tokens_for(Theme::Light);
+    let mut toolbar = standard(false, false);
+    for button in &mut toolbar.buttons {
+        button.is_checked = true;
+    }
+    let canvas = render(&toolbar, None);
+    let fill = |item: ToolbarItem| fill_of(&canvas, rect_of(&toolbar, item));
+    for item in [
+        ToolbarItem::Tool(ToolKind::Pen),
+        ToolbarItem::MoreTools,
+        ToolbarItem::Thickness,
+    ] {
+        assert_color(
+            fill(item),
+            t.accent_tint,
+            2,
+            &format!("{item:?} is selected"),
+        );
+    }
+    for item in [
+        ToolbarItem::Action(ToolbarAction::Save),
+        ToolbarItem::Action(ToolbarAction::Redo),
+        ToolbarItem::Color,
+    ] {
+        assert_color(
+            fill(item),
+            t.card,
+            2,
+            &format!("{item:?} is not selectable"),
+        );
+    }
+}
+
+#[test]
 fn glyphs_are_drawn_in_the_ink_of_their_state() {
     for (preference, theme) in THEMES {
         let _theme = ForcedTheme::new(preference);

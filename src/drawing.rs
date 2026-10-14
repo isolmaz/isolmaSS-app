@@ -351,16 +351,16 @@ pub(crate) fn elevation(hdc: HDC, rect: crate::capture::Rect, radius_px: i32, dp
         GdipSetPixelOffsetMode(graphics, PixelOffsetModeHalf);
         let mut path = std::ptr::null_mut();
         let mut brush = std::ptr::null_mut();
-        if GdipCreatePath(FillModeAlternate, &mut path) == Ok
-            && GdipCreateSolidFill(0, &mut brush) == Ok
-        {
-            for (layer, diameter, alpha) in elevation_layers(rect, radius_px, dpi) {
-                GdipResetPath(path);
-                add_rounded_outline(path, layer, diameter);
-                // Black at `alpha`: 0xAA000000.
-                GdipSetSolidFillColor(brush, u32::from(alpha) << 24);
-                GdipFillPath(graphics, brush.cast(), path);
-            }
+        // A failed creation leaves a null path or brush, which every call below rejects
+        // with an error status instead of drawing.
+        GdipCreatePath(FillModeAlternate, &mut path);
+        GdipCreateSolidFill(0, &mut brush);
+        for (layer, diameter, alpha) in elevation_layers(rect, radius_px, dpi) {
+            GdipResetPath(path);
+            add_rounded_outline(path, layer, diameter);
+            // Black at `alpha`: 0xAA000000.
+            GdipSetSolidFillColor(brush, u32::from(alpha) << 24);
+            GdipFillPath(graphics, brush.cast(), path);
         }
         if !brush.is_null() {
             GdipDeleteBrush(brush.cast());
@@ -450,24 +450,25 @@ fn smooth_rounded(
         GdipSetSmoothingMode(graphics, SmoothingModeAntiAlias8x8);
         GdipSetPixelOffsetMode(graphics, PixelOffsetModeHalf);
         let mut path = std::ptr::null_mut();
+        // A failed creation leaves a null path, which every call below rejects with an
+        // error status instead of drawing; `drawn` then stays false for the GDI fallback.
+        let created = GdipCreatePath(FillModeAlternate, &mut path) == Ok;
         let mut drawn = false;
-        if GdipCreatePath(FillModeAlternate, &mut path) == Ok {
-            add_rounded_outline(path, rect, radius);
-            let mut brush = std::ptr::null_mut();
-            if GdipCreateSolidFill(argb(fill), &mut brush) == Ok {
-                GdipFillPath(graphics, brush.cast(), path);
-                GdipDeleteBrush(brush.cast());
-                drawn = true;
-            }
-            if border != fill {
-                let mut pen = std::ptr::null_mut();
-                if GdipCreatePen1(argb(border), 1.0, UnitPixel, &mut pen) == Ok {
-                    GdipDrawPath(graphics, pen, path);
-                    GdipDeletePen(pen);
-                }
-            }
-            GdipDeletePath(path);
+        add_rounded_outline(path, rect, radius);
+        let mut brush = std::ptr::null_mut();
+        if GdipCreateSolidFill(argb(fill), &mut brush) == Ok {
+            GdipFillPath(graphics, brush.cast(), path);
+            GdipDeleteBrush(brush.cast());
+            drawn = created;
         }
+        if border != fill {
+            let mut pen = std::ptr::null_mut();
+            if GdipCreatePen1(argb(border), 1.0, UnitPixel, &mut pen) == Ok {
+                GdipDrawPath(graphics, pen, path);
+                GdipDeletePen(pen);
+            }
+        }
+        GdipDeletePath(path);
         GdipDeleteGraphics(graphics);
         drawn
     }
@@ -526,32 +527,33 @@ fn smooth_stroke(
         GdipSetPixelOffsetMode(graphics, PixelOffsetModeHalf);
         let mut drawn = false;
         let mut path = std::ptr::null_mut();
-        if GdipCreatePath(FillModeAlternate, &mut path) == Ok {
-            // The pen is centred on the path, so the path runs half a stroke
-            // inside the frame.
-            let half = width as f32 / 2.0;
-            let x = frame.left as f32 + half;
-            let y = frame.top as f32 + half;
-            let w = (frame.right - frame.left) as f32 - width as f32;
-            let h = (frame.bottom - frame.top) as f32 - width as f32;
-            let d = (diameter as f32 - width as f32).clamp(0.0, w.min(h));
-            if d < 1.0 {
-                GdipAddPathRectangle(path, x, y, w, h);
-            } else {
-                GdipAddPathArc(path, x, y, d, d, 180.0, 90.0);
-                GdipAddPathArc(path, x + w - d, y, d, d, 270.0, 90.0);
-                GdipAddPathArc(path, x + w - d, y + h - d, d, d, 0.0, 90.0);
-                GdipAddPathArc(path, x, y + h - d, d, d, 90.0, 90.0);
-                GdipClosePathFigure(path);
-            }
-            let mut pen = std::ptr::null_mut();
-            if GdipCreatePen1(argb(color), width as f32, UnitPixel, &mut pen) == Ok {
-                GdipDrawPath(graphics, pen, path);
-                GdipDeletePen(pen);
-                drawn = true;
-            }
-            GdipDeletePath(path);
+        // A failed creation leaves a null path, which every call below rejects with an
+        // error status instead of drawing; `drawn` then stays false for the GDI fallback.
+        let created = GdipCreatePath(FillModeAlternate, &mut path) == Ok;
+        // The pen is centred on the path, so the path runs half a stroke
+        // inside the frame.
+        let half = width as f32 / 2.0;
+        let x = frame.left as f32 + half;
+        let y = frame.top as f32 + half;
+        let w = (frame.right - frame.left) as f32 - width as f32;
+        let h = (frame.bottom - frame.top) as f32 - width as f32;
+        let d = (diameter as f32 - width as f32).clamp(0.0, w.min(h));
+        if d < 1.0 {
+            GdipAddPathRectangle(path, x, y, w, h);
+        } else {
+            GdipAddPathArc(path, x, y, d, d, 180.0, 90.0);
+            GdipAddPathArc(path, x + w - d, y, d, d, 270.0, 90.0);
+            GdipAddPathArc(path, x + w - d, y + h - d, d, d, 0.0, 90.0);
+            GdipAddPathArc(path, x, y + h - d, d, d, 90.0, 90.0);
+            GdipClosePathFigure(path);
         }
+        let mut pen = std::ptr::null_mut();
+        if GdipCreatePen1(argb(color), width as f32, UnitPixel, &mut pen) == Ok {
+            GdipDrawPath(graphics, pen, path);
+            GdipDeletePen(pen);
+            drawn = created;
+        }
+        GdipDeletePath(path);
         GdipDeleteGraphics(graphics);
         drawn
     }

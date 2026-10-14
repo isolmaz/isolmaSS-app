@@ -804,21 +804,22 @@ fn draw_tool_icon(
 ) {
     use crate::drawing::{icon, label, rounded};
     let unit = |value: i32| (value * dpi as i32 / 96).max(1);
-    if tool == ToolKind::Step {
-        let cx = (rect.left + rect.right) / 2;
-        let cy = (rect.top + rect.bottom) / 2;
-        rounded(
-            hdc,
-            Rect::new(cx - unit(9), cy - unit(9), cx + unit(9), cy + unit(9)),
-            unit(18),
-            ink,
-            ink,
-        );
-        label(hdc, rect, "1", unit(11), surface, true);
-        return;
-    }
     // Codepoints shared by Segoe Fluent Icons (Windows 11) and Segoe MDL2 (Windows 10).
     let glyph = match tool {
+        // A numbered badge is geometry plus a numeral, not a glyph.
+        ToolKind::Step => {
+            let cx = (rect.left + rect.right) / 2;
+            let cy = (rect.top + rect.bottom) / 2;
+            rounded(
+                hdc,
+                Rect::new(cx - unit(9), cy - unit(9), cx + unit(9), cy + unit(9)),
+                unit(18),
+                ink,
+                ink,
+            );
+            label(hdc, rect, "1", unit(11), surface, true);
+            return;
+        }
         ToolKind::Select => 0xe8b0,
         ToolKind::Rectangle => 0xe739,
         ToolKind::Arrow => 0xe8ad,
@@ -827,7 +828,6 @@ fn draw_tool_icon(
         ToolKind::Text => 0xe8d2,
         ToolKind::Blur => 0xe727,
         ToolKind::Redact => 0xe73b,
-        ToolKind::Step => unreachable!("drawn above"),
     };
     icon(hdc, rect, glyph, unit(16), ink, true);
 }

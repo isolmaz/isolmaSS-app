@@ -97,10 +97,14 @@ fn uxtheme() -> &'static UxTheme {
 
 /// 0 follows Windows (AllowDark), 1 forces light, 2 forces dark.
 fn set_app_mode(preference: u8) {
+    set_app_mode_with(uxtheme(), preference);
+}
+
+/// [`set_app_mode`] through the given entry points; a missing one keeps the light controls.
+fn set_app_mode_with(api: &UxTheme, preference: u8) {
     const ALLOW_DARK: i32 = 1;
     const FORCE_DARK: i32 = 2;
     const FORCE_LIGHT: i32 = 3;
-    let api = uxtheme();
     if let Some(set_mode) = api.set_preferred_app_mode {
         let mode = match preference {
             1 => FORCE_LIGHT,
@@ -157,9 +161,15 @@ pub fn is_color_setting_change(lparam: LPARAM) -> bool {
 /// Gives a standard control the native light or dark visual style. Edits and
 /// combo boxes use the common-file-dialog class, everything else Explorer's.
 pub fn apply_control_theme(control: HWND, dark: bool, input: bool) {
+    apply_control_theme_with(uxtheme(), control, dark, input);
+}
+
+/// [`apply_control_theme`] through the given entry points; without the per-window dark
+/// switch the control still gets its visual style class.
+fn apply_control_theme_with(api: &UxTheme, control: HWND, dark: bool, input: bool) {
     use windows::Win32::UI::Controls::SetWindowTheme;
     use windows::core::w;
-    if let Some(allow) = uxtheme().allow_dark_mode_for_window {
+    if let Some(allow) = api.allow_dark_mode_for_window {
         unsafe {
             allow(control, dark as i32);
         }

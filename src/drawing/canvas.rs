@@ -26,10 +26,10 @@ pub(crate) fn distance(a: Rgb, b: Rgb) -> u32 {
 /// Asserts that `actual` lies within `tolerance` (summed channel difference) of `expected`.
 #[track_caller]
 pub(crate) fn assert_color(actual: Rgb, expected: COLORREF, tolerance: u32, what: &str) {
+    let wanted = rgb(expected);
     assert!(
-        distance(actual, rgb(expected)) <= tolerance,
-        "{what}: {actual:?} is not {:?} (±{tolerance})",
-        rgb(expected)
+        distance(actual, wanted) <= tolerance,
+        "{what}: {actual:?} is not {wanted:?} (±{tolerance})"
     );
 }
 
