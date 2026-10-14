@@ -620,6 +620,19 @@ fn responses_over_the_size_limit_are_rejected_at_the_boundary() {
 }
 
 #[test]
+fn a_response_may_grow_up_to_its_limit_and_never_past_a_length_overflow() {
+    assert_eq!(grown_length(10, 5, 15), Ok(15));
+    assert_eq!(
+        grown_length(10, 6, 15),
+        Err(tf("The update response exceeded {} bytes.", &[&15usize]))
+    );
+    assert_eq!(
+        grown_length(usize::MAX, 1, usize::MAX),
+        Err(t("The update response is too large.").to_string())
+    );
+}
+
+#[test]
 fn a_large_body_arrives_complete_over_several_reads() {
     let _state = job::tests::exclusive();
     let body: Vec<u8> = (0..400_000u32).map(|index| (index % 251) as u8).collect();

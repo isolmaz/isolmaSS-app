@@ -294,14 +294,7 @@ fn http_get_inner(
         if available == 0 {
             break;
         }
-        // Saturating: an overflowing length is over the limit all the same.
-        let new_length = response.len().saturating_add(available as usize);
-        if new_length > maximum_size {
-            return Err(crate::i18n::tf(
-                "The update response exceeded {} bytes.",
-                &[&maximum_size],
-            ));
-        }
+        let new_length = grown_length(response.len(), available, maximum_size)?;
         let offset = response.len();
         response.resize(new_length, 0);
         let mut read = 0u32;
@@ -317,6 +310,20 @@ fn http_get_inner(
         response.truncate(offset + read as usize);
     }
     Ok(response)
+}
+
+/// The response length after `added` more bytes, which must stay within `maximum`.
+fn grown_length(current: usize, added: u32, maximum: usize) -> Result<usize, String> {
+    let grown = current
+        .checked_add(added as usize)
+        .ok_or_else(|| crate::i18n::t("The update response is too large.").to_string())?;
+    if grown > maximum {
+        return Err(crate::i18n::tf(
+            "The update response exceeded {} bytes.",
+            &[&maximum],
+        ));
+    }
+    Ok(grown)
 }
 
 fn parse_version(value: &str) -> Option<[u64; 3]> {
