@@ -191,10 +191,8 @@ pub fn window_loop(hwnd: HWND, kind: WindowKind) -> Result<()> {
         crate::updater::poll(hwnd, false);
         // Central cache invalidation for every window this loop pumps; the
         // message is still dispatched so window procs keep their own arms.
-        match msg.message {
-            WM_SETTINGCHANGE => crate::theme::invalidate_theme_cache(),
-            WM_DWMCOLORIZATIONCOLORCHANGED => crate::theme::invalidate_accent(),
-            _ => {}
+        if msg.message == WM_SETTINGCHANGE {
+            crate::theme::invalidate_theme_cache();
         }
         if kind == WindowKind::Settings && crate::settings_window::handle_key_recording(hwnd, &msg)
         {

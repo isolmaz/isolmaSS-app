@@ -1,11 +1,12 @@
-//! Windows 11 Fluent design tokens: the single source for colors, metrics
-//! and typography across settings, toolbar and overlay chrome.
+//! Design tokens: the single source for colors, metrics and typography
+//! across settings, toolbar and overlay chrome. Neutrals, geometry and
+//! typography follow Windows 11 Fluent; the accent is the isolmaSS brand
+//! amber (with its ink).
 //!
-//! Colors are dynamic: the current system theme and accent color are read
-//! from the registry once and cached until [`invalidate_theme_cache`] runs
-//! (window procs call it from `WM_SETTINGCHANGE`).
+//! The light/dark choice follows Windows unless the user picks one; the
+//! system theme is read from the registry once and cached until
+//! [`invalidate_theme_cache`] runs (window procs call it from `WM_SETTINGCHANGE`).
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use windows::Win32::Foundation::{COLORREF, HWND};
 
@@ -135,7 +136,7 @@ pub fn apply_control_theme(control: HWND, dark: bool, input: bool) {
 }
 static CONTROL_THEME_LOGGED: AtomicBool = AtomicBool::new(false);
 
-/// The full Fluent color set for one theme.
+/// The full color set for one theme.
 #[derive(Clone, Copy)]
 pub struct Tokens {
     /// Solid page background (visible only when the Mica backdrop is unavailable).
@@ -145,56 +146,52 @@ pub struct Tokens {
     pub text: COLORREF,
     pub text_secondary: COLORREF,
     pub text_disabled: COLORREF,
-    /// System accent color for the current user.
+    /// Brand amber for fills: primary buttons, toggles, pills, progress.
     pub accent: COLORREF,
+    /// `accent` under the pointer and while pressed.
+    pub accent_hover: COLORREF,
+    pub accent_pressed: COLORREF,
     /// Readable text color on top of `accent` fills.
     pub accent_text: COLORREF,
+    /// Accent for text, glyphs and thin strokes drawn on `page`/`card`;
+    /// plain amber is too light for that on the light theme.
+    pub accent_ink: COLORREF,
     /// Subtle accent-derived tint for selected/checked surfaces.
     pub accent_tint: COLORREF,
     pub control_fill: COLORREF,
     pub control_hover: COLORREF,
+    /// Ghost and toolbar buttons under the pointer, and while pressed.
+    pub subtle_hover: COLORREF,
+    pub subtle_pressed: COLORREF,
+    /// Failure text and glyphs on `page`/`card`.
+    pub critical: COLORREF,
+    /// Inner stroke of the focus visual; contrasts with `text`, the outer stroke.
+    pub focus_inner: COLORREF,
 }
 
-// Fluent fallback accents. COLORREF layout is 0x00BBGGRR:
-// #005FB8 -> 0x00B85F00 (light), #4CC2FF -> 0x00FFC24C (dark).
-const FALLBACK_ACCENT_LIGHT: COLORREF = COLORREF(0x00b85f00);
-const FALLBACK_ACCENT_DARK: COLORREF = COLORREF(0x00ffc24c);
+/// Converts `#RRGGBB` to the GDI `0x00BBGGRR` layout.
+const fn rgb(hex: u32) -> COLORREF {
+    COLORREF(((hex & 0xff) << 16) | (hex & 0xff00) | ((hex >> 16) & 0xff))
+}
+
+/// Brand amber, identical in both themes.
+pub const BRAND_AMBER: COLORREF = rgb(0xF59E0B);
+/// `BRAND_AMBER` as B, G, R, A bytes for the overlay's pixel buffers.
+pub const BRAND_AMBER_BGRA: [u8; 4] = [0x0B, 0x9E, 0xF5, 0xFF];
+/// Background behind selected characters while editing overlay text.
+pub const TEXT_SELECTION: COLORREF = rgb(0xFDE3A7);
+/// Brand ink: the warm near-black of the app icon.
+pub const BRAND_INK: COLORREF = rgb(0x141413);
+const ACCENT_HOVER: COLORREF = rgb(0xF7AD33);
+const ACCENT_PRESSED: COLORREF = rgb(0xD98A06);
 
 // Cached theme: 0 = unread, 1 = light, 2 = dark.
 static THEME: AtomicU8 = AtomicU8::new(0);
-// Cached system accent; None = unread or unavailable.
-static ACCENT: Mutex<Option<u32>> = Mutex::new(None);
-static REGISTRY_FALLBACK_LOGGED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static REGISTRY_FALLBACK_LOGGED: AtomicBool = AtomicBool::new(false);
 // One-shot diagnostics flags for the backdrop/DWM helpers below.
 static BACKDROP_CHECK_LOGGED: AtomicBool = AtomicBool::new(false);
 static DWM_DARK_LOGGED: AtomicBool = AtomicBool::new(false);
 static DWM_BACKDROP_LOGGED: AtomicBool = AtomicBool::new(false);
-
-/// Blends `fraction` (0..=256) of color `b` into color `a`.
-const fn mix(a: COLORREF, b: COLORREF, fraction: u32) -> COLORREF {
-    let (ar, ag, ab) = (a.0 & 0xff, (a.0 >> 8) & 0xff, (a.0 >> 16) & 0xff);
-    let (br, bg, bb) = (b.0 & 0xff, (b.0 >> 8) & 0xff, (b.0 >> 16) & 0xff);
-    let f = if fraction > 256 { 256 } else { fraction };
-    let r = (ar * (256 - f) + br * f) / 256;
-    let g = (ag * (256 - f) + bg * f) / 256;
-    let bl = (ab * (256 - f) + bb * f) / 256;
-    COLORREF((bl << 16) | (g << 8) | r)
-}
-
-/// Picks black or white text for readable contrast over `background`.
-const fn readable_text(background: COLORREF) -> COLORREF {
-    let r = background.0 & 0xff;
-    let g = (background.0 >> 8) & 0xff;
-    let b = (background.0 >> 16) & 0xff;
-    // ITU-R BT.601 luma, plenty for an on-accent binary choice.
-    let luma = (r * 299 + g * 587 + b * 114) / 1000;
-    if luma > 140 {
-        COLORREF(0x0000_0000)
-    } else {
-        COLORREF(0x00ff_ffff)
-    }
-}
 
 fn read_dword(subkey: &str, value: &str) -> Option<u32> {
     use std::ffi::c_void;
@@ -218,19 +215,6 @@ fn read_dword(subkey: &str, value: &str) -> Option<u32> {
     (status.0 == 0).then_some(data)
 }
 
-fn log_registry_fallback(context: &str) {
-    use std::sync::atomic::Ordering;
-    if REGISTRY_FALLBACK_LOGGED
-        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-        .is_ok()
-    {
-        crate::diagnostics::record(
-            "theme",
-            &format!("{context}; using the built-in Fluent fallback"),
-        );
-    }
-}
-
 /// Returns the cached system theme, reading `AppsUseLightTheme` on first use.
 pub fn theme() -> Theme {
     match PREFERENCE.load(Ordering::Acquire) {
@@ -248,7 +232,10 @@ pub fn theme() -> Theme {
             )
             .map(|value| value != 0)
             .unwrap_or_else(|| {
-                log_registry_fallback("AppsUseLightTheme is unavailable");
+                log_once(
+                    &REGISTRY_FALLBACK_LOGGED,
+                    "AppsUseLightTheme is unavailable; using the light theme",
+                );
                 true
             });
             let known = if light { 1 } else { 2 };
@@ -258,72 +245,56 @@ pub fn theme() -> Theme {
     }
 }
 
-/// The current user's accent color (`AccentColorMenu`, ABGR == COLORREF layout).
-pub fn system_accent(fallback: COLORREF) -> COLORREF {
-    let mut guard = match ACCENT.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    if let Some(value) = *guard {
-        return COLORREF(value);
-    }
-    match read_dword(
-        r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent",
-        "AccentColorMenu",
-    ) {
-        Some(value) if value & 0x00ff_ffff != 0 => {
-            let value = value & 0x00ff_ffff;
-            *guard = Some(value);
-            COLORREF(value)
-        }
-        _ => {
-            log_registry_fallback("AccentColorMenu is unavailable");
-            fallback
-        }
-    }
-}
-
-/// The full token set for the current theme and system accent.
+/// The full token set for the current theme.
 pub fn tokens() -> Tokens {
     tokens_for(theme())
 }
 
 /// The full token set for an explicit theme (used by paint code that must
 /// stay consistent for the whole frame even if the system flips mid-paint).
-pub fn tokens_for(theme: Theme) -> Tokens {
+/// Neutrals are the standard Windows 11 Fluent values; only the accent is brand.
+pub const fn tokens_for(theme: Theme) -> Tokens {
     match theme {
-        Theme::Light => {
-            let accent = system_accent(FALLBACK_ACCENT_LIGHT);
-            Tokens {
-                page: COLORREF(0x00f3_f3f3),
-                card: COLORREF(0x00ff_ffff),
-                stroke: COLORREF(0x00e5_e5e5),
-                text: COLORREF(0x001b_1b1b),
-                text_secondary: COLORREF(0x005d_5d5d),
-                text_disabled: COLORREF(0x00a2_a2a2),
-                accent,
-                accent_text: readable_text(accent),
-                accent_tint: mix(COLORREF(0x00ff_ffff), accent, 31),
-                control_fill: COLORREF(0x00ff_ffff),
-                control_hover: COLORREF(0x00f9_f9f9),
-            }
-        }
-        Theme::Dark => {
-            let accent = system_accent(FALLBACK_ACCENT_DARK);
-            Tokens {
-                page: COLORREF(0x0020_2020),
-                card: COLORREF(0x002b_2b2b),
-                stroke: COLORREF(0x003a_3a3a),
-                text: COLORREF(0x00ff_ffff),
-                text_secondary: COLORREF(0x00cf_cfcf),
-                text_disabled: COLORREF(0x007a_7a7a),
-                accent,
-                accent_text: readable_text(accent),
-                accent_tint: mix(COLORREF(0x0020_2020), accent, 64),
-                control_fill: COLORREF(0x002b_2b2b),
-                control_hover: COLORREF(0x0032_3232),
-            }
-        }
+        Theme::Light => Tokens {
+            page: rgb(0xF3F3F3),
+            card: rgb(0xFBFBFB),
+            stroke: rgb(0xE5E5E5),
+            text: rgb(0x1A1A1A),
+            text_secondary: rgb(0x5D5D5D),
+            text_disabled: rgb(0xA0A0A0),
+            accent: BRAND_AMBER,
+            accent_hover: ACCENT_HOVER,
+            accent_pressed: ACCENT_PRESSED,
+            accent_text: BRAND_INK,
+            accent_ink: rgb(0xB45309),
+            accent_tint: rgb(0xFEF3DC),
+            control_fill: rgb(0xFFFFFF),
+            control_hover: rgb(0xF9F9F9),
+            subtle_hover: rgb(0xF0F0F0),
+            subtle_pressed: rgb(0xEAEAEA),
+            critical: rgb(0xC42B1C),
+            focus_inner: rgb(0xFFFFFF),
+        },
+        Theme::Dark => Tokens {
+            page: rgb(0x202020),
+            card: rgb(0x2B2B2B),
+            stroke: rgb(0x3A3A3A),
+            text: rgb(0xFFFFFF),
+            text_secondary: rgb(0xC5C5C5),
+            text_disabled: rgb(0x787878),
+            accent: BRAND_AMBER,
+            accent_hover: ACCENT_HOVER,
+            accent_pressed: ACCENT_PRESSED,
+            accent_text: BRAND_INK,
+            accent_ink: rgb(0xFBBF24),
+            accent_tint: rgb(0x3D3220),
+            control_fill: rgb(0x2D2D2D),
+            control_hover: rgb(0x323232),
+            subtle_hover: rgb(0x383838),
+            subtle_pressed: rgb(0x333333),
+            critical: rgb(0xFF99A4),
+            focus_inner: rgb(0x1A1A1A),
+        },
     }
 }
 
@@ -435,27 +406,18 @@ pub fn face_installed(face: &str) -> bool {
 // ---------------------------------------------------------------------------
 // Metrics — compact Fluent layout grid, all values in 96-DPI pixels.
 // ---------------------------------------------------------------------------
-/// Corner radius for cards and panels.
-pub const RADIUS_CARD: i32 = 10;
+/// Visible corner radius of controls: buttons, edits, toolbar buttons.
+pub const RADIUS_CONTROL: i32 = 4;
+/// Visible corner radius of overlays: flyouts, panels, tooltips and toasts.
+pub const RADIUS_OVERLAY: i32 = 8;
 
 // ---------------------------------------------------------------------------
-// Cache control — live theme flips and accent broadcasts.
+// Cache control — live theme flips.
 // ---------------------------------------------------------------------------
 
-/// Drops the theme and accent caches so the next read hits the registry.
+/// Drops the theme cache so the next read hits the registry.
 pub fn invalidate_theme_cache() {
     THEME.store(0, Ordering::Release);
-    invalidate_accent();
-}
-
-/// Drops only the accent cache (`WM_DWMCOLORIZATIONCOLORCHANGED` and
-/// accent-related `WM_SETTINGCHANGE` broadcasts).
-pub fn invalidate_accent() {
-    let mut guard = match ACCENT.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    *guard = None;
 }
 
 // ---------------------------------------------------------------------------

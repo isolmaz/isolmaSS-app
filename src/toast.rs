@@ -9,6 +9,10 @@ use std::sync::{Arc, Mutex};
 use windows::Win32::Foundation::{
     ERROR_CLASS_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
+use windows::Win32::Graphics::Dwm::{
+    DWM_WINDOW_CORNER_PREFERENCE, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
+    DWMWCP_ROUND, DwmSetWindowAttribute,
+};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateSolidBrush, DeleteDC,
     DeleteObject, EndPaint, FillRect, GetMonitorInfoW, HDC, HGDIOBJ, InvalidateRect,
@@ -164,20 +168,15 @@ fn create(prepared: Prepared, anchor: POINT) -> Result<(), String> {
     let width = scale(WIDTH, state.dpi);
     let height = scale(HEIGHT, state.dpi);
     let margin = scale(12, state.dpi);
+    apply_frame_theme(hwnd);
     unsafe {
-        let dark: u32 = (crate::theme::theme() == crate::theme::Theme::Dark) as u32;
-        let round: u32 = 2; // DWMWCP_ROUND
-        let _ = windows::Win32::Graphics::Dwm::DwmSetWindowAttribute(
+        // Rounded corners need Windows 11; Windows 10 rejects the attribute
+        // and keeps its square frame.
+        let _ = DwmSetWindowAttribute(
             hwnd,
-            windows::Win32::Graphics::Dwm::DWMWINDOWATTRIBUTE(20),
-            std::ptr::from_ref(&dark).cast(),
-            4,
-        );
-        let _ = windows::Win32::Graphics::Dwm::DwmSetWindowAttribute(
-            hwnd,
-            windows::Win32::Graphics::Dwm::DWMWINDOWATTRIBUTE(33),
-            std::ptr::from_ref(&round).cast(),
-            4,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            std::ptr::from_ref(&DWMWCP_ROUND).cast(),
+            std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
         );
         let _ = SetWindowPos(
             hwnd,
@@ -191,6 +190,19 @@ fn create(prepared: Prepared, anchor: POINT) -> Result<(), String> {
     }
     start_attempt(hwnd, state);
     Ok(())
+}
+
+/// Matches the DWM frame (border and shadow tint) to the current app theme.
+fn apply_frame_theme(hwnd: HWND) {
+    let dark = (crate::theme::theme() == crate::theme::Theme::Dark) as u32;
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            std::ptr::from_ref(&dark).cast(),
+            std::mem::size_of::<u32>() as u32,
+        );
+    }
 }
 
 fn start_attempt(hwnd: HWND, state: &mut State) {
@@ -352,7 +364,7 @@ fn run(hwnd: HWND, state: &mut State, action: Action) {
 }
 
 fn paint(hwnd: HWND, state: &State, hdc: HDC) {
-    use crate::drawing::{Look, fluent_button, icon, rounded, with_font};
+    use crate::drawing::{Look, corner_diameter, fluent_button, icon, rounded, with_font};
     let tokens = crate::theme::tokens();
     let dpi = state.dpi;
     let mut client = RECT::default();
@@ -366,13 +378,13 @@ fn paint(hwnd: HWND, state: &State, hdc: HDC) {
     let (glyph, glyph_color, title, detail) = match &state.phase {
         Phase::Uploading => (
             0xe898u16,
-            tokens.accent,
+            tokens.accent_ink,
             crate::i18n::t("Uploading…").to_string(),
             crate::i18n::t("Sending to the Worker in your Cloudflare account").to_string(),
         ),
         Phase::Done { url, copied } => (
             0xe73e,
-            tokens.accent,
+            tokens.accent_ink,
             if *copied {
                 crate::i18n::t("Uploaded · link copied").to_string()
             } else {
@@ -382,7 +394,7 @@ fn paint(hwnd: HWND, state: &State, hdc: HDC) {
         ),
         Phase::Failed(error) => (
             0xe783,
-            windows::Win32::Foundation::COLORREF(0x004f_4fe8),
+            tokens.critical,
             crate::i18n::t("Upload failed").to_string(),
             error.clone(),
         ),
@@ -459,10 +471,11 @@ fn paint(hwnd: HWND, state: &State, hdc: HDC) {
         let right = client.right - scale(16, dpi);
         let top = client.bottom - scale(30, dpi);
         let bottom = top + scale(3, dpi).max(2);
+        let corner = corner_diameter(crate::theme::RADIUS_CONTROL, dpi);
         rounded(
             hdc,
             crate::capture::Rect::new(left, top, right, bottom),
-            4,
+            corner,
             tokens.stroke,
             tokens.stroke,
         );
@@ -475,9 +488,9 @@ fn paint(hwnd: HWND, state: &State, hdc: HDC) {
             rounded(
                 hdc,
                 crate::capture::Rect::new(start, top, end, bottom),
-                4,
-                tokens.accent,
-                tokens.accent,
+                corner,
+                tokens.accent_ink,
+                tokens.accent_ink,
             );
         }
     }
@@ -490,12 +503,17 @@ fn paint(hwnd: HWND, state: &State, hdc: HDC) {
         };
         if action == Action::Close {
             if look.hot {
+                let fill = if look.pressed {
+                    tokens.subtle_pressed
+                } else {
+                    tokens.subtle_hover
+                };
                 rounded(
                     hdc,
                     crate::capture::Rect::new(rect.left, rect.top, rect.right, rect.bottom),
-                    scale(6, dpi),
-                    tokens.control_hover,
-                    tokens.control_hover,
+                    corner_diameter(crate::theme::RADIUS_CONTROL, dpi),
+                    fill,
+                    fill,
                 );
             }
             icon(
@@ -669,8 +687,9 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
-        WM_SETTINGCHANGE | WM_DWMCOLORIZATIONCOLORCHANGED => {
+        WM_SETTINGCHANGE => {
             crate::theme::invalidate_theme_cache();
+            apply_frame_theme(hwnd);
             unsafe {
                 let _ = InvalidateRect(hwnd, None, false);
             }

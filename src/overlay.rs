@@ -554,7 +554,7 @@ impl OverlayState {
                     );
                 }
             }
-            match crate::toolbar::show_command_menu(hwnd, &buttons) {
+            match crate::toolbar::show_command_menu(hwnd, &buttons, None) {
                 Ok(Some(ToolbarItem::Tool(tool))) => {
                     self.active_tool = tool;
                     self.selected_id = None;

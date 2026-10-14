@@ -387,7 +387,7 @@ fn layout(hwnd: HWND, dpi: u32) -> i32 {
     // Selector bar: content-width tabs.
     let mut x = MARGIN - 10;
     for (index, name) in tab_names().iter().enumerate() {
-        let width = crate::drawing::measure_text(name, crate::theme::FONT_BODY_PX).0 + 30;
+        let width = crate::drawing::measure_ui_text(name).0 + 2 * crate::drawing::TAB_PADDING;
         place(hwnd, ID_TAB_FIRST + index as i32, (x, 6, width, 40), dpi);
         x += width;
     }
@@ -571,8 +571,8 @@ fn draw_slider(draw: &windows::Win32::UI::Controls::NMCUSTOMDRAW, state: &Settin
         draw.hdc,
         crate::capture::Rect::new(left, center - rail, knob + 1, center + rail),
         rail * 2,
-        tokens.accent,
-        tokens.accent,
+        tokens.accent_ink,
+        tokens.accent_ink,
     );
     // Fluent thumb: neutral outer disc with an accent core.
     let outer = scale(10, state.dpi);
@@ -588,8 +588,8 @@ fn draw_slider(draw: &windows::Win32::UI::Controls::NMCUSTOMDRAW, state: &Settin
         draw.hdc,
         crate::capture::Rect::new(knob - inner, center - inner, knob + inner, center + inner),
         inner * 2,
-        tokens.accent,
-        tokens.accent,
+        tokens.accent_ink,
+        tokens.accent_ink,
     );
 }
 
@@ -606,10 +606,11 @@ fn draw_progress(draw: &windows::Win32::UI::Controls::NMCUSTOMDRAW, state: &Sett
     let tokens = tokens();
     let top = scale(2, state.dpi);
     let bottom = top + scale(3, state.dpi).max(2);
+    let corner = crate::drawing::corner_diameter(crate::theme::RADIUS_CONTROL, state.dpi);
     crate::drawing::rounded(
         draw.hdc,
         crate::capture::Rect::new(1, top, width - 1, bottom),
-        4,
+        corner,
         tokens.stroke,
         tokens.stroke,
     );
@@ -624,15 +625,15 @@ fn draw_progress(draw: &windows::Win32::UI::Controls::NMCUSTOMDRAW, state: &Sett
     crate::drawing::rounded(
         draw.hdc,
         crate::capture::Rect::new(1 + offset, top, 1 + offset + segment, bottom),
-        4,
-        tokens.accent,
-        tokens.accent,
+        corner,
+        tokens.accent_ink,
+        tokens.accent_ink,
     );
 }
 
 /// Windows 11 buttons, tabs, toggle switches and colour swatches.
 fn draw_button(draw: &windows::Win32::UI::Controls::NMCUSTOMDRAW, state: &SettingsWindowState) {
-    use crate::drawing::{Look, fluent_button, fluent_tab, fluent_toggle, rounded, ui_text};
+    use crate::drawing::{Align, Look, fluent_button, fluent_tab, fluent_toggle, rounded, ui_text};
     let hdc = draw.hdc;
     let id = draw.hdr.idFrom as i32;
     let dpi = state.dpi;
@@ -666,11 +667,11 @@ fn draw_button(draw: &windows::Win32::UI::Controls::NMCUSTOMDRAW, state: &Settin
         let diameter = scale(20, dpi);
         let x = (rect.right - diameter) / 2;
         let y = (rect.bottom - diameter) / 2;
-        if look.selected || look.hot || look.focus {
-            // A ring around the chip: accent (2 px) when chosen, subtle on hover/focus.
+        if look.selected || look.hot {
+            // A ring around the chip: accent (2 px) when chosen, subtle on hover.
             let ring = scale(4, dpi);
             let ring_color = if look.selected {
-                tokens.accent
+                tokens.accent_ink
             } else {
                 tokens.stroke
             };
@@ -696,6 +697,15 @@ fn draw_button(draw: &windows::Win32::UI::Controls::NMCUSTOMDRAW, state: &Settin
             color,
             tokens.stroke,
         );
+        if look.focus && !look.selected {
+            let chip = RECT {
+                left: x,
+                top: y,
+                right: x + diameter,
+                bottom: y + diameter,
+            };
+            crate::drawing::focus_ring(hdc, chip, diameter / 2, dpi);
+        }
     } else if id == ID_COLOR_CUSTOM {
         // The button shows the current colour; its dot is ringed in accent
         // when that colour is not one of the palette chips.
@@ -712,7 +722,7 @@ fn draw_button(draw: &windows::Win32::UI::Controls::NMCUSTOMDRAW, state: &Settin
             if PALETTE.contains(&custom) {
                 tokens.stroke
             } else {
-                tokens.accent
+                tokens.accent_ink
             },
         );
         let mut text_rect = RECT {
@@ -720,7 +730,7 @@ fn draw_button(draw: &windows::Win32::UI::Controls::NMCUSTOMDRAW, state: &Settin
             right: rect.right - scale(6, dpi),
             ..rect
         };
-        ui_text(hdc, text, &mut text_rect, dpi, tokens.text, false);
+        ui_text(hdc, text, &mut text_rect, dpi, tokens.text, Align::Left);
     } else {
         fluent_button(hdc, rect, text, dpi, look, background);
     }
@@ -1399,7 +1409,7 @@ unsafe extern "system" fn settings_wnd_proc(
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1),
-        WM_SETTINGCHANGE | WM_DWMCOLORIZATIONCOLORCHANGED => {
+        WM_SETTINGCHANGE => {
             crate::theme::invalidate_theme_cache();
             apply_theme(hwnd, state);
             LRESULT(0)
@@ -1574,7 +1584,7 @@ fn register_settings_class() -> Result<()> {
         hIcon: crate::tray::app_icon(),
         hCursor: unsafe { LoadCursorW(HINSTANCE::default(), IDC_ARROW).unwrap_or_default() },
         lpszClassName: SETTINGS_CLASS_NAME,
-        hIconSm: crate::tray::app_icon(),
+        hIconSm: crate::tray::app_icon_small(),
         ..Default::default()
     };
     if unsafe { RegisterClassExW(&class) } == 0
