@@ -527,7 +527,10 @@ mod tests {
     fn only_an_accepted_drop_counts_as_a_drop() {
         use windows::Win32::Foundation::{DRAGDROP_S_CANCEL, S_OK};
         assert!(dropped(DRAGDROP_S_DROP, 1), "copied");
-        assert!(!dropped(DRAGDROP_S_DROP, 0), "released over a target that refused it");
+        assert!(
+            !dropped(DRAGDROP_S_DROP, 0),
+            "released over a target that refused it"
+        );
         assert!(!dropped(DRAGDROP_S_CANCEL, 1), "Esc");
         assert!(!dropped(S_OK, 1));
     }
@@ -538,7 +541,10 @@ mod tests {
         assert_eq!(grace_left(None), Duration::ZERO, "nothing was dropped");
         assert_eq!(grace_left(Some(Duration::ZERO)), secs(10));
         assert_eq!(grace_left(Some(secs(4))), secs(6));
-        assert_eq!(grace_left(Some(Duration::from_millis(9_999))), Duration::from_millis(1));
+        assert_eq!(
+            grace_left(Some(Duration::from_millis(9_999))),
+            Duration::from_millis(1)
+        );
         assert_eq!(grace_left(Some(secs(10))), Duration::ZERO);
         assert_eq!(grace_left(Some(secs(3600))), Duration::ZERO);
     }
@@ -568,7 +574,10 @@ mod tests {
         assert!(copy.exists(), "a chat app may still be reading it");
         finish_pending();
         assert!(!copy.exists());
-        assert!(started.elapsed() >= wait, "ending the process waits for the deletion");
+        assert!(
+            started.elapsed() >= wait,
+            "ending the process waits for the deletion"
+        );
     }
 
     #[test]

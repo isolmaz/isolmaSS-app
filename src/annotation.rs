@@ -27,6 +27,9 @@ pub enum ToolKind {
     Blur,
     Redact,
     Select,
+    /// Copies the colour of a clicked pixel; it draws nothing and is never saved as the
+    /// tool to reopen with.
+    ColorPicker,
 }
 
 /// Converts a 32-bit BGRA color `[B, G, R, A]` to a Win32 `COLORREF` (0x00bbggrr).

@@ -174,7 +174,7 @@ pub(super) unsafe extern "system" fn overlay_wnd_proc(
                         match result {
                             Ok(path) => {
                                 crate::save::recent::saved(&path);
-                                state.committed_result = true;
+                                state.mark_exported();
                                 if state.settings.close_after_action {
                                     unsafe {
                                         let _ = DestroyWindow(hwnd);
@@ -353,6 +353,7 @@ pub(super) unsafe extern "system" fn overlay_wnd_proc(
                         }
                     }
                     FADE_TIMER => state.advance_fade(hwnd),
+                    NOTICE_TIMER => state.clear_notice(hwnd),
                     _ => {}
                 }
             }
@@ -831,6 +832,12 @@ pub(super) unsafe extern "system" fn overlay_wnd_proc(
                         if state.thickness_input.take().is_some() {
                             set_overlay_text_editing(false);
                         }
+                        // The picker takes the whole capture, not only the selection, and
+                        // leaves the selection and annotations alone.
+                        if state.active_tool == ToolKind::ColorPicker {
+                            state.pick_color(hwnd, pt);
+                            return LRESULT(0);
+                        }
                         // A press inside the text box places the caret, Shift extends the
                         // selection, and dragging selects; the text stays open.
                         if state
@@ -1063,7 +1070,7 @@ pub(super) unsafe extern "system" fn overlay_wnd_proc(
                                         current: pt,
                                     });
                                 }
-                                ToolKind::Select => unreachable!(),
+                                ToolKind::Select | ToolKind::ColorPicker => unreachable!(),
                             }
                         }
                     }
