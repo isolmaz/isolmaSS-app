@@ -13,12 +13,12 @@ A small, free Windows screenshot editor. Press PrintScreen, draw on the capture,
 - **Your links stay yours.** Sharing runs on a Worker the app installs in your own Cloudflare account; Cloudflare's free plan is enough. There is no isolmaSS server, account, advertising or analytics.
 - **You stay in control.** Delete any link from the app, add a password, and set limits and how long images are kept.
 - **Fast.** PrintScreen → drag → Ctrl+U. The link is copied before you switch windows.
-- **Drawings stay editable.** Every arrow, frame or text remains an object you can move, resize, recolor or delete.
+- **Drawings stay editable.** Every arrow, frame, line, ellipse or text remains an object you can move, resize, recolor or delete.
 - **Tiny and native.** One ~1.4 MB Windows program, light and dark themes, English and Turkish, signed updates. Open source (MIT).
 
 ## Share from your own Cloudflare
 
-Ctrl+U uploads the capture to your Worker and copies the link. Anyone you send it to can open it in a browser.
+Ctrl+U uploads the capture to your Worker and copies the link. Anyone you send it to can open it in a browser. The share page has **Download**, **Open original**, **Copy link** and a **Report** button that opens Cloudflare's abuse form, plus a **Get isolmaSS** button for the recipient. A password-protected link shows the same page once it is unlocked.
 
 ![Uploading with Ctrl+U and opening the link in a browser](docs/media/share.gif)
 
@@ -28,21 +28,25 @@ The Cloudflare window shows your Worker's usage, sets your limits and lists your
 
 **Setup is a one-time wizard.** The first upload asks you to sign in to Cloudflare in your browser and approve two permissions; the app then creates the Worker for you. You don't paste keys or use a command line. Passwords for new uploads, upload and storage limits, and automatic expiry are built in. Details: [docs/CLOUDFLARE.md](docs/CLOUDFLARE.md).
 
+When the upload card says *Uploaded · link copied*, you can also **drag the image from the card** into a chat, a browser upload field or Explorer: the drop receives the image as a file, and text fields receive the link.
+
 ## Capture
 
-PrintScreen freezes every monitor; drag a region or click a window.
+PrintScreen freezes every monitor; drag a region or click a window. **Ctrl+A** selects the whole monitor under the pointer. **Capture last region** in the tray menu reopens the editor on the region you last copied, saved, uploaded or pinned, until the app quits.
 
 ![Dragging a region over a dashboard](docs/media/capture.gif)
 
 ## Annotate
 
-Eight tools, each with a one-letter shortcut: frame, arrow, pen, highlighter, text, numbered steps, blur and opaque redaction. Color and line width (1–64 px) sit in the toolbar.
+Ten tools, each with a one-letter shortcut: frame, ellipse, arrow, line, pen, highlighter, text, numbered steps, blur and opaque redaction. Color and line width (1–64 px) sit in the toolbar. **I** picks a color: click any pixel of the capture and its `#RRGGBB` code is copied.
+
+Text can have several lines (**Shift+Enter** adds a line break, Enter finishes) and an optional filled background box (**Ctrl+B**), so a caption stays readable on a busy screenshot.
 
 ![Frame, arrow, pen, highlighter, text and numbered steps](docs/media/annotate.gif)
 
 ## Edit after drawing
 
-Press **V**, click any drawing, then drag it, drag its handles or press Delete. Ctrl+Z brings it back.
+Press **V**, click any drawing, then drag it, drag its handles or press Delete. Ctrl+Z brings it back. The selection box sits outside thick strokes instead of cutting through them.
 
 ![Selecting, moving and resizing an arrow and a frame, deleting and undoing](docs/media/edit.gif)
 
@@ -52,15 +56,31 @@ Blur is only a visual effect. For secrets use **Redact** (M): it replaces pixels
 
 ![Blurring an email address and redacting an API key](docs/media/redact.gif)
 
+**Ctrl+Shift+R** finds email addresses and phone numbers in the selection and covers each with a Redact box, as one undo step. It errs on the side of privacy and also covers other long digit sequences that look like phone numbers, such as order numbers; Ctrl+Z undoes it, or delete a single box. Check the result: text recognition can miss what it cannot read.
+
+## Copy text from an image
+
+**Ctrl+Shift+C** reads the text in the selection and copies it to the clipboard. Recognition runs on your computer with Windows' built-in text recognition, so nothing is sent anywhere; Windows needs a recognition language installed. A notice in the editor confirms the copy (the editor closes afterwards if **Close after an action** is on). It reads the image as exported, so redactions you already drew stay hidden.
+
+## Pin to screen
+
+**Ctrl+T** keeps the selection on the desktop in a small always-on-top window, handy as a reference while you work in other apps. Drag it to move it, scroll to zoom (25–400 %), double-click or press Esc to close, and right-click for Copy, Save as and Close. A pin lasts until you close it or quit the app.
+
 ## Shortcuts
 
 | Key | Action |
 |---|---|
 | PrintScreen | Capture (configurable, with optional delay) |
-| V R A P T H N B M | Select, frame, arrow, pen, text, highlighter, steps, blur, redact |
+| V R E A L P T H N B M | Select, frame, ellipse, arrow, line, pen, text, highlighter, steps, blur, redact |
+| I | Pick a color from the capture and copy its hex code |
+| Ctrl+A | Select the whole monitor under the pointer |
 | Ctrl+C / Enter | Copy |
 | Ctrl+S / Ctrl+Shift+S | Save / Save as |
 | Ctrl+U | Upload and copy the link |
+| Ctrl+T | Pin the selection to the screen |
+| Ctrl+Shift+C | Copy the text in the selection |
+| Ctrl+Shift+R | Redact emails and phone numbers |
+| Shift+Enter / Ctrl+B | In a text box: new line / toggle the background box |
 | Ctrl+Z / Ctrl+Y | Undo / redo |
 | Delete | Delete the selected drawing |
 | Arrow keys | Nudge the selection or drawing (Shift: 10 px) |
@@ -71,6 +91,7 @@ All shortcuts, settings and file locations: [docs/GUIDE.md](docs/GUIDE.md). The 
 ## Privacy
 
 - Copy and Save never send anything. Upload goes only to the Worker in the Cloudflare account you chose.
+- Text recognition (Copy text, Redact emails and phone numbers) runs locally in Windows; the image never leaves your computer for it.
 - Worker keys are encrypted with Windows DPAPI; the Cloudflare sign-in token is never stored.
 - Updates install only with your consent and only if the publisher signature verifies. See [SECURITY.md](SECURITY.md).
 
