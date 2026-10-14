@@ -79,11 +79,11 @@ All shortcuts, settings and file locations: [docs/GUIDE.md](docs/GUIDE.md). The 
 Windows x64, Visual Studio C++ Build Tools, Rust 1.98.0 and NSIS.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\check.ps1   # fmt, clippy, tests, Worker syntax
+powershell -ExecutionPolicy Bypass -File scripts\check.ps1   # fmt, clippy, Worker syntax
 cmd /c package.bat
 ```
 
-GitHub Actions (`.github/workflows/ci.yml`) runs the same fmt, Clippy, test and Worker syntax checks on every push to `main` and every pull request. Packaging, signing and releases stay local.
+Tests are not run locally: GitHub Actions (`.github/workflows/ci.yml`) runs fmt, Clippy, the tests for the changed modules, the Worker checks and a build on every push to `main` and every pull request, and the **Release check** workflow runs the full suite with coverage before a release. Packaging, signing and releases stay local. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ```text
 src/          Rust app: capture, overlay editor, toolbar, annotations, settings, tray, updater, upload

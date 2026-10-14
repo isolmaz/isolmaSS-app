@@ -1,0 +1,35 @@
+# Files excluded from the 100% line-coverage gate in .github/workflows/release-check.yml.
+# One repo-relative path per line; blank lines and lines starting with # are ignored.
+# This list is reviewed in the coverage PR. Every file below is predominantly Win32
+# window/message/OS glue that only a real desktop can exercise, and is covered by
+# `isolmass --smoke-test` instead.
+
+# Entry point and smoke test driver
+src/main.rs
+src/smoke.rs
+
+# Editor session: window procedure, mouse and keyboard handling
+src/overlay/session.rs
+
+# Windows with message loops
+src/settings_window.rs
+src/cloud_settings_window.rs
+src/toast.rs
+src/ui.rs
+
+# Tray icon and its menu
+src/tray.rs
+src/tray/menu.rs
+
+# OS integration: single instance, startup entry, clipboard, window snapping
+src/instance.rs
+src/startup.rs
+src/clipboard.rs
+src/window_snap.rs
+
+# Cloudflare setup: browser OAuth and account API calls
+src/cloudflare_oauth.rs
+src/cloudflare_setup.rs
+
+# System information collection
+src/diagnostics.rs
