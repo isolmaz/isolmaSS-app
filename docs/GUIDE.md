@@ -52,7 +52,7 @@ A language change applies after **Save** when Settings is opened again. Ctrl+Tab
 
 ## Updates
 
-Update checks read the public releases of this repository, [`isolmaz/isolmaSS-app`](https://github.com/isolmaz/isolmaSS-app/releases). Versions up to 0.6.0 checked a release repository that is no longer public and report *HTTP 404*; install the latest version from the [download page](https://ss.isolmaz.com/download) once and updates work again. A newer release offers **Install / Later / Skip this version**; nothing installs without that choice, and a skipped version is offered again only by a manual check. Installation waits for any open editor or Settings window, verifies the installer's publisher signature again, closes the app, installs and restarts it. The installer keeps a rollback copy until the new version passes a startup check. The signature is application-level: Windows SmartScreen may still warn, and the app never bypasses that warning. Portable ZIPs are for manual use and do not update an installed copy. See [SECURITY.md](../SECURITY.md) and [DISTRIBUTION.md](../DISTRIBUTION.md).
+Update checks read the public releases of this repository, [`isolmaz/isolmaSS-app`](https://github.com/isolmaz/isolmaSS-app/releases). Versions up to 0.6.0 checked a release repository that is no longer public and report *HTTP 404*; install the latest version from the [download page](https://ss.isolmaz.com/download) once and updates work again. A newer release offers **Install / Later / Skip this version**; nothing installs without that choice, and a skipped version is offered again only by a manual check. Installation waits for any open editor, Settings window or running upload, verifies the installer's publisher signature again, closes the app, installs and restarts it. The installer keeps a rollback copy until the new version passes a startup check. A portable copy never installs updates itself: when a newer version exists it offers to open the release page, where you download the new ZIP. The signature is application-level: Windows SmartScreen may still warn, and the app never bypasses that warning. Portable ZIPs are for manual use and do not update an installed copy. See [SECURITY.md](../SECURITY.md) and [DISTRIBUTION.md](../DISTRIBUTION.md).
 
 ## Files and privacy
 
@@ -61,7 +61,7 @@ Update checks read the public releases of this repository, [`isolmaz/isolmaSS-ap
 - Worker keys and the optional image password: `%LOCALAPPDATA%\isolmaSS\cloud-credentials.bin`, encrypted for the current Windows user with DPAPI.
 - Upload staging: an encoded copy of the selection in the user's temp folder, deleted when the upload card closes.
 - Diagnostics: `%LOCALAPPDATA%\isolmaSS\logs\diagnostic.log` (rotated near 1 MiB). No pixels, annotation text or keystrokes; errors may include local paths.
-- Update downloads: `%LOCALAPPDATA%\isolmaSS\updates`.
+- Update downloads: `%LOCALAPPDATA%\isolmaSS\updates`, kept only until the next launch, which deletes installers for the running or older versions and interrupted downloads.
 
 Invalid settings JSON is copied to `settings.corrupt.json` before defaults are used. Exported PNG/JPEG and clipboard images are opaque. Save as replaces a file only after encoding and flushing succeed.
 

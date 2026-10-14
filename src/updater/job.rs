@@ -14,7 +14,7 @@ static RECHECK: Mutex<Option<bool>> = Mutex::new(None);
 
 enum Event {
     Checked(Result<Option<UpdateInfo>, String>, bool),
-    Downloaded(Result<PathBuf, String>, bool),
+    Downloaded(Result<PathBuf, DownloadError>, bool),
 }
 
 impl Event {
@@ -114,8 +114,24 @@ pub fn is_checking() -> bool {
 pub fn run_manual_update_check() -> bool {
     start(false, true, || Event::Checked(check_for_update(), true))
 }
-pub fn run_automatic_update_check() {
+fn run_automatic_update_check() {
     let _ = start(true, true, || Event::Checked(check_for_update(), false));
+}
+
+/// Once per launch: sweeps leftovers of earlier updates, then runs the automatic check when
+/// enabled. Without a check the worker is not flagged as checking, so the menu stays usable.
+pub fn run_startup_work(check_for_updates: bool) {
+    let _ = start(true, check_for_updates, move || {
+        remove_stale_update_files();
+        Event::Checked(
+            if check_for_updates {
+                check_for_update()
+            } else {
+                Ok(None)
+            },
+            false,
+        )
+    });
 }
 
 pub fn configure(previous: &crate::settings::Settings, current: &crate::settings::Settings) {
@@ -151,6 +167,43 @@ pub fn configure(previous: &crate::settings::Settings, current: &crate::settings
         }
         *RECHECK.lock().unwrap_or_else(|error| error.into_inner()) =
             current.check_updates_automatically.then_some(true);
+    }
+}
+
+/// The portable build never runs the installer: the offer leads to the release page instead.
+fn offer_release_page(owner: HWND, update: &UpdateInfo) {
+    let open_page = crate::ui::confirm(
+        owner,
+        crate::i18n::t("isolmaSS update"),
+        &crate::i18n::tf(
+            "isolmaSS {} is available. This portable copy does not update itself. Open the download page to get the new portable ZIP?",
+            &[&update.version],
+        ),
+    );
+    if !open_page {
+        crate::settings_window::report_update_status(
+            owner,
+            crate::i18n::t("Not installed. You can check again at any time."),
+            UpdateStatus::Idle,
+        );
+    } else if let Err(error) = open_release_page(&update.release_url) {
+        crate::ui::error(
+            owner,
+            crate::i18n::t("Could not open the download page"),
+            &error,
+        );
+    }
+}
+
+fn download_failure_status(kind: DownloadFailure) -> &'static str {
+    match kind {
+        DownloadFailure::Network => crate::i18n::t(
+            "The update could not be downloaded. Check your connection and try again.",
+        ),
+        DownloadFailure::Integrity => crate::i18n::t("Verification failed. Try the update again."),
+        DownloadFailure::Storage => crate::i18n::t(
+            "The update could not be saved. Check free disk space and folder access, then try again.",
+        ),
     }
 }
 
@@ -196,6 +249,10 @@ pub fn poll(owner: HWND, allow_install: bool) {
                     &crate::i18n::tf("Version {} is ready", &[&update.version]),
                     UpdateStatus::Idle,
                 );
+            }
+            if !runs_from_installation() {
+                offer_release_page(owner, &update);
+                return;
             }
             match crate::ui::ask_for_update(owner, &update.version) {
                 Ok(crate::ui::UpdateChoice::Install) => {
@@ -267,7 +324,6 @@ pub fn poll(owner: HWND, allow_install: bool) {
                     crate::i18n::t("isolmaSS is up to date"),
                     message,
                 );
-                crate::ui::info(owner, crate::i18n::t("isolmaSS is up to date"), message);
             }
         }
         Some(Event::Checked(Err(error), manual)) => {
@@ -321,26 +377,27 @@ pub fn poll(owner: HWND, allow_install: bool) {
         Some(Event::Downloaded(Err(error), automatic)) => {
             crate::settings_window::report_update_status(
                 owner,
-                crate::i18n::t("Verification failed. Try the update again."),
+                download_failure_status(error.kind),
                 UpdateStatus::Idle,
             );
             if automatic {
-                crate::diagnostics::record("update", &error);
+                crate::diagnostics::record("update", &error.message);
                 crate::tray::show_notification(
                     crate::i18n::t("Could not download the update"),
-                    &error,
+                    &error.message,
                 );
             } else {
                 crate::ui::error(
                     owner,
                     crate::i18n::t("Could not install the update"),
-                    &error,
+                    &error.message,
                 );
             }
         }
         _ => {}
     }
-    let ready = if allow_install {
+    // An upload in flight is killed by the installer's exit request; wait like for an open editor.
+    let ready = if allow_install && !crate::toast::upload_in_flight() {
         READY
             .lock()
             .unwrap_or_else(|error| error.into_inner())

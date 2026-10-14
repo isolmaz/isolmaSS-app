@@ -31,7 +31,7 @@ use hotkey::{HotkeyConfig, HotkeyHandle, start_hotkey_listener};
 use instance::InstanceState;
 use overlay::show_overlay_session;
 use settings::{Settings, show_settings_dialog};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Instant;
 use tray::{TrayCommand, TrayManager};
@@ -111,6 +111,54 @@ fn open_recent_capture(path: &Path) -> Result<(), String> {
     } else {
         Ok(())
     }
+}
+
+/// The newest saved capture, when it sits directly in `folder`.
+fn newest_capture_in<'a>(recent: &'a [PathBuf], folder: &Path) -> Option<&'a Path> {
+    recent
+        .first()
+        .map(PathBuf::as_path)
+        .filter(|path| path.parent() == Some(folder))
+}
+
+/// Opens Explorer on the file's folder with the file selected; false when Explorer refused.
+fn select_in_explorer(file: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::System::Com::{CoTaskMemFree, IBindCtx};
+    use windows::Win32::UI::Shell::Common::ITEMIDLIST;
+    use windows::Win32::UI::Shell::{SHOpenFolderAndSelectItems, SHParseDisplayName};
+    let wide_path: Vec<u16> = file.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut item: *mut ITEMIDLIST = std::ptr::null_mut();
+    let parsed = unsafe {
+        SHParseDisplayName(
+            PCWSTR(wide_path.as_ptr()),
+            None::<&IBindCtx>,
+            &mut item,
+            0,
+            None,
+        )
+    };
+    if parsed.is_err() || item.is_null() {
+        return false;
+    }
+    // Without child items, the single PIDL names the item to select in its parent folder.
+    let opened = unsafe { SHOpenFolderAndSelectItems(item, None, 0) }.is_ok();
+    unsafe { CoTaskMemFree(Some(item.cast())) };
+    opened
+}
+
+/// Opens the folder of the latest save, or the default save folder. A fresh install has no
+/// screenshots folder yet, so it is created first; the newest capture is selected when it is there.
+fn open_screenshots_folder(default_directory: &Path) -> Result<(), String> {
+    let folder = save::recent::last_folder().unwrap_or_else(|| default_directory.to_owned());
+    if let Err(error) = std::fs::create_dir_all(&folder) {
+        diagnostics::record("screenshots folder", &error.to_string());
+    }
+    let recent = save::recent::list();
+    if newest_capture_in(&recent, &folder).is_some_and(select_in_explorer) {
+        return Ok(());
+    }
+    open_recent_capture(&folder)
 }
 
 struct HotkeyRuntime {
@@ -247,6 +295,7 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
         InstanceState::Primary(instance) => instance,
         InstanceState::ExistingNotified => return Ok(()),
     };
+    let first_run = Settings::config_path().is_some_and(|path| !path.exists());
     let (mut settings, warning) = Settings::load_with_warning()?;
     theme::set_preference(settings.theme_preference);
     i18n::set_preference(settings.language);
@@ -297,9 +346,23 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
             }
         }
     };
-    if settings.check_updates_automatically {
-        updater::run_automatic_update_check();
+    if first_run {
+        // New tray icons start in Windows 11's overflow flyout, so say that the app is running.
+        if let Some(handle) = runtime.as_ref().and_then(|active| active.handle.as_ref()) {
+            tray::show_notification(
+                crate::i18n::t("isolmaSS is ready"),
+                &i18n::tf(
+                    "Press {} to capture. isolmaSS waits in the notification area.",
+                    &[&handle.active_description],
+                ),
+            );
+        }
+        // Writing the file is what makes the next launch a regular one.
+        if let Err(error) = settings.save() {
+            diagnostics::record("first run", &error.to_string());
+        }
     }
+    updater::run_startup_work(settings.check_updates_automatically);
     if open_settings {
         tray::queue_command(TrayCommand::Settings);
     }
@@ -307,6 +370,8 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
     let mut scheduled: Option<Instant> = None;
     let mut msg = MSG::default();
     let mut running = true;
+    // Quit asked while an upload is in flight; the loop ends once the upload card is done.
+    let mut exit_requested = false;
     while running {
         let status = unsafe { GetMessageW(&mut msg, None, 0, 0) }.0;
         if status == -1 {
@@ -330,6 +395,12 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
             }
         }
         for command in tray::take_commands() {
+            if exit_requested {
+                if matches!(command, TrayCommand::Capture(_)) {
+                    tray::capture_finished();
+                }
+                continue;
+            }
             match command {
                 TrayCommand::Capture(triggered) => {
                     if tray::capture_is_stale(triggered) {
@@ -409,9 +480,7 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
                     }
                 }
                 TrayCommand::OpenFolder => {
-                    let path = save::recent::last_folder()
-                        .unwrap_or_else(|| settings.save_directory.clone());
-                    if let Err(error) = open_recent_capture(&path) {
+                    if let Err(error) = open_screenshots_folder(&settings.save_directory) {
                         tray::show_notification(
                             crate::i18n::t("Could not open the folder"),
                             &error,
@@ -427,10 +496,16 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
                     }
                 }
                 TrayCommand::Exit => {
-                    running = false;
-                    break;
+                    unsafe {
+                        let _ = KillTimer(tray::window_handle(), CAPTURE_TIMER);
+                    }
+                    scheduled = None;
+                    exit_requested = true;
                 }
             }
+        }
+        if exit_requested && !toast::upload_in_flight() {
+            running = false;
         }
         if reload {
             match Settings::load_with_warning() {
@@ -449,7 +524,7 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
                 }
             }
         }
-        if running {
+        if running && !exit_requested {
             updater::poll(tray::window_handle(), true);
             save::recent::refresh(&settings.save_directory);
         }
@@ -623,5 +698,24 @@ fn main() {
             );
         }
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn newest_capture_is_selected_only_inside_the_opened_folder() {
+        let recent = [
+            PathBuf::from(r"C:\Shots\newer.png"),
+            PathBuf::from(r"C:\Shots\older.png"),
+        ];
+        assert_eq!(
+            newest_capture_in(&recent, Path::new(r"C:\Shots")),
+            Some(Path::new(r"C:\Shots\newer.png"))
+        );
+        assert_eq!(newest_capture_in(&recent, Path::new(r"D:\Elsewhere")), None);
+        assert_eq!(newest_capture_in(&[], Path::new(r"C:\Shots")), None);
     }
 }
