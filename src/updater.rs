@@ -786,15 +786,14 @@ pub fn file_version(path: &Path) -> Result<String, String> {
     };
     let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     let size = unsafe { GetFileVersionInfoSizeW(PCWSTR(path.as_ptr()), None) };
+    let missing = crate::i18n::t("The executable has no valid version resource.");
     if size == 0 || size > 1024 * 1024 {
-        return Err(crate::i18n::t("The executable has no valid version resource.").to_string());
+        return Err(missing.to_string());
     }
     // u32 alignment is sufficient for VS_FIXEDFILEINFO and the Win32 version block.
     let mut data = vec![0u32; (size as usize).div_ceil(4)];
     unsafe { GetFileVersionInfoW(PCWSTR(path.as_ptr()), 0, size, data.as_mut_ptr().cast()) }
-        .map_err(failed(crate::i18n::t(
-            "The executable has no valid version resource.",
-        )))?;
+        .map_err(failed(missing))?;
     let mut pointer = std::ptr::null_mut();
     let mut length = 0;
     if !unsafe {
