@@ -32,7 +32,7 @@ When the upload card says *Uploaded · link copied*, you can also **drag the ima
 
 ## Capture
 
-PrintScreen freezes every monitor; drag a region or click a window. **Ctrl+A** selects the whole monitor under the pointer. **Capture last region** in the tray menu reopens the editor on the region you last copied, saved or uploaded, until the app quits.
+PrintScreen freezes every monitor; drag a region or click a window. **Ctrl+A** selects the whole monitor under the pointer. **Capture last region** in the tray menu reopens the editor on the region you last copied, saved, uploaded or pinned, until the app quits.
 
 ![Dragging a region over a dashboard](docs/media/capture.gif)
 
