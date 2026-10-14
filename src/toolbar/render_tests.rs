@@ -326,6 +326,20 @@ fn tooltips_open_away_from_a_selection_the_bar_sits_above() {
 }
 
 #[test]
+fn a_tooltip_that_fits_nowhere_is_clamped_into_the_viewport() {
+    let toolbar = standard(false, false);
+    let margin = 8; // 4 design px at 2x
+    // Wider than the viewport: neither side of the rail fits, so it hugs the left edge.
+    let pen = rect_of(&toolbar, ToolbarItem::Tool(ToolKind::Pen));
+    let tip = toolbar.tooltip_bounds(pen, 5000, 30);
+    assert_eq!(tip.left, VIEWPORT.left + margin);
+    // Taller than the viewport: neither above nor below the bar fits, so it hugs the top.
+    let save = rect_of(&toolbar, ToolbarItem::Action(ToolbarAction::Save));
+    let tip = toolbar.tooltip_bounds(save, 150, 5000);
+    assert_eq!(tip.top, VIEWPORT.top + margin);
+}
+
+#[test]
 fn every_toolbar_command_shows_its_keyboard_shortcut() {
     for (action, keys) in [
         (ToolbarAction::Undo, "Ctrl+Z"),
