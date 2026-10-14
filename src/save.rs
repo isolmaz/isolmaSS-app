@@ -72,19 +72,19 @@ pub(crate) struct GdiPlusToken(usize);
 
 impl GdiPlusToken {
     pub(crate) fn start() -> Result<Self, String> {
-        Self::start_version(1)
-    }
-
-    /// GDI+ accepts input version 1 (and 2 for the extended input); any other fails.
-    fn start_version(version: u32) -> Result<Self, String> {
         let mut token = 0usize;
         let input = GdiplusStartupInput {
-            gdiplus_version: version,
+            gdiplus_version: 1,
             debug_event_callback: 0,
             suppress_background_thread: 0,
             suppress_external_codecs: 0,
         };
         let status = unsafe { GdiplusStartup(&mut token, &input, std::ptr::null_mut()) };
+        Self::from_startup(status, token)
+    }
+
+    /// The token of a startup that returned `status` (0 is success).
+    fn from_startup(status: i32, token: usize) -> Result<Self, String> {
         if status == 0 {
             Ok(Self(token))
         } else {
@@ -866,9 +866,10 @@ mod tests {
     }
 
     #[test]
-    fn gdi_plus_refuses_unknown_startup_versions() {
-        let Err(error) = GdiPlusToken::start_version(3) else {
-            panic!("GDI+ accepted input version 3");
+    fn a_failed_gdi_plus_startup_reports_its_status() {
+        // A failed startup has no token to shut down, so it is never wrapped in one.
+        let Err(error) = GdiPlusToken::from_startup(18, 0) else {
+            panic!("status 18 is a failure");
         };
         assert!(
             error.starts_with("GDI+ startup failed with status "),

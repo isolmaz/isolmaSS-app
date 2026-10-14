@@ -728,9 +728,9 @@ mod tests {
         );
 
         // `load` recovers the same way and hands back only the settings.
-        write_stored(&sandbox, b"[]");
+        write_stored(&sandbox, b"42");
         assert_eq!(Settings::load().unwrap(), Settings::default());
-        assert_eq!(std::fs::read(&backup).unwrap(), b"[]");
+        assert_eq!(std::fs::read(&backup).unwrap(), b"42");
     }
 
     #[test]
