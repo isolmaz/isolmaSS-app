@@ -322,7 +322,7 @@ fn standalone(chars: &[char], start: usize, end: usize) -> bool {
 }
 
 /// A candidate split into its groups of digits and the separators between them.
-struct Phone<'a> {
+pub(super) struct Phone<'a> {
     /// A `+` prefix or an area code in parentheses says the writer meant a phone number.
     formatted: bool,
     /// Starts with the `00` of an international call.
@@ -334,7 +334,7 @@ struct Phone<'a> {
 impl<'a> Phone<'a> {
     /// `span` starts with a digit, `+` or `(` that is followed by a digit. `None` when its
     /// parentheses or separators are not the ones a phone number is written with.
-    fn parse(span: &'a [char]) -> Option<Self> {
+    pub(super) fn parse(span: &'a [char]) -> Option<Self> {
         let plus = span[0] == '+';
         let open = span.iter().position(|&ch| ch == '(');
         let close = span.iter().position(|&ch| ch == ')');

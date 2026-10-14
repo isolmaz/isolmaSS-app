@@ -486,3 +486,14 @@ fn nothing_to_redact_says_so() {
         Resolution::Notice(t("No email addresses or phone numbers found").into())
     );
 }
+
+#[test]
+fn a_span_split_by_a_separator_no_phone_uses_is_not_one_number() {
+    let parse = |text: &str| {
+        let chars: Vec<char> = text.chars().collect();
+        super::matching::Phone::parse(&chars).is_some()
+    };
+    assert!(parse("0532 123 4567"));
+    assert!(!parse("0532 - 123 4567"));
+    assert!(!parse("0532--123 4567"));
+}

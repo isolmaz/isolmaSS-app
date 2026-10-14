@@ -303,20 +303,20 @@ pub(super) fn raw_clipboard_text() -> Option<String> {
     let text = unsafe {
         let handle = GetClipboardData(CF_UNICODETEXT).ok();
         let memory = handle.map(|handle| windows::Win32::Foundation::HGLOBAL(handle.0));
-        memory.and_then(|memory| {
-            let pointer = GlobalLock(memory);
-            if pointer.is_null() {
-                return None;
-            }
-            let units = std::slice::from_raw_parts(pointer.cast::<u16>(), GlobalSize(memory) / 2);
-            let end = units
-                .iter()
-                .position(|unit| *unit == 0)
-                .unwrap_or(units.len());
-            let text = String::from_utf16_lossy(&units[..end]);
-            let _ = GlobalUnlock(memory);
-            Some(text)
-        })
+        memory
+            .map(|memory| (memory, GlobalLock(memory)))
+            .filter(|(_, pointer)| !pointer.is_null())
+            .map(|(memory, pointer)| {
+                let units =
+                    std::slice::from_raw_parts(pointer.cast::<u16>(), GlobalSize(memory) / 2);
+                let end = units
+                    .iter()
+                    .position(|unit| *unit == 0)
+                    .unwrap_or(units.len());
+                let text = String::from_utf16_lossy(&units[..end]);
+                let _ = GlobalUnlock(memory);
+                text
+            })
     };
     unsafe {
         let _ = CloseClipboard();
