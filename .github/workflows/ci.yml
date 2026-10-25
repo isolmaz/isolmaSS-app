@@ -10,11 +10,11 @@ on:
 permissions:
   contents: read
 
-# A newer push to a pull request replaces its run. Runs on main are never cancelled: each
-# one tests only the commits of its own push.
+# A newer push to a pull request replaces its run. Each push to main has a group of its own,
+# so none is cancelled or dropped while pending: its plan tests only the commits of that push.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
