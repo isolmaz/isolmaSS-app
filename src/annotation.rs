@@ -128,13 +128,23 @@ pub enum AnnotationKind {
     },
 }
 
-/// Black or white, whichever reads better on a `fill` colour.
+/// Black or white for text on a `fill` colour: white while it keeps the WCAG AA contrast
+/// of 4.5:1 (from the relative luminance of the fill), black otherwise, which then always
+/// contrasts more.
 fn contrast_bgra(fill: [u8; 4]) -> [u8; 4] {
-    let brightness = (fill[2] as u32 * 299 + fill[1] as u32 * 587 + fill[0] as u32 * 114) / 1000;
-    if brightness > 140 {
-        [0, 0, 0, 255]
-    } else {
+    let linear = |channel: u8| {
+        let value = f64::from(channel) / 255.0;
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let luminance = 0.2126 * linear(fill[2]) + 0.7152 * linear(fill[1]) + 0.0722 * linear(fill[0]);
+    if 1.05 / (luminance + 0.05) >= 4.5 {
         [255, 255, 255, 255]
+    } else {
+        [0, 0, 0, 255]
     }
 }
 
@@ -2478,9 +2488,14 @@ mod tests {
         let black = [0, 0, 0, 255];
         for (fill, ink) in [
             ([0, 0, 0, 255], white),
+            // Palette red keeps white at 4.5:1; orange and green would give white only
+            // 3.0:1 and 3.4:1, black 6.9:1 and 6.1:1.
             ([49, 49, 224, 255], white),
-            ([140, 140, 140, 255], white),
-            ([141, 141, 141, 255], black),
+            ([7, 103, 247, 255], black),
+            ([68, 158, 47, 255], black),
+            // The gray where white drops below 4.5:1.
+            ([118, 118, 118, 255], white),
+            ([119, 119, 119, 255], black),
             ([0, 200, 255, 255], black),
             ([255, 255, 255, 255], black),
             // Green weighs far more than blue: full green is light, full blue is dark.

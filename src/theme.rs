@@ -503,13 +503,15 @@ pub const DWMWA_USE_IMMERSIVE_DARK_MODE: i32 = 20;
 /// The same attribute under its pre-2004 number.
 const DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_2004: i32 = 19;
 
-fn log_once(flag: &AtomicBool, message: &str) {
-    if flag
+/// Records `message` only the first time `flag` is raised; returns whether it did.
+fn log_once(flag: &AtomicBool, message: &str) -> bool {
+    let first = flag
         .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-        .is_ok()
-    {
+        .is_ok();
+    if first {
         crate::diagnostics::record("theme", message);
     }
+    first
 }
 
 /// True when the OS understands [`DWMWA_SYSTEMBACKDROP_TYPE`] (Windows 11

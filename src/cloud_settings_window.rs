@@ -87,13 +87,14 @@ fn account_guidance(cloud_url: Option<&str>) -> String {
     }
 }
 
-/// Worker setting and the factor between the stored value and the shown one.
+/// Worker setting and the factor between the stored value and the shown one. Storage is in
+/// decimal megabytes because the Worker's free-plan ceiling is 800,000,000 bytes.
 const LIMITS: [(&str, u64); 7] = [
     ("max_active", 1),
     ("daily_upload_limit", 1),
     ("daily_view_limit", 1),
     ("max_image_bytes", 1024 * 1024),
-    ("max_storage_bytes", 1024 * 1024),
+    ("max_storage_bytes", 1_000_000),
     ("retention_days", 1),
     ("warning_percent", 1),
 ];
@@ -1070,7 +1071,7 @@ fn show_stats(hwnd: HWND, state: &mut State, stats: &Value, images: &Value) {
             &count(monthly, "uploads"),
             &count(monthly, "views"),
             &count(stored, "active"),
-            &format!("{:.1}", usage as f64 / 1_048_576.0),
+            &format!("{:.1}", usage as f64 / 1_000_000.0),
         ]),
     );
     for (index, (field, multiplier)) in LIMITS.iter().enumerate() {
@@ -2597,6 +2598,20 @@ mod tests {
             assert!(parts.background.bottom <= row.bottom - scale(3, dpi));
             assert!(parts.text.left > parts.pill.right);
         }
+    }
+
+    #[test]
+    fn the_storage_field_round_trips_the_worker_default_of_800_mb() {
+        assert!(
+            include_str!("../cloudflare/worker.mjs")
+                .contains("const FREE_STORAGE_BYTES = 800_000_000;")
+        );
+        let (_, factor) = LIMITS
+            .into_iter()
+            .find(|(field, _)| *field == "max_storage_bytes")
+            .expect("a storage field");
+        assert_eq!(800_000_000 / factor, 800, "shown as 800");
+        assert_eq!(800 * factor, 800_000_000, "800 is saved as the default");
     }
 
     #[test]

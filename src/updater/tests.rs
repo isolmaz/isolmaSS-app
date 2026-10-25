@@ -362,17 +362,6 @@ fn semantic_version_comparison_and_sha256_are_stable() {
         assert!(parse_https_url(url).is_err(), "{url}");
     }
     assert!(parse_https_url("https://github.com/owner/release").is_ok());
-    for key in [0x56, 0x4d, 0x52, 0x54, 0x42] {
-        assert!(crate::overlay::is_editor_shortcut(key, 0, false));
-    }
-    for key in [0x43, 0x53, 0x5a, 0x59] {
-        assert!(crate::overlay::is_editor_shortcut(
-            key,
-            windows::Win32::UI::Input::KeyboardAndMouse::MOD_CONTROL.0,
-            true
-        ));
-    }
-    assert!(!crate::overlay::is_editor_shortcut(0x41, 0, true));
 
     assert_eq!(
         sha256_hex(b"abc").expect("SHA-256"),

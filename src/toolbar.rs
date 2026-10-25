@@ -1200,7 +1200,7 @@ mod tests {
     }
 
     #[test]
-    fn wheel_flips_above_when_the_work_area_ends_below() {
+    fn the_wheel_stays_inside_a_work_area_that_ends_below_the_selection() {
         let viewport = Rect::new(0, 0, 1920, 1040);
         let toolbar = layout_with_wheel(Rect::new(200, 100, 800, 1000), viewport, true);
         let wheel = toolbar.wheel_bounds.expect("wheel open");

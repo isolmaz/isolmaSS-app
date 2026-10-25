@@ -22,10 +22,7 @@ pub fn read_text(owner: HWND) -> Result<String> {
     if unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT_FORMAT) }.is_err() {
         return Ok(String::new());
     }
-    unsafe {
-        OpenClipboard(owner)?;
-    }
-    let _clipboard = ClipboardGuard;
+    let _clipboard = open(owner)?;
     let handle = unsafe { GetClipboardData(CF_UNICODETEXT_FORMAT)? };
     let memory = HGLOBAL(handle.0);
     let full_size = unsafe { GlobalSize(memory) };
@@ -62,6 +59,22 @@ pub fn read_text(owner: HWND) -> Result<String> {
 }
 
 pub(crate) struct ClipboardGuard;
+
+/// Opens the clipboard for `owner`. Clipboard managers and Remote Desktop hold it for a
+/// few milliseconds after every change, so a refusal is retried for about 0.2 s.
+fn open(owner: HWND) -> Result<ClipboardGuard> {
+    let mut attempts = 1;
+    loop {
+        match unsafe { OpenClipboard(owner) } {
+            Ok(()) => return Ok(ClipboardGuard),
+            Err(error) if attempts == 10 => return Err(error),
+            Err(_) => {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+        }
+    }
+}
 
 struct GlobalMemory(HGLOBAL);
 
@@ -213,10 +226,7 @@ pub fn copy_dib_to_clipboard(hwnd: Option<HWND>, dib_data: &[u8]) -> Result<()> 
     }
 
     // 3. Set clipboard data
-    unsafe {
-        OpenClipboard(owner)?;
-    }
-    let _clip_guard = ClipboardGuard;
+    let _clip_guard = open(owner)?;
 
     unsafe {
         EmptyClipboard()?;
@@ -276,13 +286,37 @@ pub fn copy_text_to_clipboard(hwnd: Option<HWND>, text: &str) -> Result<()> {
     unsafe {
         std::ptr::copy_nonoverlapping(encoded.as_ptr(), pointer.cast::<u16>(), encoded.len());
         let _ = GlobalUnlock(memory);
-        OpenClipboard(owner)?;
     }
-    let _clipboard = ClipboardGuard;
+    let _clipboard = open(owner)?;
     unsafe {
         EmptyClipboard()?;
         SetClipboardData(CF_UNICODETEXT_FORMAT, HANDLE(memory.0))?;
     }
     allocation.0 = HGLOBAL::default(); // Windows now owns the allocation.
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_clipboard_held_briefly_by_another_program_is_waited_for() {
+        let (held_tx, held) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            unsafe { OpenClipboard(None) }.expect("the test holds the clipboard");
+            held_tx.send(()).expect("the test is waiting");
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            unsafe {
+                let _ = CloseClipboard();
+            }
+        });
+        held.recv().expect("the holder opened the clipboard");
+        copy_text_to_clipboard(None, "copied after the wait").expect("copied once it is free");
+        holder.join().expect("the holder finished");
+        assert_eq!(
+            read_text(HWND::default()).expect("readable"),
+            "copied after the wait"
+        );
+    }
 }

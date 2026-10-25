@@ -1408,6 +1408,8 @@ mod tests {
     #[test]
     fn a_window_without_an_input_context_is_left_alone() {
         let state = edit("abc");
+        let context = unsafe { ime::ImmGetContext(HWND::default()) };
+        assert!(context.is_null(), "no window, so no input context to place");
         state.place_ime_window(HWND::default());
     }
 }

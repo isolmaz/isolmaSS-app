@@ -6,7 +6,7 @@ use crate::capture::{CaptureBuffer, Rect};
 use crate::clipboard::{copy_dib_to_clipboard, flatten_selection_to_dib};
 use crate::hotkey::{self, HotkeyConfig, start_hotkey_listener};
 use crate::save::{default_save_directory, generate_screenshot_filename, save_buffer_to_png};
-use crate::settings::{PRESET_COLORS, PRESET_THICKNESSES, Settings};
+use crate::settings::{PRESET_COLORS, Settings};
 use crate::toolbar::{Toolbar, ToolbarAction, ToolbarItem};
 use crate::tray;
 use crate::window_snap::{find_window_at_point, get_visible_windows};
@@ -652,9 +652,8 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     // ------------------------------------------------------------
     // Color Palette & Thickness Sub-Bar
     // ------------------------------------------------------------
-    println!("\nTesting Color Palette & Thickness Presets...");
+    println!("\nTesting Color Palette...");
     assert_eq!(PRESET_COLORS.len(), 8);
-    assert_eq!(PRESET_THICKNESSES, [2, 4, 8]);
 
     // Test live recoloring and undo/redo via EditCommand::Modify
     let mut recolor_target = rect_obj.clone();

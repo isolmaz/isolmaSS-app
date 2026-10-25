@@ -513,6 +513,7 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
                         let _ = KillTimer(tray::window_handle(), CAPTURE_TIMER);
                     }
                     scheduled = None;
+                    tray::capture_finished();
                     exit_requested = true;
                 }
             }
@@ -540,6 +541,12 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
         if running && !exit_requested {
             updater::poll(tray::window_handle(), true);
             save::recent::refresh(&settings.save_directory);
+        }
+        // A command queued while the editor, Settings or a dialog above ran had its wake-up
+        // taken by that window's message loop; without a new one the loop would wait for
+        // unrelated input.
+        if tray::has_commands() {
+            tray::notify_tray_wakeup();
         }
     }
     unsafe {

@@ -57,6 +57,11 @@ struct UploadReceipt {
     url: String,
 }
 
+/// `%TEMP%\isolmaSS\upload`, where encoded screenshots wait for their upload card.
+pub fn staging_directory() -> PathBuf {
+    std::env::temp_dir().join("isolmaSS").join("upload")
+}
+
 /// Encodes the already-flattened editor selection to a private temporary file.
 pub fn prepare(
     pixels: &[u8],
@@ -70,23 +75,30 @@ pub fn prepare(
     })?;
     let credentials = cloudflare_setup::load_credentials(origin)?;
     let unique = cloudflare_setup::generate_token()?;
-    let output = std::env::temp_dir().join(format!(
+    let directory = staging_directory();
+    let output = directory.join(format!(
         "isolmass-upload-{unique}.{}",
         settings.save_format.extension()
     ));
     let file = Arc::new(TemporaryScreenshot(output.clone()));
-    let bytes = save_buffer_to_image(
-        pixels,
-        width,
-        height,
-        selection,
-        &output,
-        settings.save_format,
-        settings.jpeg_quality,
-    )
-    .and_then(|_| std::fs::metadata(&output).map_err(crate::save::describe))
-    .map_err(|error| crate::i18n::tf("Could not prepare the screenshot for upload: {}", &[&error]))?
-    .len();
+    let bytes = std::fs::create_dir_all(&directory)
+        .map_err(crate::save::describe)
+        .and_then(|_| {
+            save_buffer_to_image(
+                pixels,
+                width,
+                height,
+                selection,
+                &output,
+                settings.save_format,
+                settings.jpeg_quality,
+            )
+        })
+        .and_then(|_| std::fs::metadata(&output).map_err(crate::save::describe))
+        .map_err(|error| {
+            crate::i18n::tf("Could not prepare the screenshot for upload: {}", &[&error])
+        })?
+        .len();
     Ok(Prepared {
         file,
         bytes,
@@ -269,7 +281,7 @@ mod tests {
         let path = prepared.file.0.clone();
         assert_eq!(prepared.path(), path.as_path());
         assert_eq!(prepared.extension(), "png");
-        assert_eq!(path.parent(), Some(std::env::temp_dir().as_path()));
+        assert_eq!(path.parent(), Some(staging_directory().as_path()));
         let name = path.file_name().unwrap().to_str().unwrap();
         assert!(
             name.starts_with("isolmass-upload-") && name.ends_with(".png"),
