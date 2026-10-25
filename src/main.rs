@@ -513,9 +513,15 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
                         let _ = KillTimer(tray::window_handle(), CAPTURE_TIMER);
                     }
                     scheduled = None;
+                    tray::capture_finished();
                     exit_requested = true;
                 }
             }
+        }
+        // A command queued while the editor or Settings ran had its wake-up taken by that
+        // window's message loop; without a new one the loop would wait for unrelated input.
+        if tray::has_commands() {
+            tray::notify_tray_wakeup();
         }
         if exit_requested && !toast::upload_in_flight() {
             running = false;

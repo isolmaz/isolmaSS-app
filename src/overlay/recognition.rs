@@ -43,9 +43,10 @@ impl RecognitionState {
 impl OverlayState {
     /// Reads the selection as the export renders it and recognizes its text in the
     /// background; the result returns as `WM_EDITOR_RECOGNIZED`. Nothing happens without a
-    /// selection or while an earlier recognition is still running.
+    /// finished selection (not one still being dragged) or while an earlier recognition is
+    /// still running.
     pub(super) fn start_recognition(&mut self, hwnd: HWND, intent: Intent) {
-        if self.recognition.job.is_some() {
+        if self.recognition.job.is_some() || self.mode != OverlayMode::SelectionActive {
             return;
         }
         let Some(selection) = self.committed_selection else {

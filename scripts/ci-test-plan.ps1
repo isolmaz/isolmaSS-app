@@ -48,6 +48,10 @@ foreach ($file in $changed) {
         if ($file -match $pattern) { $everything = $true }
     }
     if ($file -like 'cloudflare/*') { $worker = $true }
+    # The app embeds the Worker source, and these modules test what they read from it.
+    if ($file -eq 'cloudflare/worker.mjs') {
+        foreach ($name in 'cloudflare_oauth', 'cloud_settings_window') { [void]$selected.Add($name) }
+    }
     if ($file -match '^src/([^/]+?)(\.rs)?(/.*)?$') {
         $name = $Matches[1]
         if ($file -like '*.rs') { $sourceChanged = $true }

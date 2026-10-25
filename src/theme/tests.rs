@@ -392,9 +392,9 @@ fn the_windows_build_number_gates_the_system_backdrop() {
 #[test]
 fn a_diagnostic_flag_reports_once() {
     let flag = AtomicBool::new(false);
-    log_once(&flag, "first report");
+    assert!(log_once(&flag, "first report"));
     assert!(flag.load(Ordering::Relaxed));
-    log_once(&flag, "second report");
+    assert!(!log_once(&flag, "second report"), "already reported");
     assert!(flag.load(Ordering::Relaxed));
 }
 

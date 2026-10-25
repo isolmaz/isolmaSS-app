@@ -36,7 +36,6 @@ Var WaitPid
 Var ProcessHandle
 Var WaitResult
 Var PreviousVersion
-Var Restored
 Var WasRunning
 
 ; MUI Configuration
@@ -348,7 +347,6 @@ Function LaunchApplication
 FunctionEnd
 
 Function .onInstFailed
-  StrCpy $Restored "0"
   ${If} $Activated == "1"
     Delete "$INSTDIR\isolmass.exe"
     ${If} $HadPrevious == "1"
@@ -356,20 +354,18 @@ Function .onInstFailed
       Rename "$INSTDIR\isolmass.previous.exe" "$INSTDIR\isolmass.exe"
       ${If} ${Errors}
         MessageBox MB_ICONSTOP|MB_OK "$(ErrRestoreFailed)" /SD IDOK
-      ${Else}
-        StrCpy $Restored "1"
-        ${If} $PreviousVersion != ""
-          WriteRegStr HKCU "${PRODUCT_UNINST_KEY}" "DisplayVersion" "$PreviousVersion"
-        ${EndIf}
+      ${ElseIf} $PreviousVersion != ""
+        WriteRegStr HKCU "${PRODUCT_UNINST_KEY}" "DisplayVersion" "$PreviousVersion"
       ${EndIf}
     ${EndIf}
   ${EndIf}
   ${If} $IsUpdate == "1"
     System::Call 'user32::MessageBoxW(p 0, w "$(UpdateFailedText)", w "$(UpdateFailedTitle)", i 0x10) i .r0'
-    ${If} $Restored == "1"
-      Exec '"$INSTDIR\isolmass.exe"'
-    ${EndIf}
-  ${ElseIf} $WasRunning == "1"
+  ${EndIf}
+  ; The app quit for this run. Start the version in place again, whether it was rolled back
+  ; or the update failed before replacing it (staging, backup or activation).
+  ${If} $IsUpdate == "1"
+  ${OrIf} $WasRunning == "1"
     FindWindow $0 "isolmaSS_TrayClass"
     ${If} $0 == 0
     ${AndIf} ${FileExists} "$INSTDIR\isolmass.exe"

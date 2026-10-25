@@ -127,6 +127,8 @@ fn phone_numbers_are_found_in_the_usual_notations() {
         (vec!["+49", "(0)", "30", "1234567"], 3),
         (vec!["1", "800", "555", "0199"], 3),
         (vec!["0532", "123", "45", "67", "(call", "me)"], 3),
+        (vec!["612", "345", "678"], 2),
+        (vec!["612.345.678"], 0),
     ] {
         assert_eq!(found(&words), vec![around(&words, 0, last)], "{words:?}");
     }
@@ -191,6 +193,12 @@ fn dates_times_ranges_amounts_versions_and_other_figures_are_not_phone_numbers()
     ] {
         assert!(found(&words).is_empty(), "{words:?}");
     }
+}
+
+#[test]
+fn a_run_of_digits_too_long_for_any_number_is_not_read_as_a_date() {
+    // 25 digits do not fit a u64; only the lengths may decide that this is no date.
+    assert!(found(&["1234567890123456789012345.4.5"]).is_empty());
 }
 
 #[test]

@@ -145,6 +145,14 @@ pub fn queue_command(command: TrayCommand) {
     notify_tray_wakeup();
 }
 
+/// Whether commands wait for the daemon message loop.
+pub fn has_commands() -> bool {
+    !PENDING_COMMANDS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .is_empty()
+}
+
 /// Moves every pending command out for the daemon message loop. Commands are
 /// taken under the lock so running one may safely open a nested modal loop.
 pub fn take_commands() -> Vec<TrayCommand> {
@@ -618,6 +626,16 @@ mod tests {
         queue_last_region_capture(Instant::now());
         assert!(take_commands().is_empty(), "one capture waits at a time");
         capture_finished();
+    }
+
+    #[test]
+    fn queued_commands_are_reported_until_taken() {
+        take_commands();
+        assert!(!has_commands());
+        assert!(push_pending(TrayCommand::Exit));
+        assert!(has_commands());
+        assert_eq!(take_commands(), [TrayCommand::Exit]);
+        assert!(!has_commands());
     }
 
     #[test]

@@ -6,7 +6,7 @@ Bug reports and pull requests are welcome.
 
 - **Never attach real screenshots, Worker URLs, keys, `cloud-credentials.bin` or logs with private paths.** Use a demo window or crop.
 - Security problems go privately to the address in [SECURITY.md](SECURITY.md), not to an issue.
-- Include the version (tray menu or Settings › Updates), Windows version, display scaling and monitor layout.
+- Include the version (Settings › Updates), Windows version, display scaling and monitor layout.
 
 ## Pull requests
 
@@ -19,7 +19,7 @@ Bug reports and pull requests are welcome.
 
    Locally this is only `cargo fmt --check`, Clippy with warnings as errors (`cargo clippy --all-targets --locked -- -D warnings`) and `node --check cloudflare/worker.mjs`.
 
-   CI (`.github/workflows/ci.yml`, on pushes to `main` and pull requests against any branch) runs small separate jobs: `fmt`, `clippy`, `worker`, a `build` job that uploads an unsigned `isolmass-<short sha>` artifact for reviewers, and `test`. `scripts/ci-test-plan.ps1` picks the `test` jobs from the files the pull request changes: `src/<module>.rs` or `src/<module>/…` runs the `<module>::` tests, any changed Rust source also runs `i18n::` (it scans all sources), and changes to `Cargo.toml`, `Cargo.lock`, `build.rs`, `rust-toolchain.toml`, `resources/`, `src/main.rs`, `src/theme.rs`, `src/drawing.rs`, the workflows or the plan script run every module. Changes under `cloudflare/` run the `worker` job. The workflows must stay free of secrets, packaging, signing and release steps.
+   CI (`.github/workflows/ci.yml`, on pushes to `main` and pull requests against any branch) runs small separate jobs: `fmt`, `clippy`, `worker`, a `build` job that uploads an unsigned `isolmass-<short sha>` artifact for reviewers, and `test`. `scripts/ci-test-plan.ps1` picks the `test` jobs from the files the pull request changes: `src/<module>.rs` or `src/<module>/…` runs the `<module>::` tests, any changed Rust source also runs `i18n::` (it scans all sources), and changes to `Cargo.toml`, `Cargo.lock`, `build.rs`, `rust-toolchain.toml`, `resources/`, `src/main.rs`, `src/theme.rs`, `src/drawing.rs`, the workflows or the plan script run every module. Changes under `cloudflare/` run the `worker` job; a change to `cloudflare/worker.mjs` also runs `cloudflare_oauth::` and `cloud_settings_window::`, which test the source the app embeds. The workflows must stay free of secrets, packaging, signing and release steps.
 
    If a test fails in CI, re-run just that test locally by name:
 

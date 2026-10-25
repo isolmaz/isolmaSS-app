@@ -74,17 +74,6 @@ fn main() {
     let resources = manifest_dir.join("resources");
     let output = PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo must provide OUT_DIR"))
         .join("app.res");
-    if let Ok(pins) = std::env::var("ISOLMASS_UPDATE_PUBLIC_KEYS") {
-        assert!(
-            pins.is_empty()
-                || pins.split(';').count() <= 8
-                    && pins
-                        .split(';')
-                        .all(|pin| pin.len() == 64
-                            && pin.bytes().all(|byte| byte.is_ascii_hexdigit())),
-            "ISOLMASS_UPDATE_PUBLIC_KEYS must contain at most eight semicolon-separated SHA-256 public-key digests"
-        );
-    }
     let version = std::env::var("CARGO_PKG_VERSION").expect("Cargo package version");
     let numeric = format!("{},0", version.replace('.', ","));
     let generated = output.with_extension("rc");
@@ -159,7 +148,6 @@ END
 
     println!("cargo:rerun-if-env-changed=RC");
     println!("cargo:rerun-if-env-changed=WindowsSdkDir");
-    println!("cargo:rerun-if-env-changed=ISOLMASS_UPDATE_PUBLIC_KEYS");
     println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-changed=resources/app.rc");
     println!("cargo:rerun-if-changed=resources/app.ico");

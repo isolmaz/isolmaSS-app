@@ -733,4 +733,12 @@ fn shortcut_keys_depend_on_modifiers_and_text_editing() {
     assert!(is_editor_shortcut(0x52, 0, false));
     assert!(!is_editor_shortcut(0x52, 0, true));
     assert!(!is_editor_shortcut(0x51, 0, false));
+    for vk in [0x56, 0x4d, 0x54, 0x42] {
+        assert!(is_editor_shortcut(vk, 0, false), "vk {vk:#x}");
+    }
+    assert!(!is_editor_shortcut(0x41, 0, true));
+    // Ctrl+C, S, Z and Y stay commands inside a text box.
+    for vk in [0x43, 0x53, 0x5a, 0x59] {
+        assert!(is_editor_shortcut(vk, MOD_CONTROL.0, true), "vk {vk:#x}");
+    }
 }

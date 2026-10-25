@@ -166,9 +166,12 @@ fn remove_older_than(directory: &Path, now: SystemTime, max_age: Duration) -> us
         .count()
 }
 
-/// Removes the dragged copies that are a day old, whichever card or session made them.
+/// Removes the dragged copies that are a day old, whichever card or session made them, and
+/// the encoded uploads of the same age that a card could not delete because the app ended.
 pub fn sweep() -> usize {
-    remove_older_than(&directory(), SystemTime::now(), KEEP)
+    let now = SystemTime::now();
+    remove_older_than(&directory(), now, KEEP)
+        + remove_older_than(&crate::upload::staging_directory(), now, KEEP)
 }
 
 /// [`sweep`] on a background thread, for the UI thread; the thread returns the count.
@@ -521,6 +524,23 @@ mod tests {
         assert!(beside.exists());
         std::fs::remove_file(&fresh).unwrap();
         std::fs::remove_file(&beside).unwrap();
+    }
+
+    #[test]
+    fn the_sweep_clears_a_stale_upload_left_behind_by_an_ended_app() {
+        let folder = crate::upload::staging_directory();
+        std::fs::create_dir_all(&folder).unwrap();
+        let name = format!("isolmass-upload-sweep-test-{}", std::process::id());
+        let stale = folder.join(format!("{name}-stale.png"));
+        let fresh = folder.join(format!("{name}-fresh.png"));
+        std::fs::write(&stale, b"image").unwrap();
+        std::fs::write(&fresh, b"image").unwrap();
+        age(&stale, KEEP * 2);
+
+        assert!(sweep() >= 1);
+        assert!(!stale.exists());
+        assert!(fresh.exists(), "an upload card may still be using it");
+        std::fs::remove_file(&fresh).unwrap();
     }
 
     #[test]

@@ -393,9 +393,10 @@ impl<'a> Phone<'a> {
                     .iter()
                     .all(|group| (2..=4).contains(&group.len()))
                 && !self.is_ipv4());
-        // 12.345.678 or 1 234 567: an amount with thousands separators.
+        // 12.345.678 or 1 234 567: an amount with thousands separators. Three-digit groups
+        // throughout (612 345 678) are how many countries write phone numbers, so they stay.
         let thousands = (dotted || self.only(' '))
-            && self.groups[0].len() <= 3
+            && self.groups[0].len() <= 2
             && self.groups[1..].iter().all(|group| group.len() == 3);
         // Only the first group may be a single digit: "1 2 3 4 5 6 7" is a list, not a number.
         self.groups[1..].iter().all(|group| group.len() >= 2)
@@ -457,15 +458,18 @@ impl<'a> Phone<'a> {
 
 /// Whether three groups of digits read as day, month and year in either order.
 fn is_date(a: &[char], b: &[char], c: &[char]) -> bool {
-    let (x, y, z) = (number(a), number(b), number(c));
+    // The values are read only once the lengths match: a longer run of digits would overflow.
+    let values = || (number(a), number(b), number(c));
     match (a.len(), b.len(), c.len()) {
         (1..=2, 1..=2, 4) => {
+            let (x, y, z) = values();
             (1900..=2099).contains(&z)
                 && (1..=31).contains(&x)
                 && (1..=31).contains(&y)
                 && x.min(y) <= 12
         }
         (4, 1..=2, 1..=2) => {
+            let (x, y, z) = values();
             (1900..=2099).contains(&x) && (1..=12).contains(&y) && (1..=31).contains(&z)
         }
         _ => false,

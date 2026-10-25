@@ -22,8 +22,6 @@ pub const PRESET_COLORS: [[u8; 4]; 8] = [
     [41, 37, 33, 255],    // Black (#212529)
 ];
 
-pub const PRESET_THICKNESSES: [i32; 3] = [2, 4, 8];
-
 fn default_true() -> bool {
     true
 }

@@ -162,6 +162,17 @@ fn ctrl_shift_c_copies_the_text_of_the_selection() {
 }
 
 #[test]
+fn a_selection_still_being_dragged_is_not_recognized() {
+    let window = TestWindow::new();
+    let (mut state, engine) = state_with(Ok(vec![word("Hello", 0.0, 0.0, 30.0, 10.0)]));
+    state.mode = OverlayMode::DraggingSelection;
+    press(&mut state, &window, 'c', CTRL | SHIFT);
+    press(&mut state, &window, 'r', CTRL | SHIFT);
+    assert!(state.recognition.job.is_none());
+    assert!(engine.seen.lock().unwrap().is_empty());
+}
+
+#[test]
 fn copying_text_closes_the_editor_when_asked_to() {
     let window = TestWindow::new();
     let (mut state, _) = state_with(Ok(vec![word("Hello", 0.0, 0.0, 30.0, 10.0)]));

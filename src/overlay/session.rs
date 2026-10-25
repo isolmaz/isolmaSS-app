@@ -113,6 +113,20 @@ fn run_session(
     let width = capture.width;
     let height = capture.height;
 
+    // Loaded before any GDI object exists: the guards below cannot free a bitmap that is
+    // still selected into its DC.
+    let settings = Settings::load().map_err(|error| {
+        let hresult = match error.raw_os_error() {
+            Some(code) => windows::core::HRESULT::from_win32(code as u32),
+            None => windows::core::HRESULT(-1),
+        };
+        windows::core::Error::new(
+            hresult,
+            format!("could not load settings for the capture overlay: {error}"),
+        )
+    })?;
+    crate::i18n::set_preference(settings.language);
+
     let screen_dc = unsafe { GetDC(HWND::default()) };
     if screen_dc.is_invalid() {
         return Err(windows::core::Error::from_win32());
@@ -158,17 +172,6 @@ fn run_session(
         std::ptr::copy_nonoverlapping(capture.dimmed.as_ptr(), bits_ptr as *mut u8, buffer_bytes);
     }
 
-    let settings = Settings::load().map_err(|error| {
-        let hresult = match error.raw_os_error() {
-            Some(code) => windows::core::HRESULT::from_win32(code as u32),
-            None => windows::core::HRESULT(-1),
-        };
-        windows::core::Error::new(
-            hresult,
-            format!("could not load settings for the capture overlay: {error}"),
-        )
-    })?;
-    crate::i18n::set_preference(settings.language);
     let active_color = settings.default_color;
     let active_thickness = settings.default_thickness;
     let active_tool = initial_tool(settings.last_tool);
