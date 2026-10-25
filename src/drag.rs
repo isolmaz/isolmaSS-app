@@ -503,7 +503,7 @@ mod tests {
     }
 
     #[test]
-    fn the_sweep_clears_a_stale_copy_from_the_drag_folder_and_nothing_beside_it() {
+    fn the_sweep_clears_a_stale_copy_from_the_drag_folder_but_not_from_its_parent() {
         let folder = directory();
         std::fs::create_dir_all(&folder).unwrap();
         let name = format!("sweep-test-{}", std::process::id());

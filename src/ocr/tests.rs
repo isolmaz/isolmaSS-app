@@ -196,6 +196,15 @@ fn dates_times_ranges_amounts_versions_and_other_figures_are_not_phone_numbers()
 }
 
 #[test]
+fn amounts_written_in_three_digit_groups_are_covered_like_phone_numbers() {
+    let whole = ["100", "000", "000"];
+    assert_eq!(found(&whole), vec![around(&whole, 0, 2)]);
+    // With its single leading digit the whole is an amount; the nine digits after it are not.
+    let longer = ["1", "234", "567", "890"];
+    assert_eq!(found(&longer), vec![around(&longer, 1, 3)]);
+}
+
+#[test]
 fn a_run_of_digits_too_long_for_any_number_is_not_read_as_a_date() {
     // 25 digits do not fit a u64; only the lengths may decide that this is no date.
     assert!(found(&["1234567890123456789012345.4.5"]).is_empty());
